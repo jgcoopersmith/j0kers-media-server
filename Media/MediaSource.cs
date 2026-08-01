@@ -89,6 +89,16 @@ public static class G711
     private const int Bias = 0x84;
     private const int Clip = 32635;
 
+    public static short UlawToLinear(byte ulaw)
+    {
+        ulaw = (byte)~ulaw;
+        var sign = ulaw & 0x80;
+        var exponent = (ulaw >> 4) & 0x07;
+        var mantissa = ulaw & 0x0F;
+        var magnitude = (((mantissa << 3) + Bias) << exponent) - Bias;
+        return (short)(sign != 0 ? -magnitude : magnitude);
+    }
+
     public static byte LinearToUlaw(short pcm)
     {
         var sign = (pcm >> 8) & 0x80;

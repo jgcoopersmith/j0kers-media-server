@@ -86,8 +86,11 @@ public sealed class ControlApi : IDisposable
 
             if (_config.AuthToken.Length > 0)
             {
+                // ?token= is accepted as an alternative to the Authorization
+                // header because <audio> elements cannot set request headers.
                 var auth = ctx.Request.Headers["Authorization"];
-                if (auth != $"Bearer {_config.AuthToken}")
+                var queryToken = ctx.Request.QueryString["token"];
+                if (auth != $"Bearer {_config.AuthToken}" && queryToken != _config.AuthToken)
                 {
                     WriteJson(res, 401, new { error = "unauthorized" });
                     return;
@@ -188,9 +191,10 @@ public sealed class ControlApi : IDisposable
     }
 
     /// <summary>
-    /// Streams a mount's audio as raw G.711 µ-law (8 kHz mono) in real time,
-    /// paced at 20 ms frames, until the client disconnects. The dashboard
-    /// decodes it with Web Audio; browsers cannot consume RTSP directly.
+    /// Streams a mount's audio as a live WAV file (16-bit PCM, 8 kHz mono)
+    /// with an open-ended length, paced in real time until the client
+    /// disconnects. A plain &lt;audio&gt; element can play this natively —
+    /// browsers cannot consume RTSP directly.
     /// </summary>
     private void StreamPreview(HttpListenerContext ctx)
     {
@@ -218,18 +222,43 @@ public sealed class ControlApi : IDisposable
 
         Log.Info("control", $"preview started: {mount.Path} for {ctx.Request.RemoteEndPoint}");
         res.StatusCode = 200;
-        res.ContentType = "application/octet-stream";
-        res.SendChunked = true;
+        res.ContentType = "audio/wav";
+        // Identity-encoded delivery with an absurdly large advertised length:
+        // browsers treat it as a huge WAV download and start playing right
+        // away, whereas chunked live WAV stalls in the buffering heuristics.
+        // (HttpListener demands either SendChunked or a Content-Length; with
+        // neither it closes the response as Content-Length: 0.)
+        res.SendChunked = false;
+        res.KeepAlive = false;
+        res.ContentLength64 = 0x7FFFFFF0; // ~2 GiB ≈ 37 hours of 8 kHz PCM16
         res.Headers["Cache-Control"] = "no-store";
 
-        var frame = new byte[Media.MediaSourceFactory.FrameSamples];
-        var nextTick = Environment.TickCount64;
+        var ulaw = new byte[Media.MediaSourceFactory.FrameSamples];
+        var pcm = new byte[ulaw.Length * 2];
         try
         {
+            res.OutputStream.Write(BuildWavHeader(res.ContentLength64));
+
+            void WriteFrame()
+            {
+                source.NextFrame(ulaw);
+                for (var i = 0; i < ulaw.Length; i++)
+                {
+                    var s = Media.G711.UlawToLinear(ulaw[i]);
+                    pcm[i * 2] = (byte)(s & 0xFF);
+                    pcm[i * 2 + 1] = (byte)((s >> 8) & 0xFF);
+                }
+                res.OutputStream.Write(pcm);
+            }
+
+            // 1 s preroll burst so the browser's decoder reaches "can play"
+            // immediately instead of trickle-buffering at the live rate.
+            for (var i = 0; i < 50; i++) WriteFrame();
+
+            var nextTick = Environment.TickCount64;
             while (!_cts.IsCancellationRequested)
             {
-                source.NextFrame(frame);
-                res.OutputStream.Write(frame);
+                WriteFrame();
                 nextTick += 20;
                 var delay = nextTick - Environment.TickCount64;
                 if (delay > 0) Thread.Sleep((int)delay);
@@ -243,6 +272,32 @@ public sealed class ControlApi : IDisposable
         {
             Log.Info("control", $"preview ended: {mount.Path}");
         }
+    }
+
+    /// <summary>Canonical 44-byte WAV header sized to match the advertised body length.</summary>
+    private static byte[] BuildWavHeader(long totalLength)
+    {
+        const int sampleRate = Media.MediaSourceFactory.SampleRate;
+        const short channels = 1, bitsPerSample = 16;
+        const int byteRate = sampleRate * channels * bitsPerSample / 8;
+
+        using var ms = new MemoryStream(44);
+        using var w = new BinaryWriter(ms);
+        w.Write("RIFF"u8);
+        w.Write((uint)(totalLength - 8));
+        w.Write("WAVE"u8);
+        w.Write("fmt "u8);
+        w.Write(16);                          // fmt chunk size
+        w.Write((short)1);                    // PCM
+        w.Write(channels);
+        w.Write(sampleRate);
+        w.Write(byteRate);
+        w.Write((short)(channels * bitsPerSample / 8)); // block align
+        w.Write(bitsPerSample);
+        w.Write("data"u8);
+        w.Write((uint)(totalLength - 44));
+        w.Flush();
+        return ms.ToArray();
     }
 
     private void WriteJson(HttpListenerResponse res, int status, object body, bool redactToken = false)

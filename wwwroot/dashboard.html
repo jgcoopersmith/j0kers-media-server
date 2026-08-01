@@ -180,6 +180,15 @@
     <div class="card">
       <h2>RTSP mounts</h2>
       <div id="mounts"></div>
+      <div id="mountplayer" style="display:none;margin-top:12px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="flex:1;height:8px;border-radius:4px;background:var(--surface-2);overflow:hidden">
+            <div id="vu" style="height:100%;width:0%;background:linear-gradient(90deg,var(--good),var(--warning));transition:width 80ms linear"></div>
+          </div>
+          <input id="vol" type="range" min="0" max="1" step="0.05" value="0.8" style="width:110px">
+        </div>
+        <div id="mountmsg" style="color:var(--muted);font-size:12px;margin-top:6px"></div>
+      </div>
     </div>
     <div class="card">
       <h2>HLS streams</h2>
@@ -314,19 +323,17 @@ async function refreshMounts() {
   syncPreviewButtons();
 }
 
-/* ---- RTSP mount audio preview: raw µ-law over HTTP, decoded via Web Audio ---- */
-let preview = { ctrl: null, ctx: null, path: null };
-
-function ulawToPcm(u) {
-  u = ~u & 0xff;
-  const sign = u & 0x80, exp = (u >> 4) & 7, man = u & 0x0f;
-  const mag = (((man << 3) + 0x84) << exp) - 0x84;
-  return sign ? -mag : mag;
-}
+/* ---- RTSP mount audio preview ----
+   The server streams a live WAV (PCM16, 8 kHz); we skip the 44-byte header
+   and schedule the samples gaplessly through Web Audio. A <audio> element
+   can't do this: Chrome buffers low-bitrate live WAV for tens of seconds
+   before starting. The VU meter proves audio is flowing even when muted. */
+let preview = { ctrl: null, ctx: null, gain: null, path: null };
+let previewPath = null; // kept for button sync
 
 function syncPreviewButtons() {
   document.querySelectorAll("[data-preview]").forEach(b => {
-    const on = preview.path === b.dataset.preview;
+    const on = previewPath === b.dataset.preview;
     b.textContent = on ? "■ Stop" : "▶ Play";
     b.classList.toggle("playing", on);
   });
@@ -335,21 +342,36 @@ function syncPreviewButtons() {
 function stopPreview() {
   if (preview.ctrl) preview.ctrl.abort();
   if (preview.ctx) preview.ctx.close().catch(() => {});
-  preview = { ctrl: null, ctx: null, path: null };
+  preview = { ctrl: null, ctx: null, gain: null, path: null };
+  previewPath = null;
+  $("mountplayer").style.display = "none";
+  $("vu").style.width = "0%";
   syncPreviewButtons();
 }
 
 async function togglePreview(btn) {
   const path = btn.dataset.preview;
-  if (preview.path === path) { stopPreview(); return; }
+  if (previewPath === path) { stopPreview(); return; }
   stopPreview();
 
+  const msg = $("mountmsg");
   const ctrl = new AbortController();
   const ctx = new AudioContext();
-  preview = { ctrl, ctx, path };
+  const gain = ctx.createGain();
+  gain.gain.value = parseFloat($("vol").value);
+  gain.connect(ctx.destination);
+  preview = { ctrl, ctx, gain, path };
+  previewPath = path;
   syncPreviewButtons();
+  $("mountplayer").style.display = "block";
 
-  let nextTime = 0;
+  // Autoplay policies can hand out a suspended context even from a click.
+  try { await ctx.resume(); } catch {}
+  msg.textContent = ctx.state === "running"
+    ? "playing " + path + " — live stream, 8 kHz mono"
+    : "audio context is '" + ctx.state + "' — click Play again or check the tab's sound permission";
+
+  let nextTime = 0, leftover = null, skipped = 0;
   try {
     const r = await fetch("/api/preview?mount=" + encodeURIComponent(path), { headers: headers(), signal: ctrl.signal });
     if (!r.ok) throw new Error("preview " + r.status);
@@ -357,20 +379,55 @@ async function togglePreview(btn) {
     while (true) {
       const { done, value } = await reader.read();
       if (done || preview.ctrl !== ctrl) break;
-      const f32 = new Float32Array(value.length);
-      for (let i = 0; i < value.length; i++) f32[i] = ulawToPcm(value[i]) / 32768;
+
+      // strip the 44-byte WAV header, then carry odd bytes between chunks
+      let bytes = value;
+      if (skipped < 44) {
+        const cut = Math.min(44 - skipped, bytes.length);
+        bytes = bytes.subarray(cut);
+        skipped += cut;
+        if (!bytes.length) continue;
+      }
+      if (leftover) {
+        const merged = new Uint8Array(leftover.length + bytes.length);
+        merged.set(leftover); merged.set(bytes, leftover.length);
+        bytes = merged; leftover = null;
+      }
+      if (bytes.length & 1) {
+        leftover = bytes.slice(bytes.length - 1);
+        bytes = bytes.subarray(0, bytes.length - 1);
+      }
+      if (!bytes.length) continue;
+
+      const samples = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.length >> 1);
+      const f32 = new Float32Array(samples.length);
+      let peak = 0;
+      for (let i = 0; i < samples.length; i++) {
+        f32[i] = samples[i] / 32768;
+        const a = Math.abs(f32[i]);
+        if (a > peak) peak = a;
+      }
+      $("vu").style.width = Math.min(100, Math.round(peak * 130)) + "%";
+
       const buf = ctx.createBuffer(1, f32.length, 8000);
       buf.copyToChannel(f32, 0);
       const src = ctx.createBufferSource();
       src.buffer = buf;
-      src.connect(ctx.destination);
-      if (nextTime < ctx.currentTime + 0.12) nextTime = ctx.currentTime + 0.12; // jitter cushion
+      src.connect(gain);
+      if (nextTime < ctx.currentTime + 0.15) nextTime = ctx.currentTime + 0.15; // jitter cushion
       src.start(nextTime);
       nextTime += buf.duration;
     }
-  } catch { /* aborted or stream ended */ }
+  } catch (e) {
+    if (preview.ctrl === ctrl && e.name !== "AbortError")
+      msg.textContent = "stream error: " + e.message;
+  }
   if (preview.ctrl === ctrl) stopPreview();
 }
+
+document.addEventListener("input", e => {
+  if (e.target.id === "vol" && preview.gain) preview.gain.gain.value = parseFloat(e.target.value);
+});
 
 async function refreshHls() {
   try {
