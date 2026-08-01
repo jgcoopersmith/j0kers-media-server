@@ -61,7 +61,32 @@ public static class HttpListenerBinder
         var listener = new HttpListener();
         foreach (var name in LoopbackNames)
             listener.Prefixes.Add($"http://{name}:{port}/");
-        listener.Start();
-        return listener;
+        try
+        {
+            listener.Start();
+            return listener;
+        }
+        catch (HttpListenerException ex) when (OperatingSystem.IsWindows() && ex.ErrorCode == 5)
+        {
+            // http.sys quirk: once an all-interfaces URL ACL is reserved for
+            // the port, unprivileged host-specific registrations are denied.
+            // Bind the wildcard (which the ACL permits) — callers that asked
+            // for loopback enforce it per-request via IsLoopbackRequest.
+            Log.Warn("http",
+                $"loopback bind on port {port} denied because an all-interfaces URL ACL exists; " +
+                "listening on the wildcard with loopback-only enforcement in the app");
+            var wide = new HttpListener();
+            wide.Prefixes.Add($"http://+:{port}/");
+            wide.Start();
+            return wide;
+        }
     }
+
+    /// <summary>True when the configured bind is loopback-only.</summary>
+    public static bool IsLoopbackBind(string bindAddress) =>
+        bindAddress is "127.0.0.1" or "localhost" or "::1";
+
+    /// <summary>Per-request loopback guard for listeners that may be bound wider than configured.</summary>
+    public static bool IsLoopbackRequest(HttpListenerContext ctx) =>
+        IPAddress.IsLoopback(ctx.Request.RemoteEndPoint.Address);
 }

@@ -61,6 +61,13 @@ public sealed class HlsServer : IDisposable
         var res = ctx.Response;
         try
         {
+            if (HttpListenerBinder.IsLoopbackBind(_config.BindAddress) &&
+                !HttpListenerBinder.IsLoopbackRequest(ctx))
+            {
+                WriteText(res, 403, "text/plain", "bound to localhost only");
+                return;
+            }
+
             res.Headers["Access-Control-Allow-Origin"] = _config.CorsAllowOrigin;
             res.Headers["Cache-Control"] = "no-cache";
 

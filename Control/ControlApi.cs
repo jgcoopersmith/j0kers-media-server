@@ -89,6 +89,15 @@ public sealed class ControlApi : IDisposable
         var res = ctx.Response;
         try
         {
+            // configured loopback-only? enforce it even if the listener had
+            // to bind wider (Windows wildcard-ACL quirk)
+            if (Hls.HttpListenerBinder.IsLoopbackBind(_config.BindAddress) &&
+                !Hls.HttpListenerBinder.IsLoopbackRequest(ctx))
+            {
+                WriteJson(res, 403, new { error = "control API is bound to localhost only" });
+                return;
+            }
+
             // The dashboard page itself is static and served without auth;
             // every /api call it makes is still token-gated below.
             var rawPath = ctx.Request.Url?.AbsolutePath ?? "/";
