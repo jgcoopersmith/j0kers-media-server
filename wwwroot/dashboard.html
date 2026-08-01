@@ -217,6 +217,12 @@
   .root-chip .open { cursor: pointer; }
   .root-chip.active { border-color: var(--series-1); color: var(--ink); }
   .root-chip button { border: none; background: none; padding: 2px 4px; }
+  .tile-pin {
+    position: absolute; top: 4px; right: 4px; z-index: 2;
+    border: none; border-radius: 6px; padding: 2px 5px; font-size: 13px;
+    background: rgba(0,0,0,0.55); color: #fff; cursor: pointer;
+  }
+  .tile-pin:hover { background: rgba(0,0,0,0.8); }
 
   .am-in {
     font: inherit; font-size: 13px; padding: 6px 10px; border-radius: 8px;
@@ -333,7 +339,9 @@
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Media library</span>
       <button id="lib-playall" style="display:none">▶ Play folder</button>
       <button id="lib-save" style="display:none">☆ Save playlist</button>
+      <button onclick="pinMediaViaPicker()">⭐ Pin media</button>
       <button onclick="addLibraryRoot()">➕ Add folder</button></h2>
+    <div id="favorites" style="margin-bottom:6px"></div>
     <div id="lib-roots" style="margin-bottom:6px"></div>
     <div id="playlists" style="margin-bottom:6px"></div>
     <div id="lib-path" class="mono" style="color:var(--muted);font-size:12px;margin-bottom:8px"></div>
@@ -477,6 +485,7 @@ async function tick() {
   refreshHls();
   await refreshChannels(false);
   refreshPlaylists(false);
+  refreshFavorites(false);
 
   if (!libraryBooted) {
     libraryBooted = true;
@@ -770,6 +779,57 @@ function mediaKind(name) {
 }
 let ffmpegOk = false;
 
+/* ---- pinned media: quick buttons at the top of the library ---- */
+let favoritePaths = new Set();
+let favoritesLoaded = 0;
+
+async function refreshFavorites(force) {
+  if (!force && Date.now() - favoritesLoaded < 15000) return;
+  favoritesLoaded = Date.now();
+  let data;
+  try { data = await api("/api/favorites"); } catch { return; }
+  favoritePaths = new Set(data.favorites.map(f => f.path.toLowerCase()));
+  if (!data.favorites.length) { $("favorites").innerHTML = ""; return; }
+  let h = '<div style="display:flex;flex-wrap:wrap;gap:6px">';
+  for (const f of data.favorites) {
+    h += '<span class="root-chip">'
+      + '<span class="open" data-act="fav-open" data-arg="' + esc(f.path) + '" title="' + esc(f.path) + '">⭐ ' + esc(f.name) + '</span>'
+      + '<button data-act="fav-remove" data-arg="' + esc(f.path) + '" title="Unpin (file is not deleted)" style="color:var(--critical)">✕</button>'
+      + '</span>';
+  }
+  $("favorites").innerHTML = h + '</div>';
+}
+
+async function pinMedia(path, name) {
+  const r = await fetch("/api/favorites", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...headers() },
+    body: JSON.stringify({ path, name }),
+  });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || "pin failed"); return; }
+  refreshFavorites(true);
+  if (currentLibPath) loadLibrary(currentLibPath); // refresh star states
+}
+
+async function pinMediaViaPicker() {
+  const p = await pickPath({ mode: "file", title: "Pick a media file to pin as a quick button" });
+  if (!p) return;
+  pinMedia(p);
+}
+
+async function unpinMedia(path) {
+  await fetch("/api/favorites?path=" + encodeURIComponent(path), { method: "DELETE", headers: headers() });
+  refreshFavorites(true);
+  if (currentLibPath) loadLibrary(currentLibPath);
+}
+
+function openFavorite(path) {
+  const kind = mediaKind(path);
+  if (kind === "image") viewImage(path);
+  else if (ffmpegOk) { queue.items = []; queue.order = []; queue.pos = -1; $("np").style.display = "none"; playMedia(path); }
+  else alert("ffmpeg is not available for playback");
+}
+
 /* ---- library roots: server-persisted source folders ---- */
 let libraryRoots = [];
 let currentLibPath = null;
@@ -884,8 +944,13 @@ async function loadLibrary(path) {
 
   if (music.length) {
     h += '<div class="lib-h">🎵 Music <span class="cnt">' + music.length + '</span></div>';
-    for (const e of music)
-      h += libRow("🎵", e.name, e.detail, ffmpegOk ? "lib-play" : "", join(e.name));
+    for (const e of music) {
+      const full = join(e.name);
+      const pinned = favoritePaths.has(full.toLowerCase());
+      const star = '<button data-act="' + (pinned ? "fav-remove" : "fav-add") + '" data-arg="' + esc(full) + '" title="'
+        + (pinned ? "Unpin quick button" : "Pin as quick button") + '">' + (pinned ? "⭐" : "☆") + '</button>';
+      h += libRow("🎵", e.name, e.detail, ffmpegOk ? "lib-play" : "", full, star);
+    }
   }
 
   if (pictures.length) {
@@ -901,7 +966,11 @@ function tileGrid(entries, join, act, fallbackIcon) {
   for (const e of entries) {
     const full = join(e.name);
     const clickable = act === "lib-img" || ffmpegOk;
-    h += '<div class="tile-item"' + (clickable ? ' data-act="' + act + '" data-arg="' + esc(full) + '"' : ' style="opacity:.55;cursor:default"') + ' title="' + esc(e.name) + '">'
+    const pinned = favoritePaths.has(full.toLowerCase());
+    h += '<div class="tile-item" style="position:relative;' + (clickable ? '' : 'opacity:.55;cursor:default') + '"'
+      + (clickable ? ' data-act="' + act + '" data-arg="' + esc(full) + '"' : '') + ' title="' + esc(e.name) + '">'
+      + '<button class="tile-pin" data-act="' + (pinned ? "fav-remove" : "fav-add") + '" data-arg="' + esc(full) + '" title="'
+      + (pinned ? "Unpin quick button" : "Pin as quick button") + '">' + (pinned ? "⭐" : "☆") + '</button>'
       + '<img class="tile-thumb" loading="lazy" src="' + esc(thumbUrl(full)) + '" alt="" '
       + 'onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'">'
       + '<div class="tile-fallback">' + fallbackIcon + '</div>'
@@ -1464,6 +1533,9 @@ document.addEventListener("click", e => {
     case "lib-play":    queue.items = []; queue.index = -1; $("np").style.display = "none"; playMedia(arg); break;
     case "lib-playfolder": playFolder(arg); break;
     case "lib-root-remove": removeLibraryRoot(arg); break;
+    case "fav-open":    openFavorite(arg); break;
+    case "fav-add":     pinMedia(arg); break;
+    case "fav-remove":  unpinMedia(arg); break;
     case "pl-play":     playFolder(arg, el.dataset.name); break;
     case "pl-remove":   removePlaylist(arg); break;
   }

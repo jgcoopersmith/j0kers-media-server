@@ -17,3 +17,5 @@ obj/
 /playlists.json
 /config/library.json
 /library.json
+/config/favorites.json
+/favorites.json

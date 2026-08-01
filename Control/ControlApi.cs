@@ -37,6 +37,7 @@ public sealed class ControlApi : IDisposable
     private RtspServer? RtspServer => _services.Rtsp;
     private readonly Media.PlaylistStore _playlists;
     private readonly Media.LibraryStore _library;
+    private readonly Media.FavoritesStore _favorites;
 
     public ControlApi(ServerConfig serverConfig, Services.ServiceController services, string baseDirectory,
         Media.FfmpegManager? ffmpeg = null)
@@ -48,6 +49,7 @@ public sealed class ControlApi : IDisposable
         _ffmpeg = ffmpeg;
         _playlists = new Media.PlaylistStore(baseDirectory);
         _library = new Media.LibraryStore(baseDirectory);
+        _favorites = new Media.FavoritesStore(baseDirectory);
     }
 
     public void Start()
@@ -271,6 +273,34 @@ public sealed class ControlApi : IDisposable
                 var name = ctx.Request.QueryString["name"] ?? "";
                 if (_ffmpeg?.RestartChannel(name) == true) WriteJson(res, 200, new { restarted = name });
                 else WriteJson(res, 404, new { error = "unknown channel" });
+                return;
+            }
+
+            // ---- pinned media (quick buttons) ----
+            if (method == "GET" && path == "/api/favorites")
+            {
+                WriteJson(res, 200, new
+                {
+                    favorites = _favorites.All.Select(f => new { name = f.Name, path = f.Path }),
+                });
+                return;
+            }
+
+            if (method == "POST" && path == "/api/favorites")
+            {
+                AddFavorite(ctx);
+                return;
+            }
+
+            if (method == "DELETE" && path == "/api/favorites")
+            {
+                var favPath = ctx.Request.QueryString["path"] ?? "";
+                if (_favorites.Remove(favPath))
+                {
+                    Log.Info("control", $"favorite removed: {favPath}");
+                    WriteJson(res, 200, new { removed = favPath });
+                }
+                else WriteJson(res, 404, new { error = "unknown favorite" });
                 return;
             }
 
@@ -616,6 +646,45 @@ public sealed class ControlApi : IDisposable
         catch (Exception ex)
         {
             WriteJson(res, 500, new { error = "could not delete: " + ex.Message });
+        }
+    }
+
+    private sealed record FavoriteRequest(string? name, string? path);
+
+    /// <summary>POST /api/favorites {path, name?} — pin a media file as a quick button.</summary>
+    private void AddFavorite(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        try
+        {
+            using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
+            var req = JsonSerializer.Deserialize<FavoriteRequest>(reader.ReadToEnd(),
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (string.IsNullOrWhiteSpace(req?.path))
+            {
+                WriteJson(res, 400, new { error = "body must be { \"path\": \"...\", \"name\": \"optional\" }" });
+                return;
+            }
+            var full = Path.GetFullPath(req.path);
+            if (!System.IO.File.Exists(full))
+            {
+                WriteJson(res, 404, new { error = "file not found" });
+                return;
+            }
+            var name = string.IsNullOrWhiteSpace(req.name)
+                ? Path.GetFileNameWithoutExtension(full)
+                : req.name.Trim();
+            if (!_favorites.Add(name, full))
+            {
+                WriteJson(res, 409, new { error = "already pinned" });
+                return;
+            }
+            Log.Info("control", $"favorite pinned: {name} → {full}");
+            WriteJson(res, 200, new { added = name });
+        }
+        catch (Exception ex)
+        {
+            WriteJson(res, 400, new { error = ex.Message });
         }
     }
 

@@ -66,6 +66,11 @@ set `ffmpeg.path`), the dashboard becomes a full media center:
   grabs, cached under the media root) with icon fallbacks. Movies and
   music transcode to HLS on the fly and play inline; pictures open in a
   lightbox viewer.
+- **Quick buttons** — pin any media item (the ☆ on tiles and music rows,
+  or *⭐ Pin media* in the header to pick a file directly) and it becomes a
+  one-click `⭐ name` button at the top of the library that plays the video
+  or song, or opens the picture, instantly. Persisted server-side in
+  `favorites.json`; unpin with the ✕.
 - **Folder playlists** — *▶ Play folder* (or the *▶ All* button on any
   folder row) queues every media file in a folder and auto-advances with
   ⏮/⏭ controls; *☆ Save playlist* remembers the folder by name
@@ -163,6 +168,7 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `GET/POST/DELETE /api/playlists` | list / save / forget folder playlists (persisted to `playlists.json`) |
 | `GET/POST/DELETE /api/library` | list / add / remove library root folders (persisted to `library.json`) |
 | `GET /api/thumb?path=` | cached JPEG thumbnail for a video or picture (ffmpeg) |
+| `GET/POST/DELETE /api/favorites` | list / pin / unpin quick-button media (persisted to `favorites.json`) |
 | `GET /api/image?path=` | serve a picture for the library viewer |
 | `POST /api/server/start` / `stop` | start / stop the streaming services |
 | `GET/POST /api/settings` | read / save hostname + ports (persisted to `settings.json`) |
