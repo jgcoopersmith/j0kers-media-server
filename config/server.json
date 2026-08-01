@@ -38,7 +38,8 @@
     "enabled": true,
     "bindAddress": "127.0.0.1",       // keep loopback unless authToken is set
     "port": 9090,
-    "authToken": ""                   // non-empty enables Bearer auth
+    "authToken": "",                  // non-empty enables Bearer auth
+    "openDashboardOnStart": true      // launch the web dashboard in your browser on startup
   },
 
   "services": {

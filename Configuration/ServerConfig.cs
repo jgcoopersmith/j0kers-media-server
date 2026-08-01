@@ -148,6 +148,9 @@ public sealed class ControlConfig
     [JsonPropertyName("port")] public int Port { get; set; } = 9090;
     /// <summary>Optional bearer token; empty = no auth (loopback only recommended).</summary>
     [JsonPropertyName("authToken")] public string AuthToken { get; set; } = "";
+
+    /// <summary>Open the dashboard in the default browser on startup.</summary>
+    [JsonPropertyName("openDashboardOnStart")] public bool OpenDashboardOnStart { get; set; } = true;
 }
 
 public sealed class ServicesConfig

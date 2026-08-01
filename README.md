@@ -31,9 +31,11 @@ ffplay rtsp://localhost:8554/test
 
 or in VLC: *Media → Open Network Stream* → `rtsp://localhost:8554/test`.
 
-Open the **dashboard** at [http://localhost:9090/](http://localhost:9090/) —
-live session table with terminate buttons, RTP throughput chart, mounts with
-copyable `rtsp://` URIs, HLS stream list, and the effective config.
+The **dashboard** opens automatically in your browser at
+[http://localhost:9090/](http://localhost:9090/) — live session table with
+terminate buttons, RTP throughput chart, mounts with copyable `rtsp://`
+URIs, HLS stream list, and the effective config. (Set
+`control.openDashboardOnStart` to `false` for headless use.)
 
 Check the control API:
 

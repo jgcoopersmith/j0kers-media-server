@@ -70,6 +70,24 @@ try
     {
         control = new ControlApi(config, rtsp);
         control.Start();
+
+        if (config.Control.OpenDashboardOnStart)
+        {
+            var url = $"http://localhost:{config.Control.Port}/";
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = url,
+                    UseShellExecute = true, // hands the URL to the OS default browser
+                });
+                Log.Info("main", $"dashboard opened at {url} (disable with control.openDashboardOnStart=false)");
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("main", $"could not open browser ({ex.Message}); dashboard is at {url}");
+            }
+        }
     }
 }
 catch (Exception ex)
