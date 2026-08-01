@@ -546,6 +546,7 @@ async function refreshMounts() {
       + '<div style="color:var(--muted);font-size:12px">' + esc(m.source) + (m.description ? " · " + esc(m.description) : "") + (m.dynamic ? " · added via dashboard" : "") + '</div></div>'
       + '<button data-preview="' + esc(m.path) + '" data-act="preview">▶ Play</button>'
       + '<button data-act="mount-stop" data-arg="' + esc(m.path) + '">■ Stop</button>'
+      + '<button data-act="copy" data-arg="' + esc(uri) + '">Copy</button>'
       + '<button class="danger" title="Remove mount" data-act="mount-remove" data-arg="' + esc(m.path) + '">✕</button>'
       + '</div>';
   }
@@ -676,6 +677,7 @@ async function refreshHls() {
         + '<div style="flex:1;min-width:0"><a class="mono" href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(s.name) + '</a></div>'
         + '<button data-act="hls-play" data-arg="' + esc(url) + '">▶ Play</button>'
         + '<button data-act="hls-stop" data-arg="' + esc(url) + '">■ Stop</button>'
+        + '<button data-act="copy" data-arg="' + esc(url) + '">Copy</button>'
         + '<button class="danger" title="Delete this stream\'s playlist and segments" data-act="hls-remove" data-arg="' + esc(s.name) + '">✕</button></div>';
     }
     $("hls").innerHTML = h;
