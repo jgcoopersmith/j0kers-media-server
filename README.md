@@ -37,6 +37,13 @@ terminate buttons, RTP throughput chart, mounts with copyable `rtsp://`
 URIs, HLS stream list, and the effective config. (Set
 `control.openDashboardOnStart` to `false` for headless use.)
 
+The header has a **⏻ Start/Stop** button that stops or starts the streaming
+services (RTSP + HLS) while the dashboard stays up, and a **⚙ Config**
+dialog for the server name, hostname/bind address, and the RTSP/HLS/control
+ports — saved to a `settings.json` sidecar and applied by restarting the
+services live (a control-port change takes effect on the next full server
+restart).
+
 Every mount has a **▶ Play** button that streams its audio right in the
 browser (the server feeds a live WAV over HTTP and the page plays it
 gaplessly with Web Audio — no plugins). HLS streams play inline too, via
@@ -141,6 +148,8 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `POST /api/play` `{file}` | transcode a media file to HLS (returns playlist path) |
 | `GET/POST/DELETE /api/channels` | list / add / remove live channels (persisted to `channels.json`) |
 | `GET /api/image?path=` | serve a picture for the library viewer |
+| `POST /api/server/start` / `stop` | start / stop the streaming services |
+| `GET/POST /api/settings` | read / save hostname + ports (persisted to `settings.json`) |
 
 Binds to loopback by default; set `control.authToken` before exposing it
 more widely.

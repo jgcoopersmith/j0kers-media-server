@@ -11,3 +11,5 @@ obj/
 /mounts.json
 /config/channels.json
 /channels.json
+/config/settings.json
+/settings.json

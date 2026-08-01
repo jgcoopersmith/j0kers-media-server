@@ -50,8 +50,7 @@ if (config.Mounts.Count == 0)
     Log.Info("main", "no mounts configured; added default test mount /test (440 Hz tone)");
 }
 
-RtspServer? rtsp = null;
-HlsServer? hls = null;
+J0kersMediaServer.Services.ServiceController? services = null;
 ControlApi? control = null;
 J0kersMediaServer.Media.FfmpegManager? ffmpeg = null;
 
@@ -62,19 +61,11 @@ var mediaRoot = Path.GetFullPath(Path.IsPathRooted(config.Hls.MediaRoot)
 try
 {
     ffmpeg = new J0kersMediaServer.Media.FfmpegManager(config.Ffmpeg, mediaRoot, baseDirectory);
-    if (config.Rtsp.Enabled)
-    {
-        rtsp = new RtspServer(config, baseDirectory);
-        rtsp.Start();
-    }
-    if (config.Hls.Enabled)
-    {
-        hls = new HlsServer(config.Hls, baseDirectory);
-        hls.Start();
-    }
+    services = new J0kersMediaServer.Services.ServiceController(config, baseDirectory);
+    services.StartServices();
     if (config.Control.Enabled)
     {
-        control = new ControlApi(config, rtsp, baseDirectory, ffmpeg);
+        control = new ControlApi(config, services, baseDirectory, ffmpeg);
         control.Start();
 
         if (config.Control.OpenDashboardOnStart)
@@ -99,7 +90,7 @@ try
 catch (Exception ex)
 {
     Console.Error.WriteLine($"Startup failed: {ex.Message}");
-    rtsp?.Dispose(); hls?.Dispose(); control?.Dispose(); ffmpeg?.Dispose();
+    services?.Dispose(); control?.Dispose(); ffmpeg?.Dispose();
     return 1;
 }
 
@@ -111,8 +102,7 @@ Log.Info("main", "ready — press Ctrl+C to stop");
 await shutdown.Task;
 
 Log.Info("main", "shutting down");
-rtsp?.Dispose();
-hls?.Dispose();
+services?.Dispose();
 control?.Dispose();
 ffmpeg?.Dispose();
 return 0;

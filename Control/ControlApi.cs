@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Text;
 using System.Text.Json;
 using J0kersMediaServer.Config;
@@ -26,7 +26,7 @@ public sealed class ControlApi : IDisposable
 {
     private readonly ControlConfig _config;
     private readonly ServerConfig _serverConfig;
-    private readonly RtspServer? _rtspServer;
+    private readonly Services.ServiceController _services;
     private readonly string _baseDirectory;
     private readonly DateTime _startedUtc = DateTime.UtcNow;
     private HttpListener? _listener;
@@ -34,12 +34,14 @@ public sealed class ControlApi : IDisposable
 
     private readonly Media.FfmpegManager? _ffmpeg;
 
-    public ControlApi(ServerConfig serverConfig, RtspServer? rtspServer, string baseDirectory,
+    private RtspServer? RtspServer => _services.Rtsp;
+
+    public ControlApi(ServerConfig serverConfig, Services.ServiceController services, string baseDirectory,
         Media.FfmpegManager? ffmpeg = null)
     {
         _config = serverConfig.Control;
         _serverConfig = serverConfig;
-        _rtspServer = rtspServer;
+        _services = services;
         _baseDirectory = baseDirectory;
         _ffmpeg = ffmpeg;
     }
@@ -112,12 +114,13 @@ public sealed class ControlApi : IDisposable
                     {
                         server = _serverConfig.ServerName,
                         version = typeof(ControlApi).Assembly.GetName().Version?.ToString(3),
+                        running = _services.Running,
                         uptimeSeconds = (int)(DateTime.UtcNow - _startedUtc).TotalSeconds,
                         rtsp = new
                         {
                             enabled = _serverConfig.Rtsp.Enabled,
                             port = _serverConfig.Rtsp.Port,
-                            sessions = _rtspServer?.Sessions.Count ?? 0,
+                            sessions = RtspServer?.Sessions.Count ?? 0,
                             maxSessions = _serverConfig.Rtsp.MaxSessions,
                         },
                         hls = new { enabled = _serverConfig.Hls.Enabled, port = _serverConfig.Hls.Port },
@@ -154,7 +157,7 @@ public sealed class ControlApi : IDisposable
                 case ("GET", "/api/sessions"):
                     WriteJson(res, 200, new
                     {
-                        sessions = (_rtspServer?.Sessions.All ?? Array.Empty<RtspSession>()).Select(s => new
+                        sessions = (RtspServer?.Sessions.All ?? Array.Empty<RtspSession>()).Select(s => new
                         {
                             id = s.Id,
                             mount = s.MountPath,
@@ -176,6 +179,43 @@ public sealed class ControlApi : IDisposable
             if (method == "GET" && path == "/api/browse")
             {
                 Browse(ctx);
+                return;
+            }
+
+            // ---- service power + settings ----
+            if (method == "POST" && path == "/api/server/start")
+            {
+                try { _services.StartServices(); }
+                catch (Exception ex) { WriteJson(res, 500, new { error = ex.Message }); return; }
+                Log.Info("control", "services started via dashboard");
+                WriteJson(res, 200, new { running = _services.Running });
+                return;
+            }
+
+            if (method == "POST" && path == "/api/server/stop")
+            {
+                _services.StopServices();
+                Log.Info("control", "services stopped via dashboard");
+                WriteJson(res, 200, new { running = _services.Running });
+                return;
+            }
+
+            if (method == "GET" && path == "/api/settings")
+            {
+                WriteJson(res, 200, new
+                {
+                    serverName = _serverConfig.ServerName,
+                    bindAddress = _serverConfig.Rtsp.BindAddress,
+                    rtspPort = _serverConfig.Rtsp.Port,
+                    hlsPort = _serverConfig.Hls.Port,
+                    controlPort = _serverConfig.Control.Port,
+                });
+                return;
+            }
+
+            if (method == "POST" && path == "/api/settings")
+            {
+                SaveSettings(ctx);
                 return;
             }
 
@@ -248,7 +288,7 @@ public sealed class ControlApi : IDisposable
                 if (_serverConfig.Mounts.Any(m => string.Equals(m.Path, mountPath, StringComparison.OrdinalIgnoreCase))
                     && !_serverConfig.IsDynamicMount(mountPath))
                 {
-                    WriteJson(res, 400, new { error = "that mount comes from server.json — remove it there" });
+                    WriteJson(res, 400, new { error = "that mount comes from server.json â€” remove it there" });
                     return;
                 }
                 if (_serverConfig.RemoveDynamicMount(mountPath))
@@ -266,13 +306,13 @@ public sealed class ControlApi : IDisposable
             if (method == "DELETE" && path.StartsWith("/api/sessions/", StringComparison.Ordinal))
             {
                 var id = path["/api/sessions/".Length..];
-                var session = _rtspServer?.Sessions.Get(id);
+                var session = RtspServer?.Sessions.Get(id);
                 if (session is null)
                 {
                     WriteJson(res, 404, new { error = "session not found" });
                     return;
                 }
-                _rtspServer!.Sessions.Remove(id);
+                RtspServer!.Sessions.Remove(id);
                 Log.Info("control", $"session {id} terminated via control API");
                 WriteJson(res, 200, new { terminated = id });
                 return;
@@ -294,7 +334,7 @@ public sealed class ControlApi : IDisposable
     /// <summary>
     /// Streams a mount's audio as a live WAV file (16-bit PCM, 8 kHz mono)
     /// with an open-ended length, paced in real time until the client
-    /// disconnects. A plain &lt;audio&gt; element can play this natively —
+    /// disconnects. A plain &lt;audio&gt; element can play this natively â€”
     /// browsers cannot consume RTSP directly.
     /// </summary>
     private void StreamPreview(HttpListenerContext ctx)
@@ -331,7 +371,7 @@ public sealed class ControlApi : IDisposable
         // neither it closes the response as Content-Length: 0.)
         res.SendChunked = false;
         res.KeepAlive = false;
-        res.ContentLength64 = 0x7FFFFFF0; // ~2 GiB ≈ 37 hours of 8 kHz PCM16
+        res.ContentLength64 = 0x7FFFFFF0; // ~2 GiB â‰ˆ 37 hours of 8 kHz PCM16
         res.Headers["Cache-Control"] = "no-store";
 
         var ulaw = new byte[Media.MediaSourceFactory.FrameSamples];
@@ -367,7 +407,7 @@ public sealed class ControlApi : IDisposable
         }
         catch (Exception)
         {
-            // client hung up — normal end of a preview
+            // client hung up â€” normal end of a preview
         }
         finally
         {
@@ -401,16 +441,95 @@ public sealed class ControlApi : IDisposable
         return ms.ToArray();
     }
 
+    /// <summary>
+    /// POST /api/settings — save hostname/port settings to the settings.json
+    /// sidecar and apply them by restarting the streaming services. A control
+    /// port change is saved but only takes effect on the next full restart
+    /// (this API is serving the current request on the old port).
+    /// </summary>
+    private void SaveSettings(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        ServerConfig.SettingsOverrides? s;
+        try
+        {
+            using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
+            s = JsonSerializer.Deserialize<ServerConfig.SettingsOverrides>(reader.ReadToEnd(),
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch (Exception ex)
+        {
+            WriteJson(res, 400, new { error = "bad JSON: " + ex.Message });
+            return;
+        }
+        if (s is null) { WriteJson(res, 400, new { error = "empty body" }); return; }
+
+        foreach (var (port, name) in new[] { (s.RtspPort, "rtspPort"), (s.HlsPort, "hlsPort"), (s.ControlPort, "controlPort") })
+        {
+            if (port is int p and (< 1 or > 65535))
+            {
+                WriteJson(res, 400, new { error = $"{name} must be 1–65535" });
+                return;
+            }
+        }
+        if (!string.IsNullOrWhiteSpace(s.BindAddress) &&
+            !System.Net.IPAddress.TryParse(s.BindAddress, out _) &&
+            !s.BindAddress.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            WriteJson(res, 400, new { error = "bindAddress must be an IP address (0.0.0.0 = all interfaces) or 'localhost'" });
+            return;
+        }
+
+        var ports = new[] { s.RtspPort ?? _serverConfig.Rtsp.Port, s.HlsPort ?? _serverConfig.Hls.Port, s.ControlPort ?? _serverConfig.Control.Port };
+        if (ports.Distinct().Count() != 3)
+        {
+            WriteJson(res, 400, new { error = "rtsp, hls, and control ports must all be different" });
+            return;
+        }
+
+        var controlPortChanged = s.ControlPort is int ncp && ncp != _serverConfig.Control.Port;
+
+        _serverConfig.ApplySettings(s);
+        _serverConfig.SaveSettings(new ServerConfig.SettingsOverrides
+        {
+            ServerName = _serverConfig.ServerName,
+            BindAddress = _serverConfig.Rtsp.BindAddress,
+            RtspPort = _serverConfig.Rtsp.Port,
+            HlsPort = _serverConfig.Hls.Port,
+            ControlPort = _serverConfig.Control.Port,
+        });
+
+        try
+        {
+            if (_services.Running) _services.RestartServices();
+            else _services.StartServices();
+        }
+        catch (Exception ex)
+        {
+            WriteJson(res, 500, new { error = "saved, but restart failed: " + ex.Message });
+            return;
+        }
+
+        Log.Info("control", $"settings saved: bind={_serverConfig.Rtsp.BindAddress} rtsp={_serverConfig.Rtsp.Port} hls={_serverConfig.Hls.Port} control={_serverConfig.Control.Port}");
+        WriteJson(res, 200, new
+        {
+            saved = true,
+            servicesRestarted = true,
+            controlPortChanged,
+            note = controlPortChanged ? "control port applies after the server process restarts" : null,
+        });
+    }
+
     private sealed record PlayRequest(string? file);
     private sealed record ChannelRequest(string? name, string? url);
 
-    /// <summary>POST /api/play {file} — transcode any media file to HLS and return the stream name.</summary>
+    /// <summary>POST /api/play {file} â€” transcode any media file to HLS and return the stream name.</summary>
     private void PlayFile(HttpListenerContext ctx)
     {
         var res = ctx.Response;
         if (_ffmpeg is null || !_ffmpeg.Available)
         {
-            WriteJson(res, 503, new { error = "ffmpeg is not available — install it (winget install Gyan.FFmpeg) and restart" });
+            WriteJson(res, 503, new { error = "ffmpeg is not available â€” install it (winget install Gyan.FFmpeg) and restart" });
             return;
         }
         try
@@ -436,13 +555,13 @@ public sealed class ControlApi : IDisposable
         }
     }
 
-    /// <summary>POST /api/channels {name,url} — add and start a live channel.</summary>
+    /// <summary>POST /api/channels {name,url} â€” add and start a live channel.</summary>
     private void AddChannel(HttpListenerContext ctx)
     {
         var res = ctx.Response;
         if (_ffmpeg is null || !_ffmpeg.Available)
         {
-            WriteJson(res, 503, new { error = "ffmpeg is not available — install it (winget install Gyan.FFmpeg) and restart" });
+            WriteJson(res, 503, new { error = "ffmpeg is not available â€” install it (winget install Gyan.FFmpeg) and restart" });
             return;
         }
         try
@@ -462,7 +581,7 @@ public sealed class ControlApi : IDisposable
                 return;
             }
             var stream = _ffmpeg.AddChannel(req.name.Trim(), req.url.Trim());
-            Log.Info("control", $"channel added: {req.name} ← {req.url}");
+            Log.Info("control", $"channel added: {req.name} â† {req.url}");
             WriteJson(res, 200, new { stream, playlist = $"/{stream}/index.m3u8" });
         }
         catch (InvalidOperationException ex) { WriteJson(res, 409, new { error = ex.Message }); }
@@ -476,7 +595,7 @@ public sealed class ControlApi : IDisposable
         [".svg"] = "image/svg+xml", [".avif"] = "image/avif",
     };
 
-    /// <summary>GET /api/image?path= — serves a picture for the library viewer.</summary>
+    /// <summary>GET /api/image?path= â€” serves a picture for the library viewer.</summary>
     private void ServeImage(HttpListenerContext ctx)
     {
         var res = ctx.Response;
@@ -502,7 +621,7 @@ public sealed class ControlApi : IDisposable
     }
 
     /// <summary>
-    /// POST /api/mounts — add a mount at runtime. Body:
+    /// POST /api/mounts â€” add a mount at runtime. Body:
     /// { "path": "/music", "source": "tone"|"file", "file": "...",
     ///   "toneFrequencyHz": 440, "description": "" }
     /// Takes effect immediately (the RTSP server resolves mounts per
@@ -546,7 +665,7 @@ public sealed class ControlApi : IDisposable
             case "tone":
                 if (mount.ToneFrequencyHz is < 20 or > 4000)
                 {
-                    WriteJson(res, 400, new { error = "tone frequency must be 20–4000 Hz (8 kHz sampling)" });
+                    WriteJson(res, 400, new { error = "tone frequency must be 20â€“4000 Hz (8 kHz sampling)" });
                     return;
                 }
                 break;
@@ -587,8 +706,8 @@ public sealed class ControlApi : IDisposable
 
     /// <summary>
     /// Filesystem browser backing the dashboard's pickPath() library:
-    /// GET /api/browse            → drive list
-    /// GET /api/browse?path=C:\x  → folders and files of that directory
+    /// GET /api/browse            â†’ drive list
+    /// GET /api/browse?path=C:\x  â†’ folders and files of that directory
     /// Loopback/token-gated like the rest of the API; this is the operator's
     /// own machine, so no path restriction beyond what the OS enforces.
     /// </summary>
@@ -645,7 +764,7 @@ public sealed class ControlApi : IDisposable
             WriteJson(res, 200, new
             {
                 path = full,
-                parent = dir.Parent?.FullName, // null at a drive root → back to drive list
+                parent = dir.Parent?.FullName, // null at a drive root â†’ back to drive list
                 entries,
             });
         }
@@ -677,3 +796,4 @@ public sealed class ControlApi : IDisposable
         try { _listener?.Stop(); } catch { }
     }
 }
+

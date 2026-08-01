@@ -52,6 +52,9 @@ public sealed class ServerConfig
     /// </summary>
     [JsonIgnore] public string DynamicMountsFile { get; private set; } = "mounts.json";
 
+    /// <summary>Dashboard-edited settings (hostname/ports) live in this sidecar.</summary>
+    [JsonIgnore] public string SettingsFile { get; private set; } = "settings.json";
+
     private readonly HashSet<string> _dynamicMountPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _mountLock = new();
 
@@ -64,20 +67,64 @@ public sealed class ServerConfig
         {
             cfg = JsonSerializer.Deserialize<ServerConfig>(File.ReadAllText(path), JsonOpts)
                   ?? new ServerConfig();
-            cfg.DynamicMountsFile = Path.Combine(
-                Path.GetDirectoryName(Path.GetFullPath(path))!, "mounts.json");
+            var dir = Path.GetDirectoryName(Path.GetFullPath(path))!;
+            cfg.DynamicMountsFile = Path.Combine(dir, "mounts.json");
+            cfg.SettingsFile = Path.Combine(dir, "settings.json");
         }
         else
         {
             cfg = new ServerConfig();
             cfg.DynamicMountsFile = Path.Combine(Directory.GetCurrentDirectory(), "mounts.json");
+            cfg.SettingsFile = Path.Combine(Directory.GetCurrentDirectory(), "settings.json");
         }
 
+        cfg.LoadSettingsOverrides();
         cfg.ApplyEnvironmentOverrides();
         cfg.LoadDynamicMounts();
         cfg.Validate();
         return cfg;
     }
+
+    public sealed class SettingsOverrides
+    {
+        [JsonPropertyName("serverName")] public string? ServerName { get; set; }
+        [JsonPropertyName("bindAddress")] public string? BindAddress { get; set; }
+        [JsonPropertyName("rtspPort")] public int? RtspPort { get; set; }
+        [JsonPropertyName("hlsPort")] public int? HlsPort { get; set; }
+        [JsonPropertyName("controlPort")] public int? ControlPort { get; set; }
+    }
+
+    private void LoadSettingsOverrides()
+    {
+        if (!File.Exists(SettingsFile)) return;
+        try
+        {
+            var s = JsonSerializer.Deserialize<SettingsOverrides>(File.ReadAllText(SettingsFile), JsonOpts);
+            if (s is not null) ApplySettings(s);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"settings.json is invalid: {ex.Message}");
+        }
+    }
+
+    /// <summary>Applies dashboard settings on top of the loaded config.</summary>
+    public void ApplySettings(SettingsOverrides s)
+    {
+        if (!string.IsNullOrWhiteSpace(s.ServerName)) ServerName = s.ServerName;
+        if (!string.IsNullOrWhiteSpace(s.BindAddress))
+        {
+            Rtsp.BindAddress = s.BindAddress;
+            Hls.BindAddress = s.BindAddress;
+            Control.BindAddress = s.BindAddress;
+        }
+        if (s.RtspPort is int rp) Rtsp.Port = rp;
+        if (s.HlsPort is int hp) Hls.Port = hp;
+        if (s.ControlPort is int cp) Control.Port = cp;
+    }
+
+    public void SaveSettings(SettingsOverrides s) =>
+        File.WriteAllText(SettingsFile, JsonSerializer.Serialize(s, JsonOpts));
 
     private void LoadDynamicMounts()
     {
