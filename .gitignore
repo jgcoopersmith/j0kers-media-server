@@ -6,3 +6,6 @@ obj/
 # source folder, which matches case-insensitively on Windows, stays tracked)
 /config/media/
 /config/clips/
+# runtime-added mounts (managed by the dashboard / control API)
+/config/mounts.json
+/mounts.json

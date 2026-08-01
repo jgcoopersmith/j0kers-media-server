@@ -42,6 +42,18 @@ public sealed class ServerConfig
         WriteIndented = true,
     };
 
+    /// <summary>
+    /// Mounts added at runtime (dashboard / control API) live in a
+    /// mounts.json sidecar next to the main config, so the hand-edited,
+    /// commented server.json is never rewritten by the server.
+    /// </summary>
+    [JsonIgnore] public string DynamicMountsFile { get; private set; } = "mounts.json";
+
+    private readonly HashSet<string> _dynamicMountPaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _mountLock = new();
+
+    public bool IsDynamicMount(string path) => _dynamicMountPaths.Contains(path);
+
     public static ServerConfig Load(string? path)
     {
         ServerConfig cfg;
@@ -49,15 +61,65 @@ public sealed class ServerConfig
         {
             cfg = JsonSerializer.Deserialize<ServerConfig>(File.ReadAllText(path), JsonOpts)
                   ?? new ServerConfig();
+            cfg.DynamicMountsFile = Path.Combine(
+                Path.GetDirectoryName(Path.GetFullPath(path))!, "mounts.json");
         }
         else
         {
             cfg = new ServerConfig();
+            cfg.DynamicMountsFile = Path.Combine(Directory.GetCurrentDirectory(), "mounts.json");
         }
 
         cfg.ApplyEnvironmentOverrides();
+        cfg.LoadDynamicMounts();
         cfg.Validate();
         return cfg;
+    }
+
+    private void LoadDynamicMounts()
+    {
+        if (!File.Exists(DynamicMountsFile)) return;
+        var extra = JsonSerializer.Deserialize<List<MountConfig>>(
+            File.ReadAllText(DynamicMountsFile), JsonOpts) ?? new List<MountConfig>();
+        foreach (var m in extra)
+        {
+            if (Mounts.Any(x => string.Equals(x.Path, m.Path, StringComparison.OrdinalIgnoreCase)))
+                continue; // server.json wins on conflict
+            Mounts.Add(m);
+            _dynamicMountPaths.Add(m.Path);
+        }
+    }
+
+    /// <summary>Adds a mount at runtime and persists it to the sidecar file.</summary>
+    public void AddDynamicMount(MountConfig mount)
+    {
+        lock (_mountLock)
+        {
+            if (Mounts.Any(x => string.Equals(x.Path, mount.Path, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException($"a mount at '{mount.Path}' already exists");
+            Mounts.Add(mount);
+            _dynamicMountPaths.Add(mount.Path);
+            SaveDynamicMounts();
+        }
+    }
+
+    /// <summary>Removes a runtime-added mount. Mounts from server.json cannot be removed here.</summary>
+    public bool RemoveDynamicMount(string path)
+    {
+        lock (_mountLock)
+        {
+            if (!_dynamicMountPaths.Contains(path)) return false;
+            Mounts.RemoveAll(m => string.Equals(m.Path, path, StringComparison.OrdinalIgnoreCase));
+            _dynamicMountPaths.Remove(path);
+            SaveDynamicMounts();
+            return true;
+        }
+    }
+
+    private void SaveDynamicMounts()
+    {
+        var dynamic = Mounts.Where(m => _dynamicMountPaths.Contains(m.Path)).ToList();
+        File.WriteAllText(DynamicMountsFile, JsonSerializer.Serialize(dynamic, JsonOpts));
     }
 
     private void ApplyEnvironmentOverrides()

@@ -133,6 +133,7 @@ public sealed class ControlApi : IDisposable
                             path = m.Path,
                             source = m.Source,
                             description = m.Description,
+                            dynamic = _serverConfig.IsDynamicMount(m.Path),
                             uri = $"rtsp://<host>:{_serverConfig.Rtsp.Port}{m.Path}",
                         }),
                         announcementService = _serverConfig.Services.AnnouncementEnabled
@@ -166,6 +167,33 @@ public sealed class ControlApi : IDisposable
             if (method == "GET" && path == "/api/browse")
             {
                 Browse(ctx);
+                return;
+            }
+
+            if (method == "POST" && path == "/api/mounts")
+            {
+                AddMount(ctx);
+                return;
+            }
+
+            if (method == "DELETE" && path == "/api/mounts")
+            {
+                var mountPath = ctx.Request.QueryString["path"] ?? "";
+                if (_serverConfig.Mounts.Any(m => string.Equals(m.Path, mountPath, StringComparison.OrdinalIgnoreCase))
+                    && !_serverConfig.IsDynamicMount(mountPath))
+                {
+                    WriteJson(res, 400, new { error = "that mount comes from server.json — remove it there" });
+                    return;
+                }
+                if (_serverConfig.RemoveDynamicMount(mountPath))
+                {
+                    Log.Info("control", $"mount removed via dashboard: {mountPath}");
+                    WriteJson(res, 200, new { removed = mountPath });
+                }
+                else
+                {
+                    WriteJson(res, 404, new { error = "unknown mount" });
+                }
                 return;
             }
 
@@ -305,6 +333,90 @@ public sealed class ControlApi : IDisposable
         w.Write((uint)(totalLength - 44));
         w.Flush();
         return ms.ToArray();
+    }
+
+    /// <summary>
+    /// POST /api/mounts — add a mount at runtime. Body:
+    /// { "path": "/music", "source": "tone"|"file", "file": "...",
+    ///   "toneFrequencyHz": 440, "description": "" }
+    /// Takes effect immediately (the RTSP server resolves mounts per
+    /// request) and persists to the mounts.json sidecar.
+    /// </summary>
+    private void AddMount(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        MountConfig? mount;
+        try
+        {
+            using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
+            mount = JsonSerializer.Deserialize<MountConfig>(reader.ReadToEnd(),
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch (Exception ex)
+        {
+            WriteJson(res, 400, new { error = "bad JSON: " + ex.Message });
+            return;
+        }
+
+        if (mount is null || string.IsNullOrWhiteSpace(mount.Path) || !mount.Path.StartsWith('/'))
+        {
+            WriteJson(res, 400, new { error = "mount path must start with '/'" });
+            return;
+        }
+        mount.Path = "/" + mount.Path.Trim().Trim('/');
+        if (mount.Path == "/" || mount.Path.Any(char.IsWhiteSpace))
+        {
+            WriteJson(res, 400, new { error = "invalid mount path" });
+            return;
+        }
+        if (mount.Path.Equals("/annc", StringComparison.OrdinalIgnoreCase))
+        {
+            WriteJson(res, 400, new { error = "/annc is reserved for the announcement service" });
+            return;
+        }
+
+        switch (mount.Source.ToLowerInvariant())
+        {
+            case "tone":
+                if (mount.ToneFrequencyHz is < 20 or > 4000)
+                {
+                    WriteJson(res, 400, new { error = "tone frequency must be 20–4000 Hz (8 kHz sampling)" });
+                    return;
+                }
+                break;
+
+            case "file":
+                if (string.IsNullOrWhiteSpace(mount.File))
+                {
+                    WriteJson(res, 400, new { error = "file source requires a file path" });
+                    return;
+                }
+                var full = Path.IsPathRooted(mount.File) ? mount.File : Path.Combine(_baseDirectory, mount.File);
+                if (!System.IO.File.Exists(full))
+                {
+                    WriteJson(res, 400, new { error = "file not found: " + full });
+                    return;
+                }
+                mount.File = Path.GetFullPath(full);
+                break;
+
+            default:
+                WriteJson(res, 400, new { error = "source must be 'tone' or 'file'" });
+                return;
+        }
+
+        try
+        {
+            _serverConfig.AddDynamicMount(mount);
+        }
+        catch (InvalidOperationException ex)
+        {
+            WriteJson(res, 409, new { error = ex.Message });
+            return;
+        }
+
+        Log.Info("control", $"mount added via dashboard: {mount.Path} ({mount.Source})");
+        WriteJson(res, 200, new { added = mount.Path });
     }
 
     /// <summary>

@@ -48,6 +48,13 @@ folders → files, backed by `/api/browse`): any dashboard feature can call
 get an absolute path back, or `null` on cancel. The 📁 **Browse** button in
 the header uses it to copy a path to the clipboard.
 
+**Add mounts from the GUI**: the *+ Add mount* button in the RTSP mounts
+card creates a mount from a test tone or an audio file (picked with the
+file browser) — live immediately, no restart. Dashboard-added mounts are
+saved to a `mounts.json` sidecar next to your config (so the commented
+`server.json` is never rewritten) and carry a ✕ button to remove them
+again. Mounts defined in `server.json` stay read-only in the GUI.
+
 Check the control API:
 
 ```bash
@@ -112,6 +119,8 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `DELETE /api/sessions/{id}` | force-terminate a session |
 | `GET /api/preview?mount=/x` | live WAV audio of a mount (dashboard player) |
 | `GET /api/browse?path=C:\x` | drive / folder / file listing (dashboard picker; no `path` = drives) |
+| `POST /api/mounts` | add a mount at runtime (persisted to `mounts.json`) |
+| `DELETE /api/mounts?path=/x` | remove a runtime-added mount |
 
 Binds to loopback by default; set `control.authToken` before exposing it
 more widely.
