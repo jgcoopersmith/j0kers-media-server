@@ -280,6 +280,8 @@
         <div id="np" style="display:none;align-items:center;gap:8px;margin-bottom:6px">
           <span style="color:var(--ink);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1"><span id="np-title"></span>
             <span id="np-pos" style="color:var(--muted);font-size:12px"></span></span>
+          <button id="np-shuf" title="Shuffle">🔀</button>
+          <button id="np-loop" title="Loop">🔁</button>
           <button id="np-prev" title="Previous">⏮</button>
           <button id="np-next" title="Next">⏭</button>
           <button id="np-stop" class="danger" title="Stop playlist">✕</button>
@@ -787,8 +789,38 @@ function libRow(icon, name, detail, act, arg, extra) {
     + esc(name) + '</span>' + (extra || "") + '<span class="det">' + esc(detail || "") + '</span></div>';
 }
 
-/* ---- folder playlists: queue every media file, auto-advance ---- */
-const queue = { items: [], index: -1, label: null };
+/* ---- folder playlists: queue every media file, auto-advance ----
+   items is the folder's files in name order; order is the play order
+   (identity, or shuffled); pos indexes into order. */
+const queue = {
+  items: [], order: [], pos: -1, label: null,
+  shuffle: localStorage.getItem("j0kers-shuffle") === "1",
+  loop: localStorage.getItem("j0kers-loop") === "1",
+};
+
+function buildOrder(firstItemIndex) {
+  const order = queue.items.map((_, i) => i);
+  if (queue.shuffle) {
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+    if (firstItemIndex !== undefined) {
+      // keep the current item first so toggling shuffle doesn't skip it
+      const at = order.indexOf(firstItemIndex);
+      [order[0], order[at]] = [order[at], order[0]];
+    }
+  }
+  queue.order = order;
+}
+
+function syncQueueButtons() {
+  $("np-shuf").classList.toggle("playing", queue.shuffle);
+  $("np-loop").classList.toggle("playing", queue.loop);
+  const atStart = queue.pos <= 0, atEnd = queue.pos >= queue.order.length - 1;
+  $("np-prev").disabled = atStart && !queue.loop;
+  $("np-next").disabled = atEnd && !queue.loop;
+}
 
 async function listFolderMedia(folder) {
   const r = await fetch("/api/browse?path=" + encodeURIComponent(folder), { headers: headers() });
@@ -807,24 +839,30 @@ async function playFolder(folder, label) {
   if (!items.length) { alert("no playable media files in that folder"); return; }
   queue.items = items;
   queue.label = label || folder.split(/[\\/]/).filter(Boolean).pop();
-  playQueueItem(0);
+  buildOrder();
+  playQueuePos(0);
 }
 
-async function playQueueItem(i) {
-  if (i < 0 || i >= queue.items.length) { stopQueue(); return; }
-  queue.index = i;
-  const path = queue.items[i];
+async function playQueuePos(pos) {
+  if (queue.loop && queue.order.length) {
+    // wrap in both directions; a forward wrap under shuffle gets a fresh order
+    if (pos >= queue.order.length) { buildOrder(); pos = 0; }
+    else if (pos < 0) pos = queue.order.length - 1;
+  }
+  if (pos < 0 || pos >= queue.order.length) { stopQueue(); return; }
+  queue.pos = pos;
+  const path = queue.items[queue.order[pos]];
   $("np").style.display = "flex";
   $("np-title").textContent = queue.label + " — " + path.split(/[\\/]/).pop();
-  $("np-pos").textContent = "(" + (i + 1) + "/" + queue.items.length + ")";
-  $("np-prev").disabled = i === 0;
-  $("np-next").disabled = i === queue.items.length - 1;
+  $("np-pos").textContent = "(" + (pos + 1) + "/" + queue.order.length + ")";
+  syncQueueButtons();
   await playMedia(path);
 }
 
 function stopQueue() {
   queue.items = [];
-  queue.index = -1;
+  queue.order = [];
+  queue.pos = -1;
   $("np").style.display = "none";
   const v = $("hlsvideo");
   v.pause();
@@ -833,14 +871,28 @@ function stopQueue() {
   v.load();
 }
 
-$("np-prev").addEventListener("click", () => playQueueItem(queue.index - 1));
-$("np-next").addEventListener("click", () => playQueueItem(queue.index + 1));
+$("np-prev").addEventListener("click", () => playQueuePos(queue.pos - 1));
+$("np-next").addEventListener("click", () => playQueuePos(queue.pos + 1));
 $("np-stop").addEventListener("click", stopQueue);
+$("np-shuf").addEventListener("click", () => {
+  queue.shuffle = !queue.shuffle;
+  localStorage.setItem("j0kers-shuffle", queue.shuffle ? "1" : "0");
+  if (queue.items.length) {
+    // rebuild the order around the item currently playing
+    const currentItem = queue.order[queue.pos];
+    buildOrder(currentItem);
+    queue.pos = queue.order.indexOf(currentItem);
+    $("np-pos").textContent = "(" + (queue.pos + 1) + "/" + queue.order.length + ")";
+  }
+  syncQueueButtons();
+});
+$("np-loop").addEventListener("click", () => {
+  queue.loop = !queue.loop;
+  localStorage.setItem("j0kers-loop", queue.loop ? "1" : "0");
+  syncQueueButtons();
+});
 $("hlsvideo").addEventListener("ended", () => {
-  if (queue.items.length && queue.index < queue.items.length - 1)
-    playQueueItem(queue.index + 1);
-  else if (queue.items.length)
-    stopQueue(); // playlist finished
+  if (queue.order.length) playQueuePos(queue.pos + 1); // wraps or stops per loop mode
 });
 
 $("lib-playall").addEventListener("click", () => { if (currentLibPath) playFolder(currentLibPath); });
