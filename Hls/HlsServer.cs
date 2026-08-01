@@ -102,7 +102,7 @@ public sealed class HlsServer : IDisposable
                 var onDisk = Path.Combine(streamDir, parts[1]);
                 if (File.Exists(onDisk) && !parts[1].Contains(".."))
                 {
-                    WriteText(res, 200, "application/vnd.apple.mpegurl", File.ReadAllText(onDisk));
+                    WriteText(res, 200, "application/vnd.apple.mpegurl", ReadSharedText(onDisk));
                     return;
                 }
                 if (parts[1] is "index.m3u8" or "playlist.m3u8")
@@ -131,7 +131,10 @@ public sealed class HlsServer : IDisposable
                 ".aac" => "audio/aac",
                 _ => "application/octet-stream",
             };
-            using var fs = File.OpenRead(segment);
+            // write-sharing: ffmpeg may still be appending/rewriting files
+            // in this directory while clients stream it
+            using var fs = new FileStream(segment, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
             res.ContentLength64 = fs.Length;
             fs.CopyTo(res.OutputStream);
         }
@@ -208,6 +211,29 @@ public sealed class HlsServer : IDisposable
         {
             streams = streams.Select(n => new { name = n, playlist = $"/{n}/index.m3u8" }),
         });
+    }
+
+    /// <summary>
+    /// Reads a text file that ffmpeg may be rewriting concurrently: opens
+    /// with full write-sharing and retries briefly on a sharing violation
+    /// (ffmpeg replaces playlists via delete+rename on some platforms).
+    /// </summary>
+    private static string ReadSharedText(string path)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete);
+                using var reader = new StreamReader(fs);
+                return reader.ReadToEnd();
+            }
+            catch (IOException) when (attempt < 4)
+            {
+                Thread.Sleep(50);
+            }
+        }
     }
 
     private static void WriteText(HttpListenerResponse res, int status, string contentType, string body)

@@ -36,7 +36,7 @@
 
   "control": {
     "enabled": true,
-    "bindAddress": "127.0.0.1",       // keep loopback unless authToken is set
+    "bindAddress": "0.0.0.0",         // dashboard reachable from the network; set 127.0.0.1 for this machine only
     "port": 9090,
     "authToken": "",                  // non-empty enables Bearer auth
     "openDashboardOnStart": true      // launch the web dashboard in your browser on startup

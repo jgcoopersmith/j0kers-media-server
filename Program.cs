@@ -262,14 +262,35 @@ static bool TryOpenBrowser(string url)
 }
 
 var shutdown = new TaskCompletionSource();
-Console.CancelKeyPress += (_, e) => { e.Cancel = true; shutdown.TrySetResult(); };
+Console.CancelKeyPress += (_, e) =>
+{
+    e.Cancel = true;
+    if (!shutdown.Task.IsCompleted)
+    {
+        shutdown.TrySetResult();
+    }
+    else
+    {
+        // second Ctrl+C: don't make the user wait on a stuck teardown
+        Log.Warn("main", "forced exit");
+        Environment.Exit(130);
+    }
+};
 AppDomain.CurrentDomain.ProcessExit += (_, _) => shutdown.TrySetResult();
 
 Log.Info("main", "ready — press Ctrl+C to stop");
 await shutdown.Task;
 
-Log.Info("main", "shutting down");
+Log.Info("main", "shutting down (Ctrl+C again to force)");
+// watchdog: if any teardown blocks, exit anyway instead of hanging the console
+using var watchdog = new Timer(_ =>
+{
+    Log.Warn("main", "shutdown timed out — exiting");
+    Environment.Exit(0);
+}, null, dueTime: 5000, period: Timeout.Infinite);
+
 services?.Dispose();
 control?.Dispose();
 ffmpeg?.Dispose();
+Log.Info("main", "bye");
 return 0;

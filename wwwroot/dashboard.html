@@ -1385,8 +1385,7 @@ async function submitAddMount() {
     toggleAddMount();
     $("am-path").value = ""; $("am-file").value = ""; $("am-desc").value = "";
     mountsLoaded = 0;
-    await refreshMounts();
-    startPreview(body.path); // hear the new mount right away, from the start
+    refreshMounts();
   } catch (e) {
     msg.textContent = "request failed: " + e.message;
   }
