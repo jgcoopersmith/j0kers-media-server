@@ -83,11 +83,17 @@ try
             var url = $"http://localhost:{config.Control.Port}/";
             try
             {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = url,
-                    UseShellExecute = true, // hands the URL to the OS default browser
-                });
+                // each OS has its own way to hand a URL to the default browser
+                if (OperatingSystem.IsWindows())
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = url,
+                        UseShellExecute = true,
+                    });
+                else if (OperatingSystem.IsMacOS())
+                    System.Diagnostics.Process.Start("open", url);
+                else
+                    System.Diagnostics.Process.Start("xdg-open", url);
                 Log.Info("main", $"dashboard opened at {url} (disable with control.openDashboardOnStart=false)");
             }
             catch (Exception ex)

@@ -110,6 +110,25 @@ curl http://localhost:9090/api/status
 curl http://localhost:9090/api/sessions
 ```
 
+## Running on macOS / Linux
+
+The server is cross-platform .NET — the same `dotnet run` works. Notes:
+
+- **ffmpeg**: install with `brew install ffmpeg` (macOS) or your distro's
+  package manager (`apt install ffmpeg`, etc.). It's found via PATH.
+- **macOS disk permissions**: browsing folders outside your home directory
+  (external drives, other users' folders) requires granting **Full Disk
+  Access** to whatever launches the server — *System Settings →
+  Privacy & Security → Full Disk Access*, then add your terminal app
+  (Terminal/iTerm) and restart it. Removable volumes alone can be
+  covered by the "Files and Folders → Removable Volumes" permission,
+  which macOS prompts for on first access.
+- **Browser auto-open** uses `open` on macOS and `xdg-open` on Linux; on a
+  headless box set `control.openDashboardOnStart` to `false` (the log
+  prints the dashboard URL either way).
+- **Ports below 1024** (e.g. RTSP 554) need root/`sudo` on Unix — the
+  defaults (8554/8080/9090) don't.
+
 ## Configuration
 
 Everything is driven by one JSON file (comments allowed) — see

@@ -433,6 +433,12 @@ let hlsPort = null, rtspPort = null;
 let token = sessionStorage.getItem("j0kers-token") || "";
 
 const $ = id => document.getElementById(id);
+/* join a browse path and entry name with the OS's separator (the server
+   returns native paths — backslashes on Windows, slashes on mac/Linux) */
+function joinPath(base, name) {
+  if (base.endsWith("\\") || base.endsWith("/")) return base + name;
+  return base + (base.includes("\\") ? "\\" : "/") + name;
+}
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
 function headers() { return token ? { "Authorization": "Bearer " + token } : {}; }
@@ -991,7 +997,7 @@ async function loadLibrary(path) {
   $("lib-save").style.display = "";
   refreshLibraryRoots(true); // update active chip highlight
 
-  const join = n => (data.path.endsWith("\\") || data.path.endsWith("/")) ? data.path + n : data.path + "\\" + n;
+  const join = n => joinPath(data.path, n);
   const folders = [], videos = [], music = [], pictures = [];
   for (const e of data.entries) {
     if (e.type === "folder") { folders.push(e); continue; }
@@ -1102,10 +1108,9 @@ async function listFolderMedia(folder) {
   const r = await fetch("/api/browse?path=" + encodeURIComponent(folder), { headers: headers() });
   const data = await r.json();
   if (!r.ok) throw new Error(data.error || r.status);
-  const sep = folder.endsWith("\\") || folder.endsWith("/") ? "" : "\\";
   return data.entries
     .filter(e => e.type === "file" && ["video", "audio"].includes(mediaKind(e.name)))
-    .map(e => folder + sep + e.name);
+    .map(e => joinPath(folder, e.name));
 }
 
 async function playFolder(folder, label) {
@@ -1464,8 +1469,7 @@ async function pickerLoad(path) {
     const label = e.type === "drive" && e.label ? " (" + e.label + ")" : "";
     row.innerHTML = '<span class="icon">' + icon + '</span><span class="nm">' + esc(e.name + label) + '</span><span class="det">' + esc(e.detail || "") + '</span>';
     const full = e.type === "drive" ? e.name
-      : picker.path.endsWith("\\") || picker.path.endsWith("/") ? picker.path + e.name
-      : picker.path + "\\" + e.name;
+      : joinPath(picker.path, e.name);
 
     if (e.ready !== false) {
       row.onclick = () => {
