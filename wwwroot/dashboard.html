@@ -307,12 +307,6 @@
     <div id="channels"><div class="empty">No channels. Add an HDHomeRun tuner URL, IPTV stream, or camera to restream it as HLS.</div></div>
   </div>
 
-  <div class="card">
-    <details>
-      <summary>Effective configuration</summary>
-      <pre id="config">–</pre>
-    </details>
-  </div>
 </div>
 
 <div id="lightbox" style="display:none;position:fixed;inset:0;z-index:60;background:rgba(0,0,0,0.85);align-items:center;justify-content:center;cursor:zoom-out" onclick="this.style.display='none'">
@@ -432,7 +426,6 @@ async function tick() {
   renderSessions(sessions.sessions);
   refreshMounts();   // cheap, cached-ish
   refreshHls();
-  refreshConfig();
   await refreshChannels(false);
 
   if (!libraryBooted) {
@@ -616,13 +609,6 @@ async function refreshHls() {
   }
 }
 
-let configLoaded = false;
-async function refreshConfig() {
-  if (configLoaded) return;
-  configLoaded = true;
-  const data = await api("/api/config");
-  $("config").textContent = JSON.stringify(data.config, null, 2);
-}
 
 /* ---- inline HLS player: native where supported, else hls.js from CDN ---- */
 async function playHls(url) {
