@@ -172,6 +172,8 @@ try
         {
             var urls = DashboardUrls(control.BoundHost, config.Control.Port);
             var urlList = string.Join(" · ", urls);
+            if (control.BoundHost == "0.0.0.0")
+                urlList += " (bound to 0.0.0.0 — reachable on any of this machine's addresses)";
             if (OperatingSystem.IsLinux()
                 && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISPLAY"))
                 && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY")))
