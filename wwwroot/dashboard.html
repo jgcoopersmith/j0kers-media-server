@@ -330,6 +330,23 @@
           <button id="np-stop" class="danger" title="Stop playlist">✕</button>
         </div>
         <video id="hlsvideo" controls playsinline></video>
+        <div id="pctl" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px">
+          <button id="pc-back" title="Back 10 seconds">⏪ 10s</button>
+          <button id="pc-fwd" title="Forward 10 seconds">10s ⏩</button>
+          <span style="flex:1"></span>
+          <label style="color:var(--muted);font-size:12px">Speed
+            <select id="pc-speed" class="am-in" style="padding:3px 6px">
+              <option value="0.5">0.5×</option><option value="0.75">0.75×</option>
+              <option value="1" selected>1×</option><option value="1.25">1.25×</option>
+              <option value="1.5">1.5×</option><option value="2">2×</option>
+            </select></label>
+          <label style="color:var(--muted);font-size:12px">Quality
+            <select id="pc-res" class="am-in" style="padding:3px 6px">
+              <option value="0" selected>Source</option>
+              <option value="1080">1080p</option><option value="720">720p</option>
+              <option value="480">480p</option><option value="360">360p</option>
+            </select></label>
+        </div>
         <div id="hlsmsg"></div>
       </div>
     </div>
@@ -564,8 +581,9 @@ function stopPreview() {
   syncPreviewButtons();
 }
 
-async function togglePreview(btn) {
-  const path = btn.dataset.preview;
+function togglePreview(btn) { startPreview(btn.dataset.preview); }
+
+async function startPreview(path) {
   if (previewPath === path) return; // already playing; the Stop button ends it
   stopPreview();
 
@@ -671,9 +689,43 @@ async function refreshHls() {
    player is doing (single stream or playlist) and hides it. */
 function stopHlsVideo() {
   stopQueue(); // tears down the video element and any playlist state
+  currentMediaPath = null;
   $("hlsplayer").style.display = "none";
   $("hlsmsg").textContent = "";
 }
+
+/* ---- player controls: seek, speed, quality ---- */
+$("pc-back").addEventListener("click", () => {
+  const v = $("hlsvideo");
+  v.currentTime = Math.max(0, v.currentTime - 10);
+});
+$("pc-fwd").addEventListener("click", () => {
+  const v = $("hlsvideo");
+  if (isFinite(v.duration)) v.currentTime = Math.min(v.duration, v.currentTime + 10);
+  else v.currentTime += 10;
+});
+$("pc-speed").addEventListener("change", () => {
+  $("hlsvideo").playbackRate = parseFloat($("pc-speed").value) || 1;
+  localStorage.setItem("j0kers-speed", $("pc-speed").value);
+});
+$("pc-res").addEventListener("change", async () => {
+  localStorage.setItem("j0kers-res", $("pc-res").value);
+  // switching quality mid-play: restart the same file at the new height,
+  // resuming from the current position once it's ready
+  if (!currentMediaPath || mediaKind(currentMediaPath) !== "video") return;
+  const v = $("hlsvideo");
+  const resume = v.currentTime;
+  await playMedia(currentMediaPath);
+  if (resume > 1) {
+    v.addEventListener("loadedmetadata", function once() {
+      v.removeEventListener("loadedmetadata", once);
+      setTimeout(() => { try { v.currentTime = resume; } catch {} }, 300);
+    });
+  }
+});
+// restore remembered speed/quality
+if (localStorage.getItem("j0kers-speed")) $("pc-speed").value = localStorage.getItem("j0kers-speed");
+if (localStorage.getItem("j0kers-res")) $("pc-res").value = localStorage.getItem("j0kers-res");
 
 /* ---- inline HLS player: native where supported, else hls.js from CDN ---- */
 async function playHls(url) {
@@ -681,6 +733,14 @@ async function playHls(url) {
   box.style.display = "block";
   msg.textContent = "";
   if (window._hls) { window._hls.destroy(); window._hls = null; }
+
+  // always start at the beginning (event playlists otherwise join at the
+  // live edge while a transcode is still running) and keep the chosen speed
+  video.addEventListener("loadedmetadata", function once() {
+    video.removeEventListener("loadedmetadata", once);
+    if (video.currentTime > 0.5) video.currentTime = 0;
+    video.playbackRate = parseFloat($("pc-speed").value) || 1;
+  });
 
   if (video.canPlayType("application/vnd.apple.mpegurl")) {
     video.src = url;
@@ -699,7 +759,7 @@ async function playHls(url) {
     msg.textContent = "";
   }
   if (window.Hls && Hls.isSupported()) {
-    window._hls = new Hls();
+    window._hls = new Hls({ startPosition: 0 });
     window._hls.loadSource(url);
     window._hls.attachMedia(video);
     video.play().catch(() => {});
@@ -1157,13 +1217,18 @@ function viewImage(path) {
 }
 
 /* movies & music: ask the server to transcode to HLS, then play inline */
+let currentMediaPath = null; // file behind the inline player (for quality switches)
+
 async function playMedia(path, row) {
   const name = path.split(/[\\/]/).pop();
+  currentMediaPath = path;
+  // quality applies to video only; audio has nothing to scale
+  const height = mediaKind(path) === "video" ? parseInt($("pc-res").value, 10) || 0 : 0;
   try {
     const r = await fetch("/api/play", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...headers() },
-      body: JSON.stringify({ file: path }),
+      body: JSON.stringify({ file: path, height }),
     });
     const data = await r.json();
     if (!r.ok) { alert(data.error || "playback failed"); return; }
@@ -1311,7 +1376,8 @@ async function submitAddMount() {
     toggleAddMount();
     $("am-path").value = ""; $("am-file").value = ""; $("am-desc").value = "";
     mountsLoaded = 0;
-    refreshMounts();
+    await refreshMounts();
+    startPreview(body.path); // hear the new mount right away, from the start
   } catch (e) {
     msg.textContent = "request failed: " + e.message;
   }

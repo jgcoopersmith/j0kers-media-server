@@ -66,6 +66,13 @@ set `ffmpeg.path`), the dashboard becomes a full media center:
   grabs, cached under the media root) with icon fallbacks. Movies and
   music transcode to HLS on the fly and play inline; pictures open in a
   lightbox viewer.
+- **Player controls** — the inline player has ⏪/⏩ 10-second seek
+  buttons, playback speed (0.5×–2×), and a quality selector
+  (Source/1080p/720p/480p/360p — each height transcodes and caches
+  separately, and switching mid-play resumes at the same position).
+  Speed and quality choices are remembered. Playback always starts at
+  the beginning, and a freshly added RTSP mount starts playing its
+  preview immediately.
 - **Quick buttons** — pin any media item (the ☆ on tiles and music rows,
   or *⭐ Pin media* in the header to pick a file directly) and it becomes a
   one-click `⭐ name` button at the top of the library that plays the video

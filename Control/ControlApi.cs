@@ -787,7 +787,7 @@ public sealed class ControlApi : IDisposable
         }
     }
 
-    private sealed record PlayRequest(string? file);
+    private sealed record PlayRequest(string? file, int? height);
     private sealed record ChannelRequest(string? name, string? url);
 
     /// <summary>POST /api/play {file} — transcode any media file to HLS and return the stream name.</summary>
@@ -806,10 +806,16 @@ public sealed class ControlApi : IDisposable
                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             if (string.IsNullOrWhiteSpace(req?.file))
             {
-                WriteJson(res, 400, new { error = "body must be { \"file\": \"...\" }" });
+                WriteJson(res, 400, new { error = "body must be { \"file\": \"...\", \"height\": 0|360|480|720|1080 }" });
                 return;
             }
-            var (stream, ready) = _ffmpeg.StartVod(req.file);
+            var height = req.height ?? 0;
+            if (height is not (0 or 360 or 480 or 720 or 1080))
+            {
+                WriteJson(res, 400, new { error = "height must be 0 (source), 360, 480, 720, or 1080" });
+                return;
+            }
+            var (stream, ready) = _ffmpeg.StartVod(req.file, height);
             WriteJson(res, 200, new { stream, ready, playlist = $"/{stream}/index.m3u8" });
         }
         catch (FileNotFoundException)

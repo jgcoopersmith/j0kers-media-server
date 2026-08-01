@@ -101,16 +101,18 @@ public sealed class FfmpegManager : IDisposable
     /// Starts (or reuses) an HLS conversion of a media file. Returns the
     /// stream directory name under the media root; the playlist inside it
     /// becomes playable within a couple of seconds while conversion runs.
+    /// <paramref name="height"/> &gt; 0 scales the video to that height
+    /// (each height caches as its own conversion).
     /// </summary>
-    public (string stream, bool ready) StartVod(string file)
+    public (string stream, bool ready) StartVod(string file, int height = 0)
     {
         if (!Available) throw new InvalidOperationException("ffmpeg is not available");
         var info = new FileInfo(file);
         if (!info.Exists) throw new FileNotFoundException("no such file", file);
 
-        // cache key: same file+size+mtime → same output dir, converted once
+        // cache key: same file+size+mtime+height → same output dir, converted once
         var key = Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(
-            $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}")))[..12].ToLowerInvariant();
+            $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}|{height}")))[..12].ToLowerInvariant();
         var stream = "vod-" + key;
         var dir = Path.Combine(_mediaRoot, stream);
         var playlist = Path.Combine(dir, "index.m3u8");
@@ -128,8 +130,9 @@ public sealed class FfmpegManager : IDisposable
 
             EvictVodCache(keep: stream);
             Directory.CreateDirectory(dir);
+            var scale = height > 0 ? $"-vf scale=-2:{height} " : "";
             var args =
-                $"-hide_banner -loglevel error -y -i \"{info.FullName}\" " +
+                $"-hide_banner -loglevel error -y -i \"{info.FullName}\" {scale}" +
                 $"-c:v libx264 -preset {_config.Preset} -crf {_config.Crf} -pix_fmt yuv420p " +
                 $"-c:a aac -b:a 160k -ac 2 " +
                 $"-f hls -hls_time 6 -hls_list_size 0 -hls_playlist_type event " +
