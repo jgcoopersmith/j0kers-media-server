@@ -63,6 +63,11 @@ set `ffmpeg.path`), the dashboard becomes a full media center:
   (`mp3/flac/…`) transcode to HLS on the fly and play inline (converted
   once, cached under the HLS media root), and pictures open in a lightbox
   viewer.
+- **Folder playlists** — *▶ Play folder* (or the *▶ All* button on any
+  folder row) queues every media file in a folder and auto-advances with
+  ⏮/⏭ controls; *☆ Save playlist* remembers the folder by name
+  (persisted server-side in `playlists.json`) as a one-click chip above
+  the library.
 - **Live channels** — add any live source by URL: an HDHomeRun tuner
   (`http://<tuner-ip>:5004/auto/v5.1` for local TV channels), IPTV
   streams, RTSP/RTMP cameras, UDP/SRT feeds. The server restreams each as
@@ -152,6 +157,7 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `DELETE /api/hls?stream=x` | delete an HLS stream's files from the media root |
 | `POST /api/play` `{file}` | transcode a media file to HLS (returns playlist path) |
 | `GET/POST/DELETE /api/channels` | list / add / remove live channels (persisted to `channels.json`) |
+| `GET/POST/DELETE /api/playlists` | list / save / forget folder playlists (persisted to `playlists.json`) |
 | `GET /api/image?path=` | serve a picture for the library viewer |
 | `POST /api/server/start` / `stop` | start / stop the streaming services |
 | `GET/POST /api/settings` | read / save hostname + ports (persisted to `settings.json`) |

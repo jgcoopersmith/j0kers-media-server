@@ -277,6 +277,13 @@
       <h2>HLS streams</h2>
       <div id="hls"></div>
       <div id="hlsplayer">
+        <div id="np" style="display:none;align-items:center;gap:8px;margin-bottom:6px">
+          <span style="color:var(--ink);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1"><span id="np-title"></span>
+            <span id="np-pos" style="color:var(--muted);font-size:12px"></span></span>
+          <button id="np-prev" title="Previous">⏮</button>
+          <button id="np-next" title="Next">⏭</button>
+          <button id="np-stop" class="danger" title="Stop playlist">✕</button>
+        </div>
         <video id="hlsvideo" controls playsinline></video>
         <div id="hlsmsg"></div>
       </div>
@@ -284,8 +291,11 @@
   </div>
 
   <div class="card">
-    <h2 style="display:flex;align-items:center"><span style="flex:1">Media library</span>
+    <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Media library</span>
+      <button id="lib-playall" style="display:none">▶ Play folder</button>
+      <button id="lib-save" style="display:none">☆ Save playlist</button>
       <button onclick="chooseLibrary()">📁 Choose folder</button></h2>
+    <div id="playlists" style="margin-bottom:6px"></div>
     <div id="lib-path" class="mono" style="color:var(--muted);font-size:12px;margin-bottom:8px"></div>
     <div id="library"><div class="empty">Pick a folder — movies, music, and pictures inside it become playable here.</div></div>
     <div id="ffmpeg-warn" style="display:none;color:var(--warning);font-size:12px;margin-top:8px">
@@ -426,6 +436,7 @@ async function tick() {
   refreshMounts();   // cheap, cached-ish
   refreshHls();
   await refreshChannels(false);
+  refreshPlaylists(false);
 
   if (!libraryBooted) {
     libraryBooted = true;
@@ -726,6 +737,8 @@ async function chooseLibrary() {
   loadLibrary(p);
 }
 
+let currentLibPath = null;
+
 async function loadLibrary(path) {
   const box = $("library");
   $("lib-path").textContent = path;
@@ -740,6 +753,10 @@ async function loadLibrary(path) {
     return;
   }
 
+  currentLibPath = data.path;
+  $("lib-playall").style.display = ffmpegOk ? "" : "none";
+  $("lib-save").style.display = "";
+
   let h = "";
   if (data.parent && localStorage.getItem("j0kers-library") !== data.path)
     h += libRow("⬆️", "..", "", "lib-open", data.parent);
@@ -747,7 +764,10 @@ async function loadLibrary(path) {
   for (const e of data.entries) {
     const full = (data.path.endsWith("\\") || data.path.endsWith("/")) ? data.path + e.name : data.path + "\\" + e.name;
     if (e.type === "folder") {
-      h += libRow("📁", e.name, "", "lib-open", full);
+      const extra = ffmpegOk
+        ? '<button data-act="lib-playfolder" data-arg="' + esc(full) + '" title="Play everything in this folder">▶ All</button>'
+        : "";
+      h += libRow("📁", e.name, "", "lib-open", full, extra);
     } else {
       const kind = mediaKind(e.name);
       if (kind === "image")
@@ -759,12 +779,108 @@ async function loadLibrary(path) {
   box.innerHTML = h || '<div class="empty">no playable media in this folder</div>';
 }
 
-function libRow(icon, name, detail, act, arg) {
+function libRow(icon, name, detail, act, arg, extra) {
   const clickable = act
     ? ' data-act="' + act + '" data-arg="' + esc(arg) + '" style="cursor:pointer"'
     : ' style="opacity:.55"';
   return '<div class="pick-row"' + clickable + '><span class="icon">' + icon + '</span><span class="nm">'
-    + esc(name) + '</span><span class="det">' + esc(detail || "") + '</span></div>';
+    + esc(name) + '</span>' + (extra || "") + '<span class="det">' + esc(detail || "") + '</span></div>';
+}
+
+/* ---- folder playlists: queue every media file, auto-advance ---- */
+const queue = { items: [], index: -1, label: null };
+
+async function listFolderMedia(folder) {
+  const r = await fetch("/api/browse?path=" + encodeURIComponent(folder), { headers: headers() });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || r.status);
+  const sep = folder.endsWith("\\") || folder.endsWith("/") ? "" : "\\";
+  return data.entries
+    .filter(e => e.type === "file" && ["video", "audio"].includes(mediaKind(e.name)))
+    .map(e => folder + sep + e.name);
+}
+
+async function playFolder(folder, label) {
+  let items;
+  try { items = await listFolderMedia(folder); }
+  catch (e) { alert("cannot open folder: " + e.message); return; }
+  if (!items.length) { alert("no playable media files in that folder"); return; }
+  queue.items = items;
+  queue.label = label || folder.split(/[\\/]/).filter(Boolean).pop();
+  playQueueItem(0);
+}
+
+async function playQueueItem(i) {
+  if (i < 0 || i >= queue.items.length) { stopQueue(); return; }
+  queue.index = i;
+  const path = queue.items[i];
+  $("np").style.display = "flex";
+  $("np-title").textContent = queue.label + " — " + path.split(/[\\/]/).pop();
+  $("np-pos").textContent = "(" + (i + 1) + "/" + queue.items.length + ")";
+  $("np-prev").disabled = i === 0;
+  $("np-next").disabled = i === queue.items.length - 1;
+  await playMedia(path);
+}
+
+function stopQueue() {
+  queue.items = [];
+  queue.index = -1;
+  $("np").style.display = "none";
+  const v = $("hlsvideo");
+  v.pause();
+  if (window._hls) { window._hls.destroy(); window._hls = null; }
+  v.removeAttribute("src");
+  v.load();
+}
+
+$("np-prev").addEventListener("click", () => playQueueItem(queue.index - 1));
+$("np-next").addEventListener("click", () => playQueueItem(queue.index + 1));
+$("np-stop").addEventListener("click", stopQueue);
+$("hlsvideo").addEventListener("ended", () => {
+  if (queue.items.length && queue.index < queue.items.length - 1)
+    playQueueItem(queue.index + 1);
+  else if (queue.items.length)
+    stopQueue(); // playlist finished
+});
+
+$("lib-playall").addEventListener("click", () => { if (currentLibPath) playFolder(currentLibPath); });
+$("lib-save").addEventListener("click", async () => {
+  if (!currentLibPath) return;
+  const suggested = currentLibPath.split(/[\\/]/).filter(Boolean).pop();
+  const name = prompt("Playlist name:", suggested);
+  if (!name) return;
+  const r = await fetch("/api/playlists", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...headers() },
+    body: JSON.stringify({ name, folder: currentLibPath }),
+  });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || "save failed"); return; }
+  refreshPlaylists(true);
+});
+
+/* ---- remembered playlists strip ---- */
+let playlistsLoaded = 0;
+async function refreshPlaylists(force) {
+  if (!force && Date.now() - playlistsLoaded < 15000) return;
+  playlistsLoaded = Date.now();
+  let data;
+  try { data = await api("/api/playlists"); } catch { return; }
+  if (!data.playlists.length) { $("playlists").innerHTML = ""; return; }
+  let h = '<div style="display:flex;flex-wrap:wrap;gap:6px">';
+  for (const p of data.playlists) {
+    h += '<span style="display:inline-flex;align-items:center;gap:4px;border:1px solid var(--border);border-radius:999px;padding:2px 4px 2px 10px;font-size:12.5px;background:var(--surface-2)">'
+      + '<span title="' + esc(p.folder) + '">🎞 ' + esc(p.name) + '</span>'
+      + '<button data-act="pl-play" data-arg="' + esc(p.folder) + '" data-name="' + esc(p.name) + '" title="Play playlist" style="border:none;background:none;padding:2px 4px">▶</button>'
+      + '<button data-act="pl-remove" data-arg="' + esc(p.name) + '" title="Forget playlist" style="border:none;background:none;padding:2px 4px;color:var(--critical)">✕</button>'
+      + '</span>';
+  }
+  $("playlists").innerHTML = h + '</div>';
+}
+
+async function removePlaylist(name) {
+  if (!confirm("Forget playlist '" + name + "'? (No media files are deleted.)")) return;
+  await fetch("/api/playlists?name=" + encodeURIComponent(name), { method: "DELETE", headers: headers() });
+  refreshPlaylists(true);
 }
 
 function viewImage(path) {
@@ -1163,7 +1279,10 @@ document.addEventListener("click", e => {
     case "ch-remove":   removeChannel(arg); break;
     case "lib-open":    loadLibrary(arg); break;
     case "lib-img":     viewImage(arg); break;
-    case "lib-play":    playMedia(arg); break;
+    case "lib-play":    queue.items = []; queue.index = -1; $("np").style.display = "none"; playMedia(arg); break;
+    case "lib-playfolder": playFolder(arg); break;
+    case "pl-play":     playFolder(arg, el.dataset.name); break;
+    case "pl-remove":   removePlaylist(arg); break;
   }
 });
 

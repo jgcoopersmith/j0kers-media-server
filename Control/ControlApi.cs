@@ -35,6 +35,7 @@ public sealed class ControlApi : IDisposable
     private readonly Media.FfmpegManager? _ffmpeg;
 
     private RtspServer? RtspServer => _services.Rtsp;
+    private readonly Media.PlaylistStore _playlists;
 
     public ControlApi(ServerConfig serverConfig, Services.ServiceController services, string baseDirectory,
         Media.FfmpegManager? ffmpeg = null)
@@ -44,6 +45,7 @@ public sealed class ControlApi : IDisposable
         _services = services;
         _baseDirectory = baseDirectory;
         _ffmpeg = ffmpeg;
+        _playlists = new Media.PlaylistStore(baseDirectory);
     }
 
     public void Start()
@@ -267,6 +269,34 @@ public sealed class ControlApi : IDisposable
                 var name = ctx.Request.QueryString["name"] ?? "";
                 if (_ffmpeg?.RestartChannel(name) == true) WriteJson(res, 200, new { restarted = name });
                 else WriteJson(res, 404, new { error = "unknown channel" });
+                return;
+            }
+
+            // ---- remembered playlists (media library folders) ----
+            if (method == "GET" && path == "/api/playlists")
+            {
+                WriteJson(res, 200, new
+                {
+                    playlists = _playlists.All.Select(p => new { name = p.Name, folder = p.Folder }),
+                });
+                return;
+            }
+
+            if (method == "POST" && path == "/api/playlists")
+            {
+                SavePlaylist(ctx);
+                return;
+            }
+
+            if (method == "DELETE" && path == "/api/playlists")
+            {
+                var plName = ctx.Request.QueryString["name"] ?? "";
+                if (_playlists.Remove(plName))
+                {
+                    Log.Info("control", $"playlist removed: {plName}");
+                    WriteJson(res, 200, new { removed = plName });
+                }
+                else WriteJson(res, 404, new { error = "unknown playlist" });
                 return;
             }
 
@@ -553,6 +583,38 @@ public sealed class ControlApi : IDisposable
         catch (Exception ex)
         {
             WriteJson(res, 500, new { error = "could not delete: " + ex.Message });
+        }
+    }
+
+    private sealed record PlaylistRequest(string? name, string? folder);
+
+    /// <summary>POST /api/playlists {name, folder} — remember a folder as a playlist.</summary>
+    private void SavePlaylist(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        try
+        {
+            using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
+            var req = JsonSerializer.Deserialize<PlaylistRequest>(reader.ReadToEnd(),
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (string.IsNullOrWhiteSpace(req?.name) || string.IsNullOrWhiteSpace(req?.folder))
+            {
+                WriteJson(res, 400, new { error = "body must be { \"name\": \"...\", \"folder\": \"...\" }" });
+                return;
+            }
+            var folder = Path.GetFullPath(req.folder);
+            if (!Directory.Exists(folder))
+            {
+                WriteJson(res, 404, new { error = "folder not found" });
+                return;
+            }
+            _playlists.Save(req.name.Trim(), folder);
+            Log.Info("control", $"playlist saved: {req.name} → {folder}");
+            WriteJson(res, 200, new { saved = req.name.Trim() });
+        }
+        catch (Exception ex)
+        {
+            WriteJson(res, 400, new { error = ex.Message });
         }
     }
 

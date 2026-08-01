@@ -13,3 +13,5 @@ obj/
 /channels.json
 /config/settings.json
 /settings.json
+/config/playlists.json
+/playlists.json
