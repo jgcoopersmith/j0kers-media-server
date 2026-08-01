@@ -4,15 +4,19 @@ using J0kersMediaServer.Logging;
 namespace J0kersMediaServer.Hls;
 
 /// <summary>
-/// Starts an HttpListener on the configured address. On Windows, wildcard
-/// prefixes ("http://+:port/") require an admin-granted URL ACL; when that
-/// fails with access-denied, fall back to loopback so the server still
-/// comes up unprivileged. (Grant the ACL with:
-/// netsh http add urlacl url=http://+:PORT/ user=Everyone)
+/// Starts an HttpListener on the configured address, papering over the
+/// platform differences:
 ///
-/// http.sys matches requests by Host header, so a loopback binding must
-/// register BOTH "localhost" and "127.0.0.1" prefixes — otherwise a browser
-/// pointed at one spelling gets "400 Invalid Hostname" from the other.
+/// - Windows (http.sys): the all-interfaces prefix "http://+:port/" needs
+///   an admin-granted URL ACL; when that fails with access-denied we fall
+///   back to loopback so the server still comes up unprivileged.
+///   (Grant the ACL with: netsh http add urlacl url=http://+:PORT/ user=Everyone)
+/// - macOS/Linux (managed listener): no ACLs — "http://*:port/" binds all
+///   interfaces directly and accepts any Host header.
+///
+/// Requests are matched by Host header, so loopback bindings register BOTH
+/// "localhost" and "127.0.0.1" prefixes — otherwise a browser pointed at
+/// one spelling gets "400 Invalid Hostname" from the other.
 /// </summary>
 public static class HttpListenerBinder
 {
@@ -24,18 +28,28 @@ public static class HttpListenerBinder
         if (bindAddress is "127.0.0.1" or "localhost" or "::1")
             return (StartLoopback(port), "localhost");
 
-        var host = bindAddress == "0.0.0.0" ? "+" : bindAddress;
         var listener = new HttpListener();
-        listener.Prefixes.Add($"http://{host}:{port}/");
+        if (bindAddress == "0.0.0.0")
+        {
+            // '+' is http.sys syntax; the managed listener on Unix wants '*'
+            listener.Prefixes.Add(OperatingSystem.IsWindows()
+                ? $"http://+:{port}/"
+                : $"http://*:{port}/");
+        }
+        else
+        {
+            listener.Prefixes.Add($"http://{bindAddress}:{port}/");
+        }
+
         try
         {
             listener.Start();
             return (listener, bindAddress);
         }
-        catch (HttpListenerException ex) when (ex.ErrorCode == 5) // ERROR_ACCESS_DENIED
+        catch (HttpListenerException ex) when (OperatingSystem.IsWindows() && ex.ErrorCode == 5) // ERROR_ACCESS_DENIED
         {
             Log.Warn(area,
-                $"binding http://{host}:{port}/ denied (URL ACL); falling back to localhost. " +
+                $"binding http://{bindAddress}:{port}/ denied (URL ACL); falling back to localhost. " +
                 $"To listen on all interfaces run elevated once: netsh http add urlacl url=http://+:{port}/ user=Everyone");
             return (StartLoopback(port), "localhost");
         }
