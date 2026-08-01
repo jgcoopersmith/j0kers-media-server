@@ -1,0 +1,69 @@
+{
+  // j0kers Media Server — full example configuration.
+  // Every value shown here is the default unless noted. Comments are allowed.
+  // Environment overrides: J0KERS_RTSP_PORT, J0KERS_HLS_PORT, J0KERS_CONTROL_PORT,
+  //                        J0KERS_BIND_ADDRESS, J0KERS_LOG_LEVEL, J0KERS_CONFIG.
+
+  "serverName": "j0kers Media Server",
+
+  "rtsp": {
+    "enabled": true,
+    "bindAddress": "0.0.0.0",
+    "port": 8554,                     // 554 is the IANA RTSP port but needs elevation
+    "sessionTimeoutSeconds": 60,      // advertised in the Session header (RFC 7826 §18.49)
+    "allowInterleavedTcp": true,      // RTP/AVP/TCP interleaved transport (RFC 7826 §14)
+    "maxSessions": 64,
+    "realm": "j0kers"
+  },
+
+  "rtp": {
+    "portRangeMin": 20000,            // must be even (RFC 3550 §11: RTP even, RTCP odd)
+    "portRangeMax": 20999,
+    "rtcpEnabled": true,
+    "rtcpIntervalSeconds": 5.0,       // sender-report cadence (RFC 3550 §6.2)
+    "dscp": 0
+  },
+
+  "hls": {
+    "enabled": true,
+    "bindAddress": "0.0.0.0",
+    "port": 8080,
+    "mediaRoot": "media",             // each subdirectory = one stream
+    "targetDurationSeconds": 6,       // EXT-X-TARGETDURATION (RFC 8216 §4.3.3.1)
+    "liveWindowSegments": 0,          // 0 = VOD playlists; N>0 = sliding live window
+    "corsAllowOrigin": "*"
+  },
+
+  "control": {
+    "enabled": true,
+    "bindAddress": "127.0.0.1",       // keep loopback unless authToken is set
+    "port": 9090,
+    "authToken": ""                   // non-empty enables Bearer auth
+  },
+
+  "services": {
+    "announcementEnabled": true,      // RFC 4240-style: rtsp://host:8554/annc?play=<clip>
+    "announcementClipDirectory": "clips"
+  },
+
+  "mounts": [
+    {
+      "path": "/test",
+      "source": "tone",
+      "toneFrequencyHz": 440.0,
+      "description": "440 Hz PCMU test tone"
+    },
+    {
+      "path": "/test880",
+      "source": "tone",
+      "toneFrequencyHz": 880.0,
+      "description": "880 Hz PCMU test tone"
+    }
+    // { "path": "/music", "source": "file", "file": "music.ulaw", "description": "raw 8 kHz G.711 µ-law file, looped" }
+  ],
+
+  "logging": {
+    "level": "info",                  // trace | debug | info | warn | error
+    "logRtspMessages": false
+  }
+}

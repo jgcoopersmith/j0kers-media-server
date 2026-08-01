@@ -1,0 +1,5 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/J0kersMediaServer/J0kersMediaServer.csproj" />
+  </Folder>
+</Solution>
