@@ -1228,6 +1228,25 @@ function viewImage(path) {
 /* movies & music: ask the server to transcode to HLS, then play inline */
 let currentMediaPath = null; // file behind the inline player (for quality switches)
 
+/* Library click: create the HLS stream (transcode starts in the background
+   and the stream appears in the HLS Streams list) WITHOUT playing it. */
+async function prepareMedia(path) {
+  const height = mediaKind(path) === "video" ? parseInt($("pc-res").value, 10) || 0 : 0;
+  try {
+    const r = await fetch("/api/play", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers() },
+      body: JSON.stringify({ file: path, height }),
+    });
+    const data = await r.json();
+    if (!r.ok) { alert(data.error || "could not prepare stream"); return; }
+    refreshHls();
+    document.getElementById("hls").scrollIntoView({ behavior: "smooth", block: "center" });
+  } catch (e) {
+    alert("request failed: " + e.message);
+  }
+}
+
 async function playMedia(path, row) {
   const name = path.split(/[\\/]/).pop();
   currentMediaPath = path;
@@ -1620,7 +1639,7 @@ document.addEventListener("click", e => {
     case "ch-remove":   removeChannel(arg); break;
     case "lib-open":    loadLibrary(arg); break;
     case "lib-img":     viewImage(arg); break;
-    case "lib-play":    queue.items = []; queue.index = -1; $("np").style.display = "none"; playMedia(arg); break;
+    case "lib-play":    prepareMedia(arg); break;
     case "lib-playfolder": playFolder(arg); break;
     case "lib-root-remove": removeLibraryRoot(arg); break;
     case "fav-open":    openFavorite(arg); break;
