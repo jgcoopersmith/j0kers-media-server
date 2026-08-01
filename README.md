@@ -37,6 +37,11 @@ terminate buttons, RTP throughput chart, mounts with copyable `rtsp://`
 URIs, HLS stream list, and the effective config. (Set
 `control.openDashboardOnStart` to `false` for headless use.)
 
+Every mount has a **▶ Play** button that streams its audio right in the
+browser (the server feeds raw G.711 over HTTP and the page decodes it with
+Web Audio — no plugins). HLS streams play inline too, via native HLS or
+hls.js.
+
 Check the control API:
 
 ```bash
@@ -99,6 +104,7 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `GET /api/mounts` | configured mounts + announcement URI |
 | `GET /api/sessions` | live RTSP sessions with RTP stats |
 | `DELETE /api/sessions/{id}` | force-terminate a session |
+| `GET /api/preview?mount=/x` | live raw µ-law audio of a mount (dashboard player) |
 
 Binds to loopback by default; set `control.authToken` before exposing it
 more widely.

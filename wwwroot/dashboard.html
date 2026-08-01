@@ -116,6 +116,10 @@
   button.danger { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 45%, transparent); }
   button.danger:hover { background: color-mix(in srgb, var(--critical) 14%, transparent); }
   .copied { color: var(--good) !important; }
+  button.playing { color: var(--good); border-color: color-mix(in srgb, var(--good) 45%, transparent); }
+  #hlsplayer { display: none; margin-top: 12px; }
+  #hlsvideo { width: 100%; border-radius: 10px; background: #000; max-height: 320px; }
+  #hlsmsg { color: var(--muted); font-size: 12px; margin-top: 6px; }
 
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
   @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
@@ -180,6 +184,10 @@
     <div class="card">
       <h2>HLS streams</h2>
       <div id="hls"></div>
+      <div id="hlsplayer">
+        <video id="hlsvideo" controls playsinline></video>
+        <div id="hlsmsg"></div>
+      </div>
     </div>
   </div>
 
@@ -295,6 +303,7 @@ async function refreshMounts() {
     h += '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
       + '<div style="flex:1;min-width:0"><div class="mono" style="color:var(--ink)">' + esc(uri) + '</div>'
       + '<div style="color:var(--muted);font-size:12px">' + esc(m.source) + (m.description ? " · " + esc(m.description) : "") + '</div></div>'
+      + '<button data-preview="' + esc(m.path) + '" onclick="togglePreview(this)">▶ Play</button>'
       + '<button onclick="copyText(this,\'' + esc(uri) + '\')">Copy</button></div>';
   }
   if (data.announcementService) {
@@ -302,6 +311,65 @@ async function refreshMounts() {
     h += '<div style="padding:8px 0 0;color:var(--muted);font-size:12px">Announcements: <span class="mono">' + esc(uri) + '</span></div>';
   }
   $("mounts").innerHTML = h || '<div class="empty">No mounts configured.</div>';
+  syncPreviewButtons();
+}
+
+/* ---- RTSP mount audio preview: raw µ-law over HTTP, decoded via Web Audio ---- */
+let preview = { ctrl: null, ctx: null, path: null };
+
+function ulawToPcm(u) {
+  u = ~u & 0xff;
+  const sign = u & 0x80, exp = (u >> 4) & 7, man = u & 0x0f;
+  const mag = (((man << 3) + 0x84) << exp) - 0x84;
+  return sign ? -mag : mag;
+}
+
+function syncPreviewButtons() {
+  document.querySelectorAll("[data-preview]").forEach(b => {
+    const on = preview.path === b.dataset.preview;
+    b.textContent = on ? "■ Stop" : "▶ Play";
+    b.classList.toggle("playing", on);
+  });
+}
+
+function stopPreview() {
+  if (preview.ctrl) preview.ctrl.abort();
+  if (preview.ctx) preview.ctx.close().catch(() => {});
+  preview = { ctrl: null, ctx: null, path: null };
+  syncPreviewButtons();
+}
+
+async function togglePreview(btn) {
+  const path = btn.dataset.preview;
+  if (preview.path === path) { stopPreview(); return; }
+  stopPreview();
+
+  const ctrl = new AbortController();
+  const ctx = new AudioContext();
+  preview = { ctrl, ctx, path };
+  syncPreviewButtons();
+
+  let nextTime = 0;
+  try {
+    const r = await fetch("/api/preview?mount=" + encodeURIComponent(path), { headers: headers(), signal: ctrl.signal });
+    if (!r.ok) throw new Error("preview " + r.status);
+    const reader = r.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done || preview.ctrl !== ctrl) break;
+      const f32 = new Float32Array(value.length);
+      for (let i = 0; i < value.length; i++) f32[i] = ulawToPcm(value[i]) / 32768;
+      const buf = ctx.createBuffer(1, f32.length, 8000);
+      buf.copyToChannel(f32, 0);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      if (nextTime < ctx.currentTime + 0.12) nextTime = ctx.currentTime + 0.12; // jitter cushion
+      src.start(nextTime);
+      nextTime += buf.duration;
+    }
+  } catch { /* aborted or stream ended */ }
+  if (preview.ctrl === ctrl) stopPreview();
 }
 
 async function refreshHls() {
@@ -316,6 +384,7 @@ async function refreshHls() {
       const url = "http://" + location.hostname + ":" + hlsPort + s.playlist;
       h += '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
         + '<div style="flex:1;min-width:0"><a class="mono" href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(s.name) + '</a></div>'
+        + '<button onclick="playHls(\'' + esc(url) + '\')">▶ Play</button>'
         + '<button onclick="copyText(this,\'' + esc(url) + '\')">Copy</button></div>';
     }
     $("hls").innerHTML = h;
@@ -330,6 +399,39 @@ async function refreshConfig() {
   configLoaded = true;
   const data = await api("/api/config");
   $("config").textContent = JSON.stringify(data.config, null, 2);
+}
+
+/* ---- inline HLS player: native where supported, else hls.js from CDN ---- */
+async function playHls(url) {
+  const box = $("hlsplayer"), video = $("hlsvideo"), msg = $("hlsmsg");
+  box.style.display = "block";
+  msg.textContent = "";
+  if (window._hls) { window._hls.destroy(); window._hls = null; }
+
+  if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    video.src = url;
+    video.play().catch(() => {});
+    return;
+  }
+  if (!window.Hls) {
+    msg.textContent = "loading player…";
+    await new Promise(resolve => {
+      const s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js";
+      s.onload = resolve;
+      s.onerror = resolve;
+      document.head.appendChild(s);
+    });
+    msg.textContent = "";
+  }
+  if (window.Hls && Hls.isSupported()) {
+    window._hls = new Hls();
+    window._hls.loadSource(url);
+    window._hls.attachMedia(video);
+    video.play().catch(() => {});
+  } else {
+    msg.textContent = "In-browser HLS needs hls.js (no internet?) — open the URL in VLC instead.";
+  }
 }
 
 function copyText(btn, text) {

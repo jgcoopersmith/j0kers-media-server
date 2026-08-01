@@ -19,21 +19,24 @@ namespace J0kersMediaServer.Control;
 ///   GET    /api/mounts          configured RTSP mounts
 ///   GET    /api/sessions        live RTSP sessions with RTP stats
 ///   DELETE /api/sessions/{id}   force-terminate a session
+///   GET    /api/preview?mount=  live raw µ-law audio of a mount (dashboard player)
 /// </summary>
 public sealed class ControlApi : IDisposable
 {
     private readonly ControlConfig _config;
     private readonly ServerConfig _serverConfig;
     private readonly RtspServer? _rtspServer;
+    private readonly string _baseDirectory;
     private readonly DateTime _startedUtc = DateTime.UtcNow;
     private HttpListener? _listener;
     private readonly CancellationTokenSource _cts = new();
 
-    public ControlApi(ServerConfig serverConfig, RtspServer? rtspServer)
+    public ControlApi(ServerConfig serverConfig, RtspServer? rtspServer, string baseDirectory)
     {
         _config = serverConfig.Control;
         _serverConfig = serverConfig;
         _rtspServer = rtspServer;
+        _baseDirectory = baseDirectory;
     }
 
     public void Start()
@@ -150,6 +153,12 @@ public sealed class ControlApi : IDisposable
                     return;
             }
 
+            if (method == "GET" && path == "/api/preview")
+            {
+                StreamPreview(ctx);
+                return;
+            }
+
             if (method == "DELETE" && path.StartsWith("/api/sessions/", StringComparison.Ordinal))
             {
                 var id = path["/api/sessions/".Length..];
@@ -175,6 +184,64 @@ public sealed class ControlApi : IDisposable
         finally
         {
             try { res.Close(); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// Streams a mount's audio as raw G.711 µ-law (8 kHz mono) in real time,
+    /// paced at 20 ms frames, until the client disconnects. The dashboard
+    /// decodes it with Web Audio; browsers cannot consume RTSP directly.
+    /// </summary>
+    private void StreamPreview(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var mountPath = ctx.Request.QueryString["mount"];
+        var mount = _serverConfig.Mounts.FirstOrDefault(m =>
+            string.Equals(m.Path, mountPath, StringComparison.OrdinalIgnoreCase));
+        if (mount is null)
+        {
+            WriteJson(res, 404, new { error = "unknown mount" });
+            return;
+        }
+
+        Media.IMediaSource source;
+        try
+        {
+            source = Media.MediaSourceFactory.Create(mount, _baseDirectory);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("control", $"preview source for {mount.Path} failed: {ex.Message}");
+            WriteJson(res, 500, new { error = "source unavailable" });
+            return;
+        }
+
+        Log.Info("control", $"preview started: {mount.Path} for {ctx.Request.RemoteEndPoint}");
+        res.StatusCode = 200;
+        res.ContentType = "application/octet-stream";
+        res.SendChunked = true;
+        res.Headers["Cache-Control"] = "no-store";
+
+        var frame = new byte[Media.MediaSourceFactory.FrameSamples];
+        var nextTick = Environment.TickCount64;
+        try
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                source.NextFrame(frame);
+                res.OutputStream.Write(frame);
+                nextTick += 20;
+                var delay = nextTick - Environment.TickCount64;
+                if (delay > 0) Thread.Sleep((int)delay);
+            }
+        }
+        catch (Exception)
+        {
+            // client hung up — normal end of a preview
+        }
+        finally
+        {
+            Log.Info("control", $"preview ended: {mount.Path}");
         }
     }
 

@@ -68,7 +68,7 @@ try
     }
     if (config.Control.Enabled)
     {
-        control = new ControlApi(config, rtsp);
+        control = new ControlApi(config, rtsp, baseDirectory);
         control.Start();
 
         if (config.Control.OpenDashboardOnStart)
