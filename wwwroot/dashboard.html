@@ -130,6 +130,42 @@
     padding: 12px 14px; overflow-x: auto; font-size: 12px; color: var(--ink-2); margin: 10px 0 0;
   }
 
+  /* ---- pickPath() modal file browser ---- */
+  #picker-overlay {
+    display: none; position: fixed; inset: 0; z-index: 50;
+    background: rgba(0,0,0,0.55); align-items: center; justify-content: center;
+  }
+  #picker {
+    width: min(620px, calc(100vw - 40px)); max-height: min(70vh, 560px);
+    display: flex; flex-direction: column;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+    box-shadow: 0 18px 50px rgba(0,0,0,0.45);
+  }
+  #picker header { display: flex; align-items: center; gap: 10px; padding: 14px 16px 10px; margin: 0; }
+  #picker header h3 { margin: 0; font-size: 14px; font-weight: 600; flex: 1; }
+  #picker-path {
+    padding: 0 16px 8px; color: var(--muted); font-size: 12px;
+    font-family: ui-monospace, Consolas, monospace;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #picker-list { flex: 1; overflow-y: auto; border-top: 1px solid var(--grid); border-bottom: 1px solid var(--grid); }
+  .pick-row {
+    display: flex; align-items: center; gap: 10px; padding: 7px 16px; cursor: pointer;
+    color: var(--ink-2); font-size: 13px; user-select: none;
+  }
+  .pick-row:hover { background: var(--surface-2); }
+  .pick-row.selected { background: color-mix(in srgb, var(--series-1) 18%, transparent); color: var(--ink); }
+  .pick-row .icon { width: 20px; text-align: center; flex: none; }
+  .pick-row .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pick-row .det { color: var(--muted); font-size: 11.5px; flex: none; }
+  .pick-row.dim { opacity: 0.45; cursor: default; }
+  #picker footer { display: flex; align-items: center; gap: 8px; padding: 12px 16px; }
+  #picker-msg { flex: 1; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #picker button.primary {
+    background: var(--series-1); border-color: transparent; color: #fff; font-weight: 600;
+  }
+  #picker button.primary:disabled { opacity: 0.4; cursor: default; }
+
   #authbar { display: none; gap: 8px; margin-bottom: 14px; }
   #authbar input {
     flex: 1; font: inherit; padding: 7px 12px; border-radius: 10px;
@@ -148,6 +184,7 @@
       <div class="sub"><span class="dot" id="livedot"></span><span id="livetext">connecting…</span></div>
     </div>
     <div class="spacer"></div>
+    <button class="pill" id="browsebtn" onclick="browseAndCopy()" title="Browse this machine and copy a path">📁 Browse</button>
     <span class="pill" id="verpill">v–</span>
   </header>
 
@@ -205,6 +242,23 @@
       <summary>Effective configuration</summary>
       <pre id="config">–</pre>
     </details>
+  </div>
+</div>
+
+<div id="picker-overlay">
+  <div id="picker" role="dialog" aria-modal="true">
+    <header>
+      <h3 id="picker-title">Select</h3>
+      <button id="picker-up" onclick="pickerUp()">↑ Up</button>
+      <button onclick="pickerCancel()">✕</button>
+    </header>
+    <div id="picker-path">Drives</div>
+    <div id="picker-list"></div>
+    <footer>
+      <div id="picker-msg"></div>
+      <button onclick="pickerCancel()">Cancel</button>
+      <button class="primary" id="picker-ok" onclick="pickerOk()" disabled>Select</button>
+    </footer>
   </div>
 </div>
 
@@ -489,6 +543,136 @@ async function playHls(url) {
   } else {
     msg.textContent = "In-browser HLS needs hls.js (no internet?) — open the URL in VLC instead.";
   }
+}
+
+/* ==== pickPath(): reusable drive / folder / file picker =================
+   Usage:
+     const p = await pickPath();                                  // anything
+     const f = await pickPath({ mode: "file",   title: "Pick a clip" });
+     const d = await pickPath({ mode: "folder", title: "Media root" });
+   Resolves with the absolute path, or null if cancelled.
+   mode: "any" (default) | "file" | "folder" — what the Select button accepts
+   (drives count as folders). Navigation: double-click or single-click a
+   drive/folder to enter it, single-click selects, Esc cancels.
+========================================================================= */
+const picker = { resolve: null, mode: "any", path: "", parentPath: null, selected: null, selectedType: null };
+
+function pickPath(opts = {}) {
+  return new Promise(resolve => {
+    picker.resolve = resolve;
+    picker.mode = opts.mode || "any";
+    picker.selected = null;
+    picker.selectedType = null;
+    $("picker-title").textContent = opts.title ||
+      (picker.mode === "file" ? "Select a file" : picker.mode === "folder" ? "Select a folder" : "Select a file or folder");
+    $("picker-overlay").style.display = "flex";
+    pickerLoad(opts.startPath || "");
+  });
+}
+
+async function pickerLoad(path) {
+  const list = $("picker-list"), msg = $("picker-msg");
+  msg.textContent = "";
+  list.innerHTML = '<div class="pick-row dim">loading…</div>';
+  picker.selected = null;
+  picker.selectedType = null;
+  pickerSync();
+
+  let data;
+  try {
+    const url = "/api/browse" + (path ? "?path=" + encodeURIComponent(path) : "");
+    const r = await fetch(url, { headers: headers() });
+    data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.status);
+  } catch (e) {
+    list.innerHTML = "";
+    msg.textContent = "cannot open: " + e.message;
+    return;
+  }
+
+  picker.path = data.path;
+  picker.parentPath = data.parent; // null at drive root → back to drive list
+  $("picker-path").textContent = data.path || "Drives";
+  $("picker-up").disabled = !data.path;
+
+  list.innerHTML = "";
+  if (!data.entries.length)
+    list.innerHTML = '<div class="pick-row dim">empty folder</div>';
+
+  for (const e of data.entries) {
+    const row = document.createElement("div");
+    row.className = "pick-row" + (e.ready === false ? " dim" : "");
+    const icon = e.type === "drive" ? "💾" : e.type === "folder" ? "📁" : "📄";
+    const label = e.type === "drive" && e.label ? " (" + e.label + ")" : "";
+    row.innerHTML = '<span class="icon">' + icon + '</span><span class="nm">' + esc(e.name + label) + '</span><span class="det">' + esc(e.detail || "") + '</span>';
+    const full = e.type === "drive" ? e.name
+      : picker.path.endsWith("\\") || picker.path.endsWith("/") ? picker.path + e.name
+      : picker.path + "\\" + e.name;
+
+    if (e.ready !== false) {
+      row.onclick = () => {
+        list.querySelectorAll(".pick-row").forEach(r2 => r2.classList.remove("selected"));
+        row.classList.add("selected");
+        picker.selected = full;
+        picker.selectedType = e.type;
+        pickerSync();
+      };
+      if (e.type !== "file")
+        row.ondblclick = () => pickerLoad(full);
+    }
+    list.appendChild(row);
+  }
+}
+
+function pickerSync() {
+  const ok = $("picker-ok");
+  const t = picker.selectedType;
+  let valid = false;
+  if (picker.selected) {
+    valid = picker.mode === "any"
+      || (picker.mode === "file" && t === "file")
+      || (picker.mode === "folder" && t !== "file");
+  } else if (picker.mode !== "file" && picker.path) {
+    valid = true; // no selection → the folder being viewed is selectable
+  }
+  ok.disabled = !valid;
+  ok.textContent = picker.selected || !picker.path ? "Select" : "Select this folder";
+}
+
+function pickerUp() {
+  if (picker.parentPath) pickerLoad(picker.parentPath);
+  else pickerLoad(""); // drive root → drive list
+}
+
+function pickerFinish(value) {
+  $("picker-overlay").style.display = "none";
+  const resolve = picker.resolve;
+  picker.resolve = null;
+  if (resolve) resolve(value);
+}
+
+function pickerOk() {
+  pickerFinish(picker.selected || picker.path || null);
+}
+
+function pickerCancel() { pickerFinish(null); }
+
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && picker.resolve) pickerCancel();
+});
+$("picker-overlay").addEventListener("mousedown", e => {
+  if (e.target.id === "picker-overlay") pickerCancel();
+});
+
+/* Header Browse button: pick anything, copy the path to the clipboard. */
+async function browseAndCopy() {
+  const p = await pickPath({ title: "Browse — pick a path to copy" });
+  if (!p) return;
+  const btn = $("browsebtn");
+  try { await navigator.clipboard.writeText(p); } catch {}
+  const old = btn.textContent;
+  btn.textContent = "✓ copied " + (p.length > 24 ? "…" + p.slice(-22) : p);
+  setTimeout(() => { btn.textContent = old; }, 2200);
 }
 
 function copyText(btn, text) {

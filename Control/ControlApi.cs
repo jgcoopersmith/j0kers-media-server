@@ -19,7 +19,8 @@ namespace J0kersMediaServer.Control;
 ///   GET    /api/mounts          configured RTSP mounts
 ///   GET    /api/sessions        live RTSP sessions with RTP stats
 ///   DELETE /api/sessions/{id}   force-terminate a session
-///   GET    /api/preview?mount=  live raw µ-law audio of a mount (dashboard player)
+///   GET    /api/preview?mount=  live WAV audio of a mount (dashboard player)
+///   GET    /api/browse[?path=]  drive / folder / file listing (dashboard picker)
 /// </summary>
 public sealed class ControlApi : IDisposable
 {
@@ -162,6 +163,12 @@ public sealed class ControlApi : IDisposable
                 return;
             }
 
+            if (method == "GET" && path == "/api/browse")
+            {
+                Browse(ctx);
+                return;
+            }
+
             if (method == "DELETE" && path.StartsWith("/api/sessions/", StringComparison.Ordinal))
             {
                 var id = path["/api/sessions/".Length..];
@@ -298,6 +305,80 @@ public sealed class ControlApi : IDisposable
         w.Write((uint)(totalLength - 44));
         w.Flush();
         return ms.ToArray();
+    }
+
+    /// <summary>
+    /// Filesystem browser backing the dashboard's pickPath() library:
+    /// GET /api/browse            → drive list
+    /// GET /api/browse?path=C:\x  → folders and files of that directory
+    /// Loopback/token-gated like the rest of the API; this is the operator's
+    /// own machine, so no path restriction beyond what the OS enforces.
+    /// </summary>
+    private void Browse(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var path = ctx.Request.QueryString["path"];
+
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            var drives = DriveInfo.GetDrives().Select(d =>
+            {
+                string label = "", free = "";
+                try
+                {
+                    if (d.IsReady)
+                    {
+                        label = d.VolumeLabel;
+                        free = $"{d.AvailableFreeSpace / (1024.0 * 1024 * 1024):0.#} GB free";
+                    }
+                }
+                catch { /* removable drive not ready */ }
+                return new { name = d.Name, type = "drive", label, detail = free, ready = d.IsReady };
+            });
+            WriteJson(res, 200, new { path = "", parent = (string?)null, entries = drives });
+            return;
+        }
+
+        try
+        {
+            var full = Path.GetFullPath(path);
+            if (!Directory.Exists(full))
+            {
+                WriteJson(res, 404, new { error = "directory not found", path = full });
+                return;
+            }
+
+            var dir = new DirectoryInfo(full);
+            var entries = new List<object>();
+            foreach (var d in dir.EnumerateDirectories().OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase))
+                entries.Add(new { name = d.Name, type = "folder", label = "", detail = "", ready = true });
+            foreach (var f in dir.EnumerateFiles().OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase))
+                entries.Add(new
+                {
+                    name = f.Name,
+                    type = "file",
+                    label = "",
+                    detail = f.Length >= 1024 * 1024
+                        ? $"{f.Length / (1024.0 * 1024):0.#} MB"
+                        : $"{Math.Max(1, f.Length / 1024)} KB",
+                    ready = true,
+                });
+
+            WriteJson(res, 200, new
+            {
+                path = full,
+                parent = dir.Parent?.FullName, // null at a drive root → back to drive list
+                entries,
+            });
+        }
+        catch (UnauthorizedAccessException)
+        {
+            WriteJson(res, 403, new { error = "access denied" });
+        }
+        catch (Exception ex)
+        {
+            WriteJson(res, 400, new { error = ex.Message });
+        }
     }
 
     private void WriteJson(HttpListenerResponse res, int status, object body, bool redactToken = false)
