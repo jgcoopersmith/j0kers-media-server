@@ -170,7 +170,7 @@ try
 
         if (config.Control.OpenDashboardOnStart)
         {
-            var urls = DashboardUrls(config.Control.BindAddress, config.Control.Port);
+            var urls = DashboardUrls(control.BoundHost, config.Control.Port);
             var urlList = string.Join(" · ", urls);
             if (OperatingSystem.IsLinux()
                 && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISPLAY"))
@@ -198,9 +198,10 @@ catch (Exception ex)
 }
 
 /// <summary>
-/// The URLs the dashboard is actually reachable on, derived from the real
-/// bind address. 0.0.0.0 enumerates this machine's IPv4 addresses so a
-/// remote operator sees usable links, not a hardcoded localhost.
+/// The URL the dashboard is reachable on, derived from the real bind
+/// address. For 0.0.0.0 this is the machine's primary IP — found via a
+/// routing lookup (no packets are sent), so Docker bridges and other
+/// virtual interfaces don't pollute the answer.
 /// </summary>
 static string[] DashboardUrls(string bindAddress, int port)
 {
@@ -208,23 +209,20 @@ static string[] DashboardUrls(string bindAddress, int port)
         return new[] { $"http://localhost:{port}/" };
     if (bindAddress != "0.0.0.0")
         return new[] { $"http://{bindAddress}:{port}/" };
-
-    var urls = new List<string> { $"http://localhost:{port}/" };
     try
     {
-        foreach (var nic in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
-        {
-            if (nic.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
-            if (nic.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback) continue;
-            foreach (var addr in nic.GetIPProperties().UnicastAddresses)
-            {
-                if (addr.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
-                    urls.Add($"http://{addr.Address}:{port}/");
-            }
-        }
+        using var probe = new System.Net.Sockets.Socket(
+            System.Net.Sockets.AddressFamily.InterNetwork,
+            System.Net.Sockets.SocketType.Dgram,
+            System.Net.Sockets.ProtocolType.Udp);
+        probe.Connect("8.8.8.8", 53); // routing decision only; UDP sends nothing on connect
+        var ip = ((System.Net.IPEndPoint)probe.LocalEndPoint!).Address;
+        return new[] { $"http://{ip}:{port}/" };
     }
-    catch { /* interface enumeration is best-effort */ }
-    return urls.ToArray();
+    catch
+    {
+        return new[] { $"http://localhost:{port}/" };
+    }
 }
 
 static bool TryOpenBrowser(string url)

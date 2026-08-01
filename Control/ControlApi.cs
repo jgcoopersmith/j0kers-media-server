@@ -52,10 +52,14 @@ public sealed class ControlApi : IDisposable
         _favorites = new Media.FavoritesStore(baseDirectory);
     }
 
+    /// <summary>The host the listener actually bound (may differ from config after the Windows ACL fallback).</summary>
+    public string BoundHost { get; private set; } = "localhost";
+
     public void Start()
     {
         (var listener, var bound) = Hls.HttpListenerBinder.Start(_config.BindAddress, _config.Port, "control");
         _listener = listener;
+        BoundHost = bound;
         Log.Info("control", $"listening on http://{bound}:{_config.Port}/api/");
         _ = AcceptLoopAsync();
     }
