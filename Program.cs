@@ -170,21 +170,22 @@ try
 
         if (config.Control.OpenDashboardOnStart)
         {
-            var url = $"http://localhost:{config.Control.Port}/";
+            var urls = DashboardUrls(config.Control.BindAddress, config.Control.Port);
+            var urlList = string.Join(" · ", urls);
             if (OperatingSystem.IsLinux()
                 && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISPLAY"))
                 && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY")))
             {
                 // headless box — nothing to open a browser on
-                Log.Info("main", $"dashboard: {url}");
+                Log.Info("main", $"dashboard: {urlList}");
             }
-            else if (TryOpenBrowser(url))
+            else if (TryOpenBrowser(urls[0]))
             {
-                Log.Info("main", $"dashboard opened at {url} (disable with control.openDashboardOnStart=false)");
+                Log.Info("main", $"dashboard opened: {urlList} (disable with control.openDashboardOnStart=false)");
             }
             else
             {
-                Log.Info("main", $"no browser opener found on this system; dashboard: {url}");
+                Log.Info("main", $"no browser opener found on this system; dashboard: {urlList}");
             }
         }
     }
@@ -194,6 +195,36 @@ catch (Exception ex)
     Console.Error.WriteLine($"Startup failed: {ex.Message}");
     services?.Dispose(); control?.Dispose(); ffmpeg?.Dispose();
     return 1;
+}
+
+/// <summary>
+/// The URLs the dashboard is actually reachable on, derived from the real
+/// bind address. 0.0.0.0 enumerates this machine's IPv4 addresses so a
+/// remote operator sees usable links, not a hardcoded localhost.
+/// </summary>
+static string[] DashboardUrls(string bindAddress, int port)
+{
+    if (bindAddress is "127.0.0.1" or "localhost" or "::1")
+        return new[] { $"http://localhost:{port}/" };
+    if (bindAddress != "0.0.0.0")
+        return new[] { $"http://{bindAddress}:{port}/" };
+
+    var urls = new List<string> { $"http://localhost:{port}/" };
+    try
+    {
+        foreach (var nic in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+        {
+            if (nic.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+            if (nic.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback) continue;
+            foreach (var addr in nic.GetIPProperties().UnicastAddresses)
+            {
+                if (addr.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                    urls.Add($"http://{addr.Address}:{port}/");
+            }
+        }
+    }
+    catch { /* interface enumeration is best-effort */ }
+    return urls.ToArray();
 }
 
 static bool TryOpenBrowser(string url)
