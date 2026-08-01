@@ -31,6 +31,10 @@ ffplay rtsp://localhost:8554/test
 
 or in VLC: *Media → Open Network Stream* → `rtsp://localhost:8554/test`.
 
+Open the **dashboard** at [http://localhost:9090/](http://localhost:9090/) —
+live session table with terminate buttons, RTP throughput chart, mounts with
+copyable `rtsp://` URIs, HLS stream list, and the effective config.
+
 Check the control API:
 
 ```bash
@@ -87,6 +91,7 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 
 | Endpoint | Purpose |
 |---|---|
+| `GET /` | web dashboard (embedded, no extra files needed) |
 | `GET /api/status` | identity, uptime, session counts |
 | `GET /api/config` | effective config (token redacted) |
 | `GET /api/mounts` | configured mounts + announcement URI |
@@ -105,6 +110,7 @@ Rtp/            RTP packetization, RTCP sender reports, port allocator
 Hls/            RFC 8216 playlist generation + segment serving
 Control/        HTTP/JSON control API
 Media/          G.711 sources (tone generator, file looper)
+wwwroot/        dashboard single-page app (embedded into the binary)
 config/         sample/default server.json (runtime media/ and clips/ live here too)
 ```
 

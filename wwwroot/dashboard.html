@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>j0kers Media Server</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --page:        #0d0d0d;
+    --surface:     #1a1a19;
+    --surface-2:   #222221;
+    --ink:         #ffffff;
+    --ink-2:       #c3c2b7;
+    --muted:       #898781;
+    --grid:        #2c2c2a;
+    --baseline:    #383835;
+    --border:      rgba(255,255,255,0.10);
+    --series-1:    #3987e5;
+    --accent:      #9085e9;
+    --good:        #0ca30c;
+    --warning:     #fab219;
+    --critical:    #d03b3b;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      color-scheme: light;
+      --page:      #f9f9f7;
+      --surface:   #fcfcfb;
+      --surface-2: #f0efec;
+      --ink:       #0b0b0b;
+      --ink-2:     #52514e;
+      --muted:     #898781;
+      --grid:      #e1e0d9;
+      --baseline:  #c3c2b7;
+      --border:    rgba(11,11,11,0.10);
+      --series-1:  #2a78d6;
+      --accent:    #4a3aa7;
+      --good:      #006300;
+      --critical:  #d03b3b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 14px;
+    line-height: 1.45;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 20px 60px; }
+
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 22px; }
+  .logo {
+    width: 44px; height: 44px; border-radius: 12px; flex: none;
+    display: grid; place-items: center; font-size: 24px;
+    background: linear-gradient(135deg, var(--accent), var(--series-1));
+    color: #fff;
+  }
+  h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--critical); display: inline-block; }
+  .dot.live { background: var(--good); box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 25%, transparent); }
+  header .spacer { flex: 1; }
+  .pill {
+    font-size: 12px; color: var(--ink-2); border: 1px solid var(--border);
+    border-radius: 999px; padding: 4px 12px; background: var(--surface);
+  }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 14px; }
+  .tile {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+    padding: 14px 16px 12px;
+  }
+  .tile .k { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; }
+  .tile .v { font-size: 26px; font-weight: 650; margin-top: 2px; }
+  .tile .d { color: var(--ink-2); font-size: 12px; margin-top: 1px; }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+    padding: 16px 18px; margin-bottom: 14px;
+  }
+  .card h2 { font-size: 13px; margin: 0 0 10px; font-weight: 600; color: var(--ink-2); text-transform: uppercase; letter-spacing: .7px; }
+  .card h2 .note { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--muted); margin-left: 8px; }
+
+  #chartbox { position: relative; }
+  #chart { width: 100%; height: 150px; display: block; }
+  #tooltip {
+    position: absolute; pointer-events: none; display: none;
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 5px 9px; font-size: 12px; color: var(--ink); white-space: nowrap;
+    transform: translate(-50%, -130%);
+  }
+  #tooltip .t { color: var(--muted); }
+
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; font-weight: 500; padding: 4px 10px 8px 0; border-bottom: 1px solid var(--grid); }
+  td { padding: 8px 10px 8px 0; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; color: var(--ink-2); }
+  td.mono, .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+  td:first-child { color: var(--ink); }
+  tr:last-child td { border-bottom: none; }
+  .empty { color: var(--muted); padding: 14px 0 6px; }
+
+  .state { display: inline-flex; align-items: center; gap: 6px; }
+  .state .dot { width: 7px; height: 7px; }
+  .state.playing .dot { background: var(--good); }
+  .state.ready .dot { background: var(--warning); }
+
+  button {
+    font: inherit; font-size: 12.5px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--surface-2); color: var(--ink-2);
+    padding: 4px 10px;
+  }
+  button:hover { border-color: var(--muted); color: var(--ink); }
+  button.danger { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 45%, transparent); }
+  button.danger:hover { background: color-mix(in srgb, var(--critical) 14%, transparent); }
+  .copied { color: var(--good) !important; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
+
+  details summary { cursor: pointer; color: var(--ink-2); font-size: 13px; user-select: none; }
+  pre {
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px; overflow-x: auto; font-size: 12px; color: var(--ink-2); margin: 10px 0 0;
+  }
+
+  #authbar { display: none; gap: 8px; margin-bottom: 14px; }
+  #authbar input {
+    flex: 1; font: inherit; padding: 7px 12px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+  }
+  a { color: var(--series-1); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">🃏</div>
+    <div>
+      <h1>j0kers Media Server</h1>
+      <div class="sub"><span class="dot" id="livedot"></span><span id="livetext">connecting…</span></div>
+    </div>
+    <div class="spacer"></div>
+    <span class="pill" id="verpill">v–</span>
+  </header>
+
+  <div id="authbar">
+    <input id="token" type="password" placeholder="Control API bearer token" autocomplete="off">
+    <button onclick="saveToken()">Unlock</button>
+  </div>
+
+  <div class="tiles">
+    <div class="tile"><div class="k">Active sessions</div><div class="v" id="t-sessions">–</div><div class="d" id="t-sessions-d">of – max</div></div>
+    <div class="tile"><div class="k">RTP throughput</div><div class="v" id="t-pps">–</div><div class="d">packets / second</div></div>
+    <div class="tile"><div class="k">Uptime</div><div class="v" id="t-uptime">–</div><div class="d" id="t-uptime-d">&nbsp;</div></div>
+    <div class="tile"><div class="k">HLS streams</div><div class="v" id="t-hls">–</div><div class="d" id="t-hls-d">on port –</div></div>
+  </div>
+
+  <div class="card">
+    <h2>RTP packets / second<span class="note">last 2 minutes, all sessions</span></h2>
+    <div id="chartbox">
+      <svg id="chart" preserveAspectRatio="none"></svg>
+      <div id="tooltip"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Sessions</h2>
+    <div id="sessions"></div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2>RTSP mounts</h2>
+      <div id="mounts"></div>
+    </div>
+    <div class="card">
+      <h2>HLS streams</h2>
+      <div id="hls"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>Effective configuration</summary>
+      <pre id="config">–</pre>
+    </details>
+  </div>
+</div>
+
+<script>
+"use strict";
+const POLL_MS = 2000, HISTORY = 60;          // 60 samples × 2 s = 2 min
+const hist = [];                              // {t: Date, pps: number}
+let lastPackets = null, lastTime = null;
+let hlsPort = null, rtspPort = null;
+let token = sessionStorage.getItem("j0kers-token") || "";
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function headers() { return token ? { "Authorization": "Bearer " + token } : {}; }
+
+function saveToken() {
+  token = $("token").value.trim();
+  sessionStorage.setItem("j0kers-token", token);
+  $("authbar").style.display = "none";
+  tick();
+}
+
+async function api(path) {
+  const r = await fetch(path, { headers: headers() });
+  if (r.status === 401) { $("authbar").style.display = "flex"; throw new Error("unauthorized"); }
+  if (!r.ok) throw new Error(path + " → " + r.status);
+  return r.json();
+}
+
+function fmtUptime(s) {
+  if (s < 3600) return Math.floor(s / 60) + "m " + (s % 60) + "s";
+  if (s < 86400) return Math.floor(s / 3600) + "h " + Math.floor(s % 3600 / 60) + "m";
+  return Math.floor(s / 86400) + "d " + Math.floor(s % 86400 / 3600) + "h";
+}
+const fmtNum = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n);
+
+async function tick() {
+  let status, sessions;
+  try {
+    [status, sessions] = await Promise.all([api("/api/status"), api("/api/sessions")]);
+  } catch (e) {
+    $("livedot").classList.remove("live");
+    $("livetext").textContent = e.message === "unauthorized" ? "locked — token required" : "server unreachable";
+    return;
+  }
+
+  $("livedot").classList.add("live");
+  $("livetext").textContent = "live · rtsp :" + status.rtsp.port + " · hls :" + status.hls.port;
+  $("verpill").textContent = "v" + (status.version || "?");
+  rtspPort = status.rtsp.port; hlsPort = status.hls.port;
+
+  $("t-sessions").textContent = status.rtsp.sessions;
+  $("t-sessions-d").textContent = "of " + status.rtsp.maxSessions + " max";
+  $("t-uptime").textContent = fmtUptime(status.uptimeSeconds);
+  $("t-uptime-d").textContent = status.server;
+
+  // throughput from packet-count deltas
+  const total = sessions.sessions.reduce((a, s) => a + (s.rtp.packetsSent || 0), 0);
+  const now = performance.now();
+  let pps = 0;
+  if (lastPackets !== null && total >= lastPackets && now > lastTime)
+    pps = Math.round((total - lastPackets) / ((now - lastTime) / 1000));
+  lastPackets = total; lastTime = now;
+  hist.push({ t: new Date(), pps });
+  if (hist.length > HISTORY) hist.shift();
+  $("t-pps").textContent = fmtNum(pps);
+  drawChart();
+
+  renderSessions(sessions.sessions);
+  refreshMounts();   // cheap, cached-ish
+  refreshHls();
+  refreshConfig();
+}
+
+function renderSessions(list) {
+  if (!list.length) { $("sessions").innerHTML = '<div class="empty">No active sessions — open <span class="mono">rtsp://' + location.hostname + ':' + rtspPort + '/test</span> in VLC or ffplay.</div>'; return; }
+  let h = '<table><tr><th>Session</th><th>Mount</th><th>State</th><th>Client</th><th>Packets</th><th>Bytes</th><th></th></tr>';
+  for (const s of list) {
+    h += '<tr><td class="mono">' + esc(s.id) + '</td>'
+      + '<td class="mono">' + esc(s.mount) + '</td>'
+      + '<td><span class="state ' + esc(s.state) + '"><span class="dot"></span>' + esc(s.state) + '</span></td>'
+      + '<td class="mono">' + esc(s.client) + '</td>'
+      + '<td>' + fmtNum(s.rtp.packetsSent) + '</td>'
+      + '<td>' + fmtNum(s.rtp.octetsSent) + '</td>'
+      + '<td style="text-align:right"><button class="danger" onclick="killSession(\'' + esc(s.id) + '\')">Terminate</button></td></tr>';
+  }
+  $("sessions").innerHTML = h + '</table>';
+}
+
+async function killSession(id) {
+  if (!confirm("Terminate session " + id + "?")) return;
+  await fetch("/api/sessions/" + encodeURIComponent(id), { method: "DELETE", headers: headers() });
+  tick();
+}
+
+let mountsLoaded = 0;
+async function refreshMounts() {
+  if (Date.now() - mountsLoaded < 15000) return;
+  mountsLoaded = Date.now();
+  const data = await api("/api/mounts");
+  let h = "";
+  for (const m of data.mounts) {
+    const uri = "rtsp://" + location.hostname + ":" + rtspPort + m.path;
+    h += '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
+      + '<div style="flex:1;min-width:0"><div class="mono" style="color:var(--ink)">' + esc(uri) + '</div>'
+      + '<div style="color:var(--muted);font-size:12px">' + esc(m.source) + (m.description ? " · " + esc(m.description) : "") + '</div></div>'
+      + '<button onclick="copyText(this,\'' + esc(uri) + '\')">Copy</button></div>';
+  }
+  if (data.announcementService) {
+    const uri = data.announcementService.replace("<host>", location.hostname);
+    h += '<div style="padding:8px 0 0;color:var(--muted);font-size:12px">Announcements: <span class="mono">' + esc(uri) + '</span></div>';
+  }
+  $("mounts").innerHTML = h || '<div class="empty">No mounts configured.</div>';
+}
+
+async function refreshHls() {
+  try {
+    const r = await fetch("http://" + location.hostname + ":" + hlsPort + "/");
+    const data = await r.json();
+    $("t-hls").textContent = data.streams.length;
+    $("t-hls-d").textContent = "on port " + hlsPort;
+    if (!data.streams.length) { $("hls").innerHTML = '<div class="empty">No HLS streams. Drop segment files in a subfolder of the media root.</div>'; return; }
+    let h = "";
+    for (const s of data.streams) {
+      const url = "http://" + location.hostname + ":" + hlsPort + s.playlist;
+      h += '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
+        + '<div style="flex:1;min-width:0"><a class="mono" href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(s.name) + '</a></div>'
+        + '<button onclick="copyText(this,\'' + esc(url) + '\')">Copy</button></div>';
+    }
+    $("hls").innerHTML = h;
+  } catch {
+    $("hls").innerHTML = '<div class="empty">HLS endpoint unreachable.</div>';
+  }
+}
+
+let configLoaded = false;
+async function refreshConfig() {
+  if (configLoaded) return;
+  configLoaded = true;
+  const data = await api("/api/config");
+  $("config").textContent = JSON.stringify(data.config, null, 2);
+}
+
+function copyText(btn, text) {
+  navigator.clipboard.writeText(text).then(() => {
+    btn.classList.add("copied"); btn.textContent = "Copied";
+    setTimeout(() => { btn.classList.remove("copied"); btn.textContent = "Copy"; }, 1200);
+  });
+}
+
+/* ---- chart: single-series line + area, hairline grid, hover crosshair ---- */
+function drawChart() {
+  const svg = $("chart");
+  const W = svg.clientWidth || 800, H = 150, PAD = { l: 40, r: 8, t: 8, b: 18 };
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+  const css = getComputedStyle(document.documentElement);
+  const col = n => css.getPropertyValue(n).trim();
+
+  const max = Math.max(60, ...hist.map(p => p.pps));
+  const x = i => PAD.l + (W - PAD.l - PAD.r) * (i / (HISTORY - 1));
+  const y = v => PAD.t + (H - PAD.t - PAD.b) * (1 - v / max);
+  const start = HISTORY - hist.length;
+
+  let grid = "", labels = "";
+  for (const f of [0, 0.5, 1]) {
+    const v = Math.round(max * f), yy = y(v);
+    grid += '<line x1="' + PAD.l + '" y1="' + yy + '" x2="' + (W - PAD.r) + '" y2="' + yy + '" stroke="' + col("--grid") + '" stroke-width="1"/>';
+    labels += '<text x="' + (PAD.l - 6) + '" y="' + (yy + 4) + '" text-anchor="end" font-size="10" fill="' + col("--muted") + '" style="font-variant-numeric:tabular-nums">' + fmtNum(v) + '</text>';
+  }
+
+  let line = "", area = "";
+  hist.forEach((p, i) => {
+    const px = x(start + i), py = y(p.pps);
+    line += (i ? " L" : "M") + px.toFixed(1) + " " + py.toFixed(1);
+  });
+  if (hist.length > 1) {
+    area = line + " L" + x(HISTORY - 1).toFixed(1) + " " + y(0) + " L" + x(start).toFixed(1) + " " + y(0) + " Z";
+  }
+
+  svg.innerHTML =
+    grid + labels +
+    '<line x1="' + PAD.l + '" y1="' + y(0) + '" x2="' + (W - PAD.r) + '" y2="' + y(0) + '" stroke="' + col("--baseline") + '" stroke-width="1"/>' +
+    (area ? '<path d="' + area + '" fill="' + col("--series-1") + '" opacity="0.12"/>' : "") +
+    (hist.length > 1 ? '<path d="' + line + '" fill="none" stroke="' + col("--series-1") + '" stroke-width="2" stroke-linejoin="round"/>' : "") +
+    '<g id="cross" style="display:none"><line id="crossline" y1="' + PAD.t + '" y2="' + y(0) + '" stroke="' + col("--muted") + '" stroke-width="1" stroke-dasharray="3 3"/>' +
+    '<circle id="crossdot" r="4" fill="' + col("--series-1") + '" stroke="' + col("--surface") + '" stroke-width="2"/></g>';
+
+  svg.onmousemove = ev => {
+    if (hist.length < 2) return;
+    const rect = svg.getBoundingClientRect();
+    const mx = (ev.clientX - rect.left) * (W / rect.width);
+    let i = Math.round((mx - PAD.l) / ((W - PAD.l - PAD.r) / (HISTORY - 1))) - start;
+    i = Math.max(0, Math.min(hist.length - 1, i));
+    const p = hist[i], px = x(start + i), py = y(p.pps);
+    const g = $("cross"); g.style.display = "";
+    const cl = $("crossline"); cl.setAttribute("x1", px); cl.setAttribute("x2", px);
+    const cd = $("crossdot"); cd.setAttribute("cx", px); cd.setAttribute("cy", py);
+    const tip = $("tooltip");
+    tip.style.display = "block";
+    tip.style.left = (px / W * rect.width) + "px";
+    tip.style.top = (py / H * rect.height) + "px";
+    tip.innerHTML = "<b>" + fmtNum(p.pps) + "</b> pkt/s <span class='t'>· " + p.t.toLocaleTimeString() + "</span>";
+  };
+  svg.onmouseleave = () => { const g = $("cross"); if (g) g.style.display = "none"; $("tooltip").style.display = "none"; };
+}
+
+$("token").addEventListener("keydown", e => { if (e.key === "Enter") saveToken(); });
+tick();
+setInterval(tick, POLL_MS);
+</script>
+</body>
+</html>

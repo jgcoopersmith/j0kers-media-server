@@ -56,11 +56,31 @@ public sealed class ControlApi : IDisposable
         }
     }
 
+    private static readonly Lazy<byte[]> Dashboard = new(() =>
+    {
+        using var s = typeof(ControlApi).Assembly.GetManifestResourceStream("dashboard.html")!;
+        using var ms = new MemoryStream();
+        s.CopyTo(ms);
+        return ms.ToArray();
+    });
+
     private void Handle(HttpListenerContext ctx)
     {
         var res = ctx.Response;
         try
         {
+            // The dashboard page itself is static and served without auth;
+            // every /api call it makes is still token-gated below.
+            var rawPath = ctx.Request.Url?.AbsolutePath ?? "/";
+            if (ctx.Request.HttpMethod == "GET" && rawPath is "/" or "/index.html")
+            {
+                res.StatusCode = 200;
+                res.ContentType = "text/html; charset=utf-8";
+                res.ContentLength64 = Dashboard.Value.Length;
+                res.OutputStream.Write(Dashboard.Value);
+                return;
+            }
+
             if (_config.AuthToken.Length > 0)
             {
                 var auth = ctx.Request.Headers["Authorization"];

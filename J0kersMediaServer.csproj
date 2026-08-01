@@ -10,4 +10,8 @@
     <Version>0.1.0</Version>
   </PropertyGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="wwwroot\dashboard.html" LogicalName="dashboard.html" />
+  </ItemGroup>
+
 </Project>
