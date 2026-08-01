@@ -188,6 +188,63 @@ public sealed class FfmpegManager : IDisposable
     public bool IsVodReady(string stream) =>
         File.Exists(Path.Combine(_mediaRoot, stream, "index.m3u8"));
 
+    // ---- thumbnails -----------------------------------------------------
+
+    private static readonly HashSet<string> ThumbSourceExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".mp4", ".mkv", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mts", ".wmv", ".flv", ".mpg", ".mpeg", ".vob", ".3gp",
+        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif",
+    };
+
+    /// <summary>
+    /// Returns a cached 320px JPEG thumbnail for a video (frame at ~3 s) or
+    /// picture (scaled), generating it on first request. Null when ffmpeg
+    /// is unavailable, the type has no visual, or generation fails.
+    /// </summary>
+    public string? GetThumbnail(string file)
+    {
+        if (!Available || !File.Exists(file)) return null;
+        var ext = Path.GetExtension(file);
+        if (!ThumbSourceExtensions.Contains(ext)) return null;
+
+        var info = new FileInfo(file);
+        var key = Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(
+            $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}")))[..16].ToLowerInvariant();
+        var thumbDir = Path.Combine(_mediaRoot, ".thumbs");
+        var thumb = Path.Combine(thumbDir, key + ".jpg");
+        if (File.Exists(thumb)) return thumb;
+
+        Directory.CreateDirectory(thumbDir);
+        var isVideo = ext is not (".jpg" or ".jpeg" or ".png" or ".gif" or ".webp" or ".bmp" or ".avif");
+        // videos: seek before decode so a frame grab is cheap even on large files
+        var seek = isVideo ? "-ss 3 " : "";
+        var args = $"-hide_banner -loglevel error -y {seek}-i \"{info.FullName}\" " +
+                   $"-frames:v 1 -vf \"scale=320:-2\" -q:v 5 \"{thumb}\"";
+        try
+        {
+            using var p = Process.Start(new ProcessStartInfo(FfmpegPath, args)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true,
+            });
+            if (p is null) return null;
+            if (!p.WaitForExit(10_000)) { try { p.Kill(true); } catch { } return null; }
+            // a very short video can have nothing at 3 s — retry from the start
+            if ((p.ExitCode != 0 || !File.Exists(thumb)) && isVideo)
+            {
+                using var p2 = Process.Start(new ProcessStartInfo(FfmpegPath,
+                    args.Replace("-ss 3 ", "")) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true });
+                p2?.WaitForExit(10_000);
+            }
+            return File.Exists(thumb) ? thumb : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     // ---- live channels: URL → continuous HLS ---------------------------
 
     public IReadOnlyList<(ChannelDef def, string stream, string status)> Channels

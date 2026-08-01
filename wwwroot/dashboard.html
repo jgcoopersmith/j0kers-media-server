@@ -181,6 +181,43 @@
   #cfg h3 { margin: 0 0 14px; font-size: 15px; }
   #cfg label { display: block; color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; margin: 10px 0 4px; }
   #cfg .am-in { width: 100%; }
+  /* media library sections & thumbnail tiles */
+  .lib-h {
+    display: flex; align-items: baseline; gap: 8px;
+    color: var(--ink-2); font-size: 11.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .7px;
+    margin: 14px 0 6px; padding-bottom: 4px; border-bottom: 1px solid var(--grid);
+  }
+  .lib-h:first-child { margin-top: 2px; }
+  .lib-h .cnt { color: var(--muted); font-weight: 400; }
+  .tiles-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px;
+  }
+  .tile-item {
+    cursor: pointer; border: 1px solid var(--border); border-radius: 10px;
+    overflow: hidden; background: var(--surface-2);
+  }
+  .tile-item:hover { border-color: var(--series-1); }
+  .tile-thumb {
+    width: 100%; aspect-ratio: 16/10; object-fit: cover; display: block; background: #000;
+  }
+  .tile-fallback {
+    width: 100%; aspect-ratio: 16/10; display: none; align-items: center; justify-content: center;
+    font-size: 34px; background: var(--surface-2);
+  }
+  .tile-name {
+    padding: 5px 8px; font-size: 12px; color: var(--ink-2);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .root-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    border: 1px solid var(--border); border-radius: 999px;
+    padding: 2px 4px 2px 10px; font-size: 12.5px; background: var(--surface-2); margin: 0 6px 6px 0;
+  }
+  .root-chip .open { cursor: pointer; }
+  .root-chip.active { border-color: var(--series-1); color: var(--ink); }
+  .root-chip button { border: none; background: none; padding: 2px 4px; }
+
   .am-in {
     font: inherit; font-size: 13px; padding: 6px 10px; border-radius: 8px;
     border: 1px solid var(--border); background: var(--surface-2); color: var(--ink);
@@ -296,10 +333,11 @@
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Media library</span>
       <button id="lib-playall" style="display:none">▶ Play folder</button>
       <button id="lib-save" style="display:none">☆ Save playlist</button>
-      <button onclick="chooseLibrary()">📁 Choose folder</button></h2>
+      <button onclick="addLibraryRoot()">➕ Add folder</button></h2>
+    <div id="lib-roots" style="margin-bottom:6px"></div>
     <div id="playlists" style="margin-bottom:6px"></div>
     <div id="lib-path" class="mono" style="color:var(--muted);font-size:12px;margin-bottom:8px"></div>
-    <div id="library"><div class="empty">Pick a folder — movies, music, and pictures inside it become playable here.</div></div>
+    <div id="library"><div class="empty">Add a library folder — movies, music, and pictures inside it become playable here.</div></div>
     <div id="ffmpeg-warn" style="display:none;color:var(--warning);font-size:12px;margin-top:8px">
       ⚠ ffmpeg not found — video/audio playback and live channels are disabled. Install with
       <span class="mono">winget install Gyan.FFmpeg</span> and restart the server.
@@ -442,8 +480,8 @@ async function tick() {
 
   if (!libraryBooted) {
     libraryBooted = true;
-    const saved = localStorage.getItem("j0kers-library");
-    if (saved) loadLibrary(saved);
+    await refreshLibraryRoots(true);
+    if (libraryRoots.length) loadLibrary(libraryRoots[0]);
   }
 }
 let libraryBooted = false;
@@ -732,14 +770,68 @@ function mediaKind(name) {
 }
 let ffmpegOk = false;
 
-async function chooseLibrary() {
-  const p = await pickPath({ mode: "folder", title: "Choose your media library folder" });
+/* ---- library roots: server-persisted source folders ---- */
+let libraryRoots = [];
+let currentLibPath = null;
+
+async function refreshLibraryRoots(force) {
+  try {
+    const data = await api("/api/library");
+    libraryRoots = data.folders;
+  } catch { return; }
+
+  // one-time migration from the old localStorage single-folder library
+  const legacy = localStorage.getItem("j0kers-library");
+  if (legacy && !libraryRoots.length) {
+    localStorage.removeItem("j0kers-library");
+    await fetch("/api/library", { method: "POST", headers: { "Content-Type": "application/json", ...headers() }, body: JSON.stringify({ folder: legacy }) }).catch(() => {});
+    return refreshLibraryRoots(true);
+  }
+
+  let h = "";
+  for (const f of libraryRoots) {
+    const name = f.split(/[\\/]/).filter(Boolean).pop();
+    const active = currentLibPath && (currentLibPath === f || currentLibPath.toLowerCase().startsWith(f.toLowerCase() + "\\"));
+    h += '<span class="root-chip' + (active ? " active" : "") + '">'
+      + '<span class="open" data-act="lib-open" data-arg="' + esc(f) + '" title="' + esc(f) + '">📂 ' + esc(name) + '</span>'
+      + '<button class="danger" data-act="lib-root-remove" data-arg="' + esc(f) + '" title="Remove from library (files are not deleted)" style="color:var(--critical)">✕</button>'
+      + '</span>';
+  }
+  $("lib-roots").innerHTML = h;
+}
+
+async function addLibraryRoot() {
+  const p = await pickPath({ mode: "folder", title: "Add a folder to the media library" });
   if (!p) return;
-  localStorage.setItem("j0kers-library", p);
+  const r = await fetch("/api/library", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...headers() },
+    body: JSON.stringify({ folder: p }),
+  });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || "add failed"); return; }
+  await refreshLibraryRoots(true);
   loadLibrary(p);
 }
 
-let currentLibPath = null;
+async function removeLibraryRoot(folder) {
+  if (!confirm("Remove this folder from the library? (No files on disk are deleted.)")) return;
+  await fetch("/api/library?folder=" + encodeURIComponent(folder), { method: "DELETE", headers: headers() });
+  if (currentLibPath && currentLibPath.toLowerCase().startsWith(folder.toLowerCase())) {
+    currentLibPath = null;
+    $("lib-path").textContent = "";
+    $("library").innerHTML = '<div class="empty">Add a library folder — movies, music, and pictures inside it become playable here.</div>';
+    $("lib-playall").style.display = "none";
+    $("lib-save").style.display = "none";
+  }
+  refreshLibraryRoots(true);
+}
+
+/* ---- library browsing: grouped sections with thumbnails ---- */
+function thumbUrl(path) {
+  let u = "/api/thumb?path=" + encodeURIComponent(path);
+  if (token) u += "&token=" + encodeURIComponent(token);
+  return u;
+}
 
 async function loadLibrary(path) {
   const box = $("library");
@@ -758,27 +850,65 @@ async function loadLibrary(path) {
   currentLibPath = data.path;
   $("lib-playall").style.display = ffmpegOk ? "" : "none";
   $("lib-save").style.display = "";
+  refreshLibraryRoots(true); // update active chip highlight
+
+  const join = n => (data.path.endsWith("\\") || data.path.endsWith("/")) ? data.path + n : data.path + "\\" + n;
+  const folders = [], videos = [], music = [], pictures = [];
+  for (const e of data.entries) {
+    if (e.type === "folder") { folders.push(e); continue; }
+    const kind = mediaKind(e.name);
+    if (kind === "video") videos.push(e);
+    else if (kind === "audio") music.push(e);
+    else if (kind === "image") pictures.push(e);
+  }
 
   let h = "";
-  if (data.parent && localStorage.getItem("j0kers-library") !== data.path)
-    h += libRow("⬆️", "..", "", "lib-open", data.parent);
+  const isRoot = libraryRoots.some(f => f.toLowerCase() === data.path.toLowerCase());
+  if (data.parent && !isRoot)
+    h += libRow("⬆️", ".. up", "", "lib-open", data.parent);
 
-  for (const e of data.entries) {
-    const full = (data.path.endsWith("\\") || data.path.endsWith("/")) ? data.path + e.name : data.path + "\\" + e.name;
-    if (e.type === "folder") {
+  if (folders.length) {
+    h += '<div class="lib-h">📁 Folders <span class="cnt">' + folders.length + '</span></div>';
+    for (const e of folders) {
       const extra = ffmpegOk
-        ? '<button data-act="lib-playfolder" data-arg="' + esc(full) + '" title="Play everything in this folder">▶ All</button>'
+        ? '<button data-act="lib-playfolder" data-arg="' + esc(join(e.name)) + '" title="Play everything in this folder">▶ All</button>'
         : "";
-      h += libRow("📁", e.name, "", "lib-open", full, extra);
-    } else {
-      const kind = mediaKind(e.name);
-      if (kind === "image")
-        h += libRow("🖼️", e.name, e.detail, "lib-img", full);
-      else if (kind === "video" || kind === "audio")
-        h += libRow(kind === "video" ? "🎬" : "🎵", e.name, e.detail, ffmpegOk ? "lib-play" : "", full);
+      h += libRow("📁", e.name, "", "lib-open", join(e.name), extra);
     }
   }
-  box.innerHTML = h || '<div class="empty">no playable media in this folder</div>';
+
+  if (videos.length) {
+    h += '<div class="lib-h">🎬 Videos <span class="cnt">' + videos.length + '</span></div>';
+    h += tileGrid(videos, join, "lib-play", "🎬");
+  }
+
+  if (music.length) {
+    h += '<div class="lib-h">🎵 Music <span class="cnt">' + music.length + '</span></div>';
+    for (const e of music)
+      h += libRow("🎵", e.name, e.detail, ffmpegOk ? "lib-play" : "", join(e.name));
+  }
+
+  if (pictures.length) {
+    h += '<div class="lib-h">🖼 Pictures <span class="cnt">' + pictures.length + '</span></div>';
+    h += tileGrid(pictures, join, "lib-img", "🖼");
+  }
+
+  box.innerHTML = h || '<div class="empty">nothing playable in this folder</div>';
+}
+
+function tileGrid(entries, join, act, fallbackIcon) {
+  let h = '<div class="tiles-grid">';
+  for (const e of entries) {
+    const full = join(e.name);
+    const clickable = act === "lib-img" || ffmpegOk;
+    h += '<div class="tile-item"' + (clickable ? ' data-act="' + act + '" data-arg="' + esc(full) + '"' : ' style="opacity:.55;cursor:default"') + ' title="' + esc(e.name) + '">'
+      + '<img class="tile-thumb" loading="lazy" src="' + esc(thumbUrl(full)) + '" alt="" '
+      + 'onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'">'
+      + '<div class="tile-fallback">' + fallbackIcon + '</div>'
+      + '<div class="tile-name">' + esc(e.name) + '</div>'
+      + '</div>';
+  }
+  return h + '</div>';
 }
 
 function libRow(icon, name, detail, act, arg, extra) {
@@ -1333,6 +1463,7 @@ document.addEventListener("click", e => {
     case "lib-img":     viewImage(arg); break;
     case "lib-play":    queue.items = []; queue.index = -1; $("np").style.display = "none"; playMedia(arg); break;
     case "lib-playfolder": playFolder(arg); break;
+    case "lib-root-remove": removeLibraryRoot(arg); break;
     case "pl-play":     playFolder(arg, el.dataset.name); break;
     case "pl-remove":   removePlaylist(arg); break;
   }

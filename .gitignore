@@ -15,3 +15,5 @@ obj/
 /settings.json
 /config/playlists.json
 /playlists.json
+/config/library.json
+/library.json
