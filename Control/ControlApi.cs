@@ -32,12 +32,16 @@ public sealed class ControlApi : IDisposable
     private HttpListener? _listener;
     private readonly CancellationTokenSource _cts = new();
 
-    public ControlApi(ServerConfig serverConfig, RtspServer? rtspServer, string baseDirectory)
+    private readonly Media.FfmpegManager? _ffmpeg;
+
+    public ControlApi(ServerConfig serverConfig, RtspServer? rtspServer, string baseDirectory,
+        Media.FfmpegManager? ffmpeg = null)
     {
         _config = serverConfig.Control;
         _serverConfig = serverConfig;
         _rtspServer = rtspServer;
         _baseDirectory = baseDirectory;
+        _ffmpeg = ffmpeg;
     }
 
     public void Start()
@@ -117,6 +121,11 @@ public sealed class ControlApi : IDisposable
                             maxSessions = _serverConfig.Rtsp.MaxSessions,
                         },
                         hls = new { enabled = _serverConfig.Hls.Enabled, port = _serverConfig.Hls.Port },
+                        ffmpeg = new
+                        {
+                            available = _ffmpeg?.Available ?? false,
+                            version = _ffmpeg?.VersionLine ?? "not configured",
+                        },
                     });
                     return;
 
@@ -167,6 +176,63 @@ public sealed class ControlApi : IDisposable
             if (method == "GET" && path == "/api/browse")
             {
                 Browse(ctx);
+                return;
+            }
+
+            // ---- media engine (ffmpeg) ----
+            if (method == "POST" && path == "/api/play")
+            {
+                PlayFile(ctx);
+                return;
+            }
+
+            if (method == "GET" && path == "/api/play")
+            {
+                var stream = ctx.Request.QueryString["stream"] ?? "";
+                WriteJson(res, 200, new { stream, ready = _ffmpeg?.IsVodReady(stream) ?? false });
+                return;
+            }
+
+            if (method == "GET" && path == "/api/channels")
+            {
+                WriteJson(res, 200, new
+                {
+                    ffmpegAvailable = _ffmpeg?.Available ?? false,
+                    channels = (_ffmpeg?.Channels ?? new List<(Media.FfmpegManager.ChannelDef, string, string)>())
+                        .Select(c => new { name = c.Item1.Name, url = c.Item1.Url, stream = c.Item2, status = c.Item3 }),
+                });
+                return;
+            }
+
+            if (method == "POST" && path == "/api/channels")
+            {
+                AddChannel(ctx);
+                return;
+            }
+
+            if (method == "DELETE" && path == "/api/channels")
+            {
+                var name = ctx.Request.QueryString["name"] ?? "";
+                if (_ffmpeg?.RemoveChannel(name) == true)
+                {
+                    Log.Info("control", $"channel removed: {name}");
+                    WriteJson(res, 200, new { removed = name });
+                }
+                else WriteJson(res, 404, new { error = "unknown channel" });
+                return;
+            }
+
+            if (method == "POST" && path == "/api/channels/restart")
+            {
+                var name = ctx.Request.QueryString["name"] ?? "";
+                if (_ffmpeg?.RestartChannel(name) == true) WriteJson(res, 200, new { restarted = name });
+                else WriteJson(res, 404, new { error = "unknown channel" });
+                return;
+            }
+
+            if (method == "GET" && path == "/api/image")
+            {
+                ServeImage(ctx);
                 return;
             }
 
@@ -333,6 +399,106 @@ public sealed class ControlApi : IDisposable
         w.Write((uint)(totalLength - 44));
         w.Flush();
         return ms.ToArray();
+    }
+
+    private sealed record PlayRequest(string? file);
+    private sealed record ChannelRequest(string? name, string? url);
+
+    /// <summary>POST /api/play {file} — transcode any media file to HLS and return the stream name.</summary>
+    private void PlayFile(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        if (_ffmpeg is null || !_ffmpeg.Available)
+        {
+            WriteJson(res, 503, new { error = "ffmpeg is not available — install it (winget install Gyan.FFmpeg) and restart" });
+            return;
+        }
+        try
+        {
+            using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
+            var req = JsonSerializer.Deserialize<PlayRequest>(reader.ReadToEnd(),
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (string.IsNullOrWhiteSpace(req?.file))
+            {
+                WriteJson(res, 400, new { error = "body must be { \"file\": \"...\" }" });
+                return;
+            }
+            var (stream, ready) = _ffmpeg.StartVod(req.file);
+            WriteJson(res, 200, new { stream, ready, playlist = $"/{stream}/index.m3u8" });
+        }
+        catch (FileNotFoundException)
+        {
+            WriteJson(res, 404, new { error = "file not found" });
+        }
+        catch (Exception ex)
+        {
+            WriteJson(res, 400, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>POST /api/channels {name,url} — add and start a live channel.</summary>
+    private void AddChannel(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        if (_ffmpeg is null || !_ffmpeg.Available)
+        {
+            WriteJson(res, 503, new { error = "ffmpeg is not available — install it (winget install Gyan.FFmpeg) and restart" });
+            return;
+        }
+        try
+        {
+            using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
+            var req = JsonSerializer.Deserialize<ChannelRequest>(reader.ReadToEnd(),
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (string.IsNullOrWhiteSpace(req?.name) || string.IsNullOrWhiteSpace(req?.url))
+            {
+                WriteJson(res, 400, new { error = "body must be { \"name\": \"...\", \"url\": \"...\" }" });
+                return;
+            }
+            var scheme = Uri.TryCreate(req.url, UriKind.Absolute, out var u) ? u.Scheme.ToLowerInvariant() : "";
+            if (scheme is not ("http" or "https" or "rtsp" or "rtmp" or "udp" or "rtp" or "srt"))
+            {
+                WriteJson(res, 400, new { error = "url must be http(s)/rtsp/rtmp/udp/rtp/srt" });
+                return;
+            }
+            var stream = _ffmpeg.AddChannel(req.name.Trim(), req.url.Trim());
+            Log.Info("control", $"channel added: {req.name} ← {req.url}");
+            WriteJson(res, 200, new { stream, playlist = $"/{stream}/index.m3u8" });
+        }
+        catch (InvalidOperationException ex) { WriteJson(res, 409, new { error = ex.Message }); }
+        catch (Exception ex) { WriteJson(res, 400, new { error = ex.Message }); }
+    }
+
+    private static readonly Dictionary<string, string> ImageTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        [".jpg"] = "image/jpeg", [".jpeg"] = "image/jpeg", [".png"] = "image/png",
+        [".gif"] = "image/gif", [".webp"] = "image/webp", [".bmp"] = "image/bmp",
+        [".svg"] = "image/svg+xml", [".avif"] = "image/avif",
+    };
+
+    /// <summary>GET /api/image?path= — serves a picture for the library viewer.</summary>
+    private void ServeImage(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var path = ctx.Request.QueryString["path"] ?? "";
+        try
+        {
+            var full = Path.GetFullPath(path);
+            if (!System.IO.File.Exists(full) || !ImageTypes.TryGetValue(Path.GetExtension(full), out var mime))
+            {
+                WriteJson(res, 404, new { error = "not an image" });
+                return;
+            }
+            res.StatusCode = 200;
+            res.ContentType = mime;
+            using var fs = System.IO.File.OpenRead(full);
+            res.ContentLength64 = fs.Length;
+            fs.CopyTo(res.OutputStream);
+        }
+        catch (Exception ex)
+        {
+            WriteJson(res, 400, new { error = ex.Message });
+        }
     }
 
     /// <summary>

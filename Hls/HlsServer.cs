@@ -87,9 +87,23 @@ public sealed class HlsServer : IDisposable
                 return;
             }
 
-            if (parts[1] is "index.m3u8" or "playlist.m3u8")
+            if (parts[1].EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase))
             {
-                WriteText(res, 200, "application/vnd.apple.mpegurl", BuildPlaylist(streamDir));
+                // A playlist written by a segmenter (ffmpeg VOD/live jobs)
+                // wins — it has exact durations and live-window state. The
+                // generated playlist covers plain directories of segments.
+                var onDisk = Path.Combine(streamDir, parts[1]);
+                if (File.Exists(onDisk) && !parts[1].Contains(".."))
+                {
+                    WriteText(res, 200, "application/vnd.apple.mpegurl", File.ReadAllText(onDisk));
+                    return;
+                }
+                if (parts[1] is "index.m3u8" or "playlist.m3u8")
+                {
+                    WriteText(res, 200, "application/vnd.apple.mpegurl", BuildPlaylist(streamDir));
+                    return;
+                }
+                WriteText(res, 404, "text/plain", "not found");
                 return;
             }
 

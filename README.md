@@ -48,6 +48,23 @@ folders → files, backed by `/api/browse`): any dashboard feature can call
 get an absolute path back, or `null` on cancel. The 📁 **Browse** button in
 the header uses it to copy a path to the clipboard.
 
+### Any media, one dashboard
+
+With **ffmpeg** installed (`winget install Gyan.FFmpeg` — auto-detected, or
+set `ffmpeg.path`), the dashboard becomes a full media center:
+
+- **Media library** — pick any folder; movies (`mp4/mkv/avi/…`) and music
+  (`mp3/flac/…`) transcode to HLS on the fly and play inline (converted
+  once, cached under the HLS media root), and pictures open in a lightbox
+  viewer.
+- **Live channels** — add any live source by URL: an HDHomeRun tuner
+  (`http://<tuner-ip>:5004/auto/v5.1` for local TV channels), IPTV
+  streams, RTSP/RTMP cameras, UDP/SRT feeds. The server restreams each as
+  a sliding-window live HLS channel that anything can play, and channels
+  persist in `channels.json` and restart with the server. `ffmpeg.liveVideoMode:
+  "copy"` remuxes without transcoding when the source is already
+  H.264/AAC.
+
 **Add mounts from the GUI**: the *+ Add mount* button in the RTSP mounts
 card creates a mount from a test tone or an audio file (picked with the
 file browser) — live immediately, no restart. Dashboard-added mounts are
@@ -121,6 +138,9 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `GET /api/browse?path=C:\x` | drive / folder / file listing (dashboard picker; no `path` = drives) |
 | `POST /api/mounts` | add a mount at runtime (persisted to `mounts.json`) |
 | `DELETE /api/mounts?path=/x` | remove a runtime-added mount |
+| `POST /api/play` `{file}` | transcode a media file to HLS (returns playlist path) |
+| `GET/POST/DELETE /api/channels` | list / add / remove live channels (persisted to `channels.json`) |
+| `GET /api/image?path=` | serve a picture for the library viewer |
 
 Binds to loopback by default; set `control.authToken` before exposing it
 more widely.

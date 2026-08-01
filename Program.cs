@@ -53,9 +53,15 @@ if (config.Mounts.Count == 0)
 RtspServer? rtsp = null;
 HlsServer? hls = null;
 ControlApi? control = null;
+J0kersMediaServer.Media.FfmpegManager? ffmpeg = null;
+
+var mediaRoot = Path.GetFullPath(Path.IsPathRooted(config.Hls.MediaRoot)
+    ? config.Hls.MediaRoot
+    : Path.Combine(baseDirectory, config.Hls.MediaRoot));
 
 try
 {
+    ffmpeg = new J0kersMediaServer.Media.FfmpegManager(config.Ffmpeg, mediaRoot, baseDirectory);
     if (config.Rtsp.Enabled)
     {
         rtsp = new RtspServer(config, baseDirectory);
@@ -68,7 +74,7 @@ try
     }
     if (config.Control.Enabled)
     {
-        control = new ControlApi(config, rtsp, baseDirectory);
+        control = new ControlApi(config, rtsp, baseDirectory, ffmpeg);
         control.Start();
 
         if (config.Control.OpenDashboardOnStart)
@@ -93,7 +99,7 @@ try
 catch (Exception ex)
 {
     Console.Error.WriteLine($"Startup failed: {ex.Message}");
-    rtsp?.Dispose(); hls?.Dispose(); control?.Dispose();
+    rtsp?.Dispose(); hls?.Dispose(); control?.Dispose(); ffmpeg?.Dispose();
     return 1;
 }
 
@@ -108,4 +114,5 @@ Log.Info("main", "shutting down");
 rtsp?.Dispose();
 hls?.Dispose();
 control?.Dispose();
+ffmpeg?.Dispose();
 return 0;

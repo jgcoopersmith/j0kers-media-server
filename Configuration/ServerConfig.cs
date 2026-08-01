@@ -28,6 +28,9 @@ public sealed class ServerConfig
     [JsonPropertyName("services")]
     public ServicesConfig Services { get; set; } = new();
 
+    [JsonPropertyName("ffmpeg")]
+    public FfmpegConfig Ffmpeg { get; set; } = new();
+
     [JsonPropertyName("mounts")]
     public List<MountConfig> Mounts { get; set; } = new();
 
@@ -213,6 +216,33 @@ public sealed class ControlConfig
 
     /// <summary>Open the dashboard in the default browser on startup.</summary>
     [JsonPropertyName("openDashboardOnStart")] public bool OpenDashboardOnStart { get; set; } = true;
+}
+
+public sealed class FfmpegConfig
+{
+    /// <summary>
+    /// Path to the ffmpeg executable. "ffmpeg" uses PATH; the server also
+    /// probes the winget alias directory as a fallback.
+    /// </summary>
+    [JsonPropertyName("path")] public string Path { get; set; } = "ffmpeg";
+
+    /// <summary>x264 preset for transcodes (ultrafast…veryslow).</summary>
+    [JsonPropertyName("preset")] public string Preset { get; set; } = "veryfast";
+
+    /// <summary>CRF quality for VOD transcodes (lower = better, 18–28 sane).</summary>
+    [JsonPropertyName("crf")] public int Crf { get; set; } = 23;
+
+    /// <summary>Live channel segment length in seconds.</summary>
+    [JsonPropertyName("liveSegmentSeconds")] public int LiveSegmentSeconds { get; set; } = 4;
+
+    /// <summary>Sliding window size for live channels.</summary>
+    [JsonPropertyName("liveWindowSegments")] public int LiveWindowSegments { get; set; } = 6;
+
+    /// <summary>
+    /// "transcode" (default, works for MPEG-2 tuners etc.) or "copy"
+    /// (remux only — cheap, but the source codecs must be HLS-compatible).
+    /// </summary>
+    [JsonPropertyName("liveVideoMode")] public string LiveVideoMode { get; set; } = "transcode";
 }
 
 public sealed class ServicesConfig

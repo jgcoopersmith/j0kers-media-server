@@ -267,11 +267,40 @@
   </div>
 
   <div class="card">
+    <h2 style="display:flex;align-items:center"><span style="flex:1">Media library</span>
+      <button onclick="chooseLibrary()">📁 Choose folder</button></h2>
+    <div id="lib-path" class="mono" style="color:var(--muted);font-size:12px;margin-bottom:8px"></div>
+    <div id="library"><div class="empty">Pick a folder — movies, music, and pictures inside it become playable here.</div></div>
+    <div id="ffmpeg-warn" style="display:none;color:var(--warning);font-size:12px;margin-top:8px">
+      ⚠ ffmpeg not found — video/audio playback and live channels are disabled. Install with
+      <span class="mono">winget install Gyan.FFmpeg</span> and restart the server.
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="display:flex;align-items:center"><span style="flex:1">Live channels</span>
+      <button onclick="toggleAddChannel()" id="ch-toggle">+ Add channel</button></h2>
+    <div id="addchannel" style="display:none;border:1px solid var(--grid);border-radius:10px;padding:12px;margin-bottom:10px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <input id="ch-name" class="am-in" placeholder="channel name (e.g. NBC 5.1)" style="width:190px">
+        <input id="ch-url" class="am-in" placeholder="http://hdhomerun:5004/auto/v5.1 · rtsp://cam/… · IPTV url" style="flex:1;min-width:260px">
+        <button onclick="submitAddChannel()" style="color:var(--good);border-color:color-mix(in srgb,var(--good) 45%,transparent)">Add</button>
+      </div>
+      <div id="ch-msg" style="color:var(--critical);font-size:12px;margin-top:6px"></div>
+    </div>
+    <div id="channels"><div class="empty">No channels. Add an HDHomeRun tuner URL, IPTV stream, or camera to restream it as HLS.</div></div>
+  </div>
+
+  <div class="card">
     <details>
       <summary>Effective configuration</summary>
       <pre id="config">–</pre>
     </details>
   </div>
+</div>
+
+<div id="lightbox" style="display:none;position:fixed;inset:0;z-index:60;background:rgba(0,0,0,0.85);align-items:center;justify-content:center;cursor:zoom-out" onclick="this.style.display='none'">
+  <img id="lightbox-img" style="max-width:94vw;max-height:92vh;border-radius:8px" alt="">
 </div>
 
 <div id="picker-overlay">
@@ -361,7 +390,15 @@ async function tick() {
   refreshMounts();   // cheap, cached-ish
   refreshHls();
   refreshConfig();
+  await refreshChannels(false);
+
+  if (!libraryBooted) {
+    libraryBooted = true;
+    const saved = localStorage.getItem("j0kers-library");
+    if (saved) loadLibrary(saved);
+  }
 }
+let libraryBooted = false;
 
 function renderSessions(list) {
   if (!list.length) { $("sessions").innerHTML = '<div class="empty">No active sessions — open <span class="mono">rtsp://' + location.hostname + ':' + rtspPort + '/test</span> in VLC or ffplay.</div>'; return; }
@@ -574,6 +611,175 @@ async function playHls(url) {
   } else {
     msg.textContent = "In-browser HLS needs hls.js (no internet?) — open the URL in VLC instead.";
   }
+}
+
+/* ---- media library: browse a folder; play movies/music, view pictures ---- */
+const EXT = {
+  video: ["mp4","mkv","avi","mov","webm","ts","m2ts","mts","wmv","flv","mpg","mpeg","vob","3gp"],
+  audio: ["mp3","flac","wav","m4a","ogg","aac","wma","opus","aiff","ape","ulaw"],
+  image: ["jpg","jpeg","png","gif","webp","bmp","svg","avif"],
+};
+function mediaKind(name) {
+  const e = name.split(".").pop().toLowerCase();
+  for (const k in EXT) if (EXT[k].includes(e)) return k;
+  return null;
+}
+let ffmpegOk = false;
+
+async function chooseLibrary() {
+  const p = await pickPath({ mode: "folder", title: "Choose your media library folder" });
+  if (!p) return;
+  localStorage.setItem("j0kers-library", p);
+  loadLibrary(p);
+}
+
+async function loadLibrary(path) {
+  const box = $("library");
+  $("lib-path").textContent = path;
+  box.innerHTML = '<div class="empty">loading…</div>';
+  let data;
+  try {
+    const r = await fetch("/api/browse?path=" + encodeURIComponent(path), { headers: headers() });
+    data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.status);
+  } catch (e) {
+    box.innerHTML = '<div class="empty">cannot open: ' + esc(e.message) + '</div>';
+    return;
+  }
+
+  let h = "";
+  if (data.parent && localStorage.getItem("j0kers-library") !== data.path)
+    h += libRow("⬆️", "..", "", "loadLibrary('" + esc(data.parent).replace(/\\/g, "\\\\") + "')");
+
+  for (const e of data.entries) {
+    const full = (data.path.endsWith("\\") || data.path.endsWith("/")) ? data.path + e.name : data.path + "\\" + e.name;
+    const fullJs = esc(full).replace(/\\/g, "\\\\");
+    if (e.type === "folder") {
+      h += libRow("📁", e.name, "", "loadLibrary('" + fullJs + "')");
+    } else {
+      const kind = mediaKind(e.name);
+      if (kind === "image")
+        h += libRow("🖼️", e.name, e.detail, "viewImage('" + fullJs + "')");
+      else if (kind === "video")
+        h += libRow("🎬", e.name, e.detail, ffmpegOk ? "playMedia('" + fullJs + "', this)" : "");
+      else if (kind === "audio")
+        h += libRow("🎵", e.name, e.detail, ffmpegOk ? "playMedia('" + fullJs + "', this)" : "");
+    }
+  }
+  box.innerHTML = h || '<div class="empty">no playable media in this folder</div>';
+}
+
+function libRow(icon, name, detail, onclick) {
+  const clickable = onclick ? ' onclick="' + onclick + '" style="cursor:pointer"' : ' style="opacity:.55"';
+  return '<div class="pick-row"' + clickable + '><span class="icon">' + icon + '</span><span class="nm">'
+    + esc(name) + '</span><span class="det">' + esc(detail || "") + '</span></div>';
+}
+
+function viewImage(path) {
+  let url = "/api/image?path=" + encodeURIComponent(path);
+  if (token) url += "&token=" + encodeURIComponent(token);
+  $("lightbox-img").src = url;
+  $("lightbox").style.display = "flex";
+}
+
+/* movies & music: ask the server to transcode to HLS, then play inline */
+async function playMedia(path, row) {
+  const name = path.split(/[\\/]/).pop();
+  try {
+    const r = await fetch("/api/play", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers() },
+      body: JSON.stringify({ file: path }),
+    });
+    const data = await r.json();
+    if (!r.ok) { alert(data.error || "playback failed"); return; }
+
+    const url = "http://" + location.hostname + ":" + hlsPort + data.playlist;
+    $("hlsmsg") && ($("hlsmsg").textContent = "preparing " + name + "…");
+    // wait for the transcoder to produce the playlist (usually 1–3 s)
+    for (let i = 0; i < 40; i++) {
+      if (data.ready) break;
+      const s = await (await fetch("/api/play?stream=" + encodeURIComponent(data.stream), { headers: headers() })).json();
+      if (s.ready) break;
+      await new Promise(res2 => setTimeout(res2, 500));
+    }
+    playHls(url);
+    document.getElementById("hlsplayer").scrollIntoView({ behavior: "smooth", block: "center" });
+  } catch (e) {
+    alert("playback failed: " + e.message);
+  }
+}
+
+/* ---- live channels (HDHomeRun / IPTV / cameras → HLS) ---- */
+function toggleAddChannel() {
+  const f = $("addchannel");
+  const show = f.style.display === "none";
+  f.style.display = show ? "block" : "none";
+  $("ch-toggle").textContent = show ? "− Close" : "+ Add channel";
+  $("ch-msg").textContent = "";
+  if (show) $("ch-name").focus();
+}
+
+async function submitAddChannel() {
+  const msg = $("ch-msg");
+  msg.textContent = "";
+  const body = { name: $("ch-name").value.trim(), url: $("ch-url").value.trim() };
+  if (!body.name || !body.url) { msg.textContent = "both a name and a stream URL are required"; return; }
+  try {
+    const r = await fetch("/api/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers() },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok) { msg.textContent = data.error || ("failed: " + r.status); return; }
+    toggleAddChannel();
+    $("ch-name").value = ""; $("ch-url").value = "";
+    refreshChannels(true);
+  } catch (e) {
+    msg.textContent = "request failed: " + e.message;
+  }
+}
+
+let channelsLoaded = 0;
+async function refreshChannels(force) {
+  if (!force && Date.now() - channelsLoaded < 10000) return;
+  channelsLoaded = Date.now();
+  let data;
+  try {
+    data = await api("/api/channels");
+  } catch { return; }
+  ffmpegOk = data.ffmpegAvailable;
+  $("ffmpeg-warn").style.display = ffmpegOk ? "none" : "block";
+  if (!data.channels.length) {
+    $("channels").innerHTML = '<div class="empty">No channels. Add an HDHomeRun tuner URL, IPTV stream, or camera to restream it as HLS.</div>';
+    return;
+  }
+  let h = "";
+  for (const c of data.channels) {
+    const url = "http://" + location.hostname + ":" + hlsPort + "/" + c.stream + "/index.m3u8";
+    const live = c.status === "running";
+    h += '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
+      + '<span class="state ' + (live ? "playing" : "ready") + '"><span class="dot"></span></span>'
+      + '<div style="flex:1;min-width:0"><div style="color:var(--ink)">' + esc(c.name) + '</div>'
+      + '<div class="mono" style="color:var(--muted);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(c.url) + ' · ' + esc(c.status) + '</div></div>'
+      + '<button onclick="playHls(\'' + esc(url) + '\')">▶ Play</button>'
+      + '<button title="Restart channel" onclick="restartChannel(\'' + esc(c.name) + '\')">↻</button>'
+      + '<button class="danger" title="Remove channel" onclick="removeChannel(\'' + esc(c.name) + '\')">✕</button>'
+      + '</div>';
+  }
+  $("channels").innerHTML = h;
+}
+
+async function restartChannel(name) {
+  await fetch("/api/channels/restart?name=" + encodeURIComponent(name), { method: "POST", headers: headers() });
+  refreshChannels(true);
+}
+
+async function removeChannel(name) {
+  if (!confirm("Remove channel " + name + "?")) return;
+  await fetch("/api/channels?name=" + encodeURIComponent(name), { method: "DELETE", headers: headers() });
+  refreshChannels(true);
 }
 
 /* ---- add-mount flow (uses pickPath for the file source) ---- */
