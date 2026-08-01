@@ -26,6 +26,8 @@ if (args.Length > 0 && args[0] is "--help" or "-h")
     return 0;
 }
 
+try { Console.Title = "🃏 j0kers Media Server"; } catch { /* no console attached */ }
+
 ServerConfig config;
 try
 {

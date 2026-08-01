@@ -8,6 +8,7 @@
     <RootNamespace>J0kersMediaServer</RootNamespace>
     <AssemblyName>j0kers-media-server</AssemblyName>
     <Version>0.1.0</Version>
+    <ApplicationIcon>assets\j0kers.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
