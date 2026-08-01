@@ -39,8 +39,7 @@ URIs, HLS stream list, and the effective config. (Set
 
 The header has a **⏻ Start/Stop** button that stops or starts the streaming
 services (RTSP + HLS) while the dashboard stays up, and a **⚙ Config**
-dialog for the server name, hostname/bind address, and the RTSP/HLS/control
-ports — saved to a `settings.json` sidecar and applied by restarting the
+dialog for the hostname/bind address and the RTSP/HLS/control ports — saved to a `settings.json` sidecar and applied by restarting the
 services live (a control-port change takes effect on the next full server
 restart).
 

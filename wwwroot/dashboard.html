@@ -316,8 +316,6 @@
 <div id="cfg-overlay">
   <div id="cfg" role="dialog" aria-modal="true">
     <h3>⚙ Server configuration</h3>
-    <label>Server name</label>
-    <input id="cfg-name" class="am-in">
     <label>Hostname / bind address <span style="text-transform:none">(0.0.0.0 = all interfaces, 127.0.0.1 = this machine only)</span></label>
     <input id="cfg-bind" class="am-in" placeholder="0.0.0.0">
     <div style="display:flex;gap:10px">
@@ -658,7 +656,6 @@ async function openConfig() {
   $("cfg-msg").textContent = "";
   try {
     const s = await api("/api/settings");
-    $("cfg-name").value = s.serverName;
     $("cfg-bind").value = s.bindAddress;
     $("cfg-rtsp").value = s.rtspPort;
     $("cfg-hls").value = s.hlsPort;
@@ -675,7 +672,6 @@ async function saveConfig() {
   const msg = $("cfg-msg");
   msg.textContent = "";
   const body = {
-    serverName: $("cfg-name").value.trim(),
     bindAddress: $("cfg-bind").value.trim(),
     rtspPort: parseInt($("cfg-rtsp").value, 10),
     hlsPort: parseInt($("cfg-hls").value, 10),
