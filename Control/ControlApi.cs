@@ -285,13 +285,7 @@ public sealed class ControlApi : IDisposable
             if (method == "DELETE" && path == "/api/mounts")
             {
                 var mountPath = ctx.Request.QueryString["path"] ?? "";
-                if (_serverConfig.Mounts.Any(m => string.Equals(m.Path, mountPath, StringComparison.OrdinalIgnoreCase))
-                    && !_serverConfig.IsDynamicMount(mountPath))
-                {
-                    WriteJson(res, 400, new { error = "that mount comes from server.json â€” remove it there" });
-                    return;
-                }
-                if (_serverConfig.RemoveDynamicMount(mountPath))
+                if (_serverConfig.RemoveMount(mountPath))
                 {
                     Log.Info("control", $"mount removed via dashboard: {mountPath}");
                     WriteJson(res, 200, new { removed = mountPath });
@@ -300,6 +294,12 @@ public sealed class ControlApi : IDisposable
                 {
                     WriteJson(res, 404, new { error = "unknown mount" });
                 }
+                return;
+            }
+
+            if (method == "DELETE" && path == "/api/hls")
+            {
+                RemoveHlsStream(ctx);
                 return;
             }
 
@@ -334,7 +334,7 @@ public sealed class ControlApi : IDisposable
     /// <summary>
     /// Streams a mount's audio as a live WAV file (16-bit PCM, 8 kHz mono)
     /// with an open-ended length, paced in real time until the client
-    /// disconnects. A plain &lt;audio&gt; element can play this natively â€”
+    /// disconnects. A plain &lt;audio&gt; element can play this natively —
     /// browsers cannot consume RTSP directly.
     /// </summary>
     private void StreamPreview(HttpListenerContext ctx)
@@ -371,7 +371,7 @@ public sealed class ControlApi : IDisposable
         // neither it closes the response as Content-Length: 0.)
         res.SendChunked = false;
         res.KeepAlive = false;
-        res.ContentLength64 = 0x7FFFFFF0; // ~2 GiB â‰ˆ 37 hours of 8 kHz PCM16
+        res.ContentLength64 = 0x7FFFFFF0; // ~2 GiB ≈ 37 hours of 8 kHz PCM16
         res.Headers["Cache-Control"] = "no-store";
 
         var ulaw = new byte[Media.MediaSourceFactory.FrameSamples];
@@ -407,7 +407,7 @@ public sealed class ControlApi : IDisposable
         }
         catch (Exception)
         {
-            // client hung up â€” normal end of a preview
+            // client hung up — normal end of a preview
         }
         finally
         {
@@ -442,7 +442,7 @@ public sealed class ControlApi : IDisposable
     }
 
     /// <summary>
-    /// POST /api/settings — save hostname/port settings to the settings.json
+    /// POST /api/settings � save hostname/port settings to the settings.json
     /// sidecar and apply them by restarting the streaming services. A control
     /// port change is saved but only takes effect on the next full restart
     /// (this API is serving the current request on the old port).
@@ -468,7 +468,7 @@ public sealed class ControlApi : IDisposable
         {
             if (port is int p and (< 1 or > 65535))
             {
-                WriteJson(res, 400, new { error = $"{name} must be 1–65535" });
+                WriteJson(res, 400, new { error = $"{name} must be 1�65535" });
                 return;
             }
         }
@@ -520,16 +520,60 @@ public sealed class ControlApi : IDisposable
         });
     }
 
+    /// <summary>
+    /// DELETE /api/hls?stream=name — delete an HLS stream directory (its
+    /// playlist and segments) from the media root. Streams backing a live
+    /// channel are refused; remove the channel instead.
+    /// </summary>
+    private void RemoveHlsStream(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var name = ctx.Request.QueryString["stream"] ?? "";
+        if (name.Length == 0 || name.Contains("..") || name.Contains('/') || name.Contains('\\'))
+        {
+            WriteJson(res, 400, new { error = "invalid stream name" });
+            return;
+        }
+
+        if (_ffmpeg?.Channels.Any(c => c.stream.Equals(name, StringComparison.OrdinalIgnoreCase)) == true)
+        {
+            WriteJson(res, 400, new { error = "that stream is a live channel — remove the channel instead" });
+            return;
+        }
+
+        var mediaRoot = Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
+            ? _serverConfig.Hls.MediaRoot
+            : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
+        var dir = Path.GetFullPath(Path.Combine(mediaRoot, name));
+        if (!dir.StartsWith(mediaRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+            !Directory.Exists(dir))
+        {
+            WriteJson(res, 404, new { error = "unknown stream" });
+            return;
+        }
+
+        try
+        {
+            Directory.Delete(dir, recursive: true);
+            Log.Info("control", $"HLS stream removed via dashboard: {name}");
+            WriteJson(res, 200, new { removed = name });
+        }
+        catch (Exception ex)
+        {
+            WriteJson(res, 500, new { error = "could not delete: " + ex.Message });
+        }
+    }
+
     private sealed record PlayRequest(string? file);
     private sealed record ChannelRequest(string? name, string? url);
 
-    /// <summary>POST /api/play {file} â€” transcode any media file to HLS and return the stream name.</summary>
+    /// <summary>POST /api/play {file} — transcode any media file to HLS and return the stream name.</summary>
     private void PlayFile(HttpListenerContext ctx)
     {
         var res = ctx.Response;
         if (_ffmpeg is null || !_ffmpeg.Available)
         {
-            WriteJson(res, 503, new { error = "ffmpeg is not available â€” install it (winget install Gyan.FFmpeg) and restart" });
+            WriteJson(res, 503, new { error = "ffmpeg is not available — install it (winget install Gyan.FFmpeg) and restart" });
             return;
         }
         try
@@ -555,13 +599,13 @@ public sealed class ControlApi : IDisposable
         }
     }
 
-    /// <summary>POST /api/channels {name,url} â€” add and start a live channel.</summary>
+    /// <summary>POST /api/channels {name,url} — add and start a live channel.</summary>
     private void AddChannel(HttpListenerContext ctx)
     {
         var res = ctx.Response;
         if (_ffmpeg is null || !_ffmpeg.Available)
         {
-            WriteJson(res, 503, new { error = "ffmpeg is not available â€” install it (winget install Gyan.FFmpeg) and restart" });
+            WriteJson(res, 503, new { error = "ffmpeg is not available — install it (winget install Gyan.FFmpeg) and restart" });
             return;
         }
         try
@@ -581,7 +625,7 @@ public sealed class ControlApi : IDisposable
                 return;
             }
             var stream = _ffmpeg.AddChannel(req.name.Trim(), req.url.Trim());
-            Log.Info("control", $"channel added: {req.name} â† {req.url}");
+            Log.Info("control", $"channel added: {req.name} ← {req.url}");
             WriteJson(res, 200, new { stream, playlist = $"/{stream}/index.m3u8" });
         }
         catch (InvalidOperationException ex) { WriteJson(res, 409, new { error = ex.Message }); }
@@ -595,7 +639,7 @@ public sealed class ControlApi : IDisposable
         [".svg"] = "image/svg+xml", [".avif"] = "image/avif",
     };
 
-    /// <summary>GET /api/image?path= â€” serves a picture for the library viewer.</summary>
+    /// <summary>GET /api/image?path= — serves a picture for the library viewer.</summary>
     private void ServeImage(HttpListenerContext ctx)
     {
         var res = ctx.Response;
@@ -621,7 +665,7 @@ public sealed class ControlApi : IDisposable
     }
 
     /// <summary>
-    /// POST /api/mounts â€” add a mount at runtime. Body:
+    /// POST /api/mounts — add a mount at runtime. Body:
     /// { "path": "/music", "source": "tone"|"file", "file": "...",
     ///   "toneFrequencyHz": 440, "description": "" }
     /// Takes effect immediately (the RTSP server resolves mounts per
@@ -665,7 +709,7 @@ public sealed class ControlApi : IDisposable
             case "tone":
                 if (mount.ToneFrequencyHz is < 20 or > 4000)
                 {
-                    WriteJson(res, 400, new { error = "tone frequency must be 20â€“4000 Hz (8 kHz sampling)" });
+                    WriteJson(res, 400, new { error = "tone frequency must be 20–4000 Hz (8 kHz sampling)" });
                     return;
                 }
                 break;
@@ -706,8 +750,8 @@ public sealed class ControlApi : IDisposable
 
     /// <summary>
     /// Filesystem browser backing the dashboard's pickPath() library:
-    /// GET /api/browse            â†’ drive list
-    /// GET /api/browse?path=C:\x  â†’ folders and files of that directory
+    /// GET /api/browse            → drive list
+    /// GET /api/browse?path=C:\x  → folders and files of that directory
     /// Loopback/token-gated like the rest of the API; this is the operator's
     /// own machine, so no path restriction beyond what the OS enforces.
     /// </summary>
@@ -764,7 +808,7 @@ public sealed class ControlApi : IDisposable
             WriteJson(res, 200, new
             {
                 path = full,
-                parent = dir.Parent?.FullName, // null at a drive root â†’ back to drive list
+                parent = dir.Parent?.FullName, // null at a drive root → back to drive list
                 entries,
             });
         }

@@ -76,8 +76,13 @@ set `ffmpeg.path`), the dashboard becomes a full media center:
 card creates a mount from a test tone or an audio file (picked with the
 file browser) — live immediately, no restart. Dashboard-added mounts are
 saved to a `mounts.json` sidecar next to your config (so the commented
-`server.json` is never rewritten) and carry a ✕ button to remove them
-again. Mounts defined in `server.json` stay read-only in the GUI.
+`server.json` is never rewritten). Every mount row has a ✕ remove button:
+dashboard-added mounts are deleted outright, while `server.json` mounts
+are hidden via a persisted tombstone in the sidecar — the config file
+itself is never touched, and re-adding the same path clears the
+tombstone. HLS stream rows have a ✕ too, which deletes the stream's
+playlist and segment files from disk (live-channel streams are refused —
+remove the channel instead).
 
 Check the control API:
 
@@ -144,7 +149,8 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `GET /api/preview?mount=/x` | live WAV audio of a mount (dashboard player) |
 | `GET /api/browse?path=C:\x` | drive / folder / file listing (dashboard picker; no `path` = drives) |
 | `POST /api/mounts` | add a mount at runtime (persisted to `mounts.json`) |
-| `DELETE /api/mounts?path=/x` | remove a runtime-added mount |
+| `DELETE /api/mounts?path=/x` | remove any mount (server.json mounts get a persisted tombstone) |
+| `DELETE /api/hls?stream=x` | delete an HLS stream's files from the media root |
 | `POST /api/play` `{file}` | transcode a media file to HLS (returns playlist path) |
 | `GET/POST/DELETE /api/channels` | list / add / remove live channels (persisted to `channels.json`) |
 | `GET /api/image?path=` | serve a picture for the library viewer |

@@ -56,6 +56,7 @@ public sealed class ServerConfig
     [JsonIgnore] public string SettingsFile { get; private set; } = "settings.json";
 
     private readonly HashSet<string> _dynamicMountPaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _removedMountPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _mountLock = new();
 
     public bool IsDynamicMount(string path) => _dynamicMountPaths.Contains(path);
@@ -126,17 +127,35 @@ public sealed class ServerConfig
     public void SaveSettings(SettingsOverrides s) =>
         File.WriteAllText(SettingsFile, JsonSerializer.Serialize(s, JsonOpts));
 
+    private sealed class MountSidecar
+    {
+        [JsonPropertyName("added")] public List<MountConfig> Added { get; set; } = new();
+        [JsonPropertyName("removed")] public List<string> Removed { get; set; } = new();
+    }
+
     private void LoadDynamicMounts()
     {
         if (!File.Exists(DynamicMountsFile)) return;
-        var extra = JsonSerializer.Deserialize<List<MountConfig>>(
-            File.ReadAllText(DynamicMountsFile), JsonOpts) ?? new List<MountConfig>();
-        foreach (var m in extra)
+        var text = File.ReadAllText(DynamicMountsFile);
+
+        // legacy format was a bare array of added mounts
+        var sidecar = text.TrimStart().StartsWith('[')
+            ? new MountSidecar { Added = JsonSerializer.Deserialize<List<MountConfig>>(text, JsonOpts) ?? new() }
+            : JsonSerializer.Deserialize<MountSidecar>(text, JsonOpts) ?? new MountSidecar();
+
+        foreach (var m in sidecar.Added)
         {
             if (Mounts.Any(x => string.Equals(x.Path, m.Path, StringComparison.OrdinalIgnoreCase)))
                 continue; // server.json wins on conflict
             Mounts.Add(m);
             _dynamicMountPaths.Add(m.Path);
+        }
+
+        // tombstones: server.json mounts the user removed from the dashboard
+        foreach (var path in sidecar.Removed)
+        {
+            _removedMountPaths.Add(path);
+            Mounts.RemoveAll(m => string.Equals(m.Path, path, StringComparison.OrdinalIgnoreCase));
         }
     }
 
@@ -149,18 +168,24 @@ public sealed class ServerConfig
                 throw new InvalidOperationException($"a mount at '{mount.Path}' already exists");
             Mounts.Add(mount);
             _dynamicMountPaths.Add(mount.Path);
+            _removedMountPaths.Remove(mount.Path); // re-adding clears a tombstone
             SaveDynamicMounts();
         }
     }
 
-    /// <summary>Removes a runtime-added mount. Mounts from server.json cannot be removed here.</summary>
-    public bool RemoveDynamicMount(string path)
+    /// <summary>
+    /// Removes any mount at runtime. Dashboard-added mounts are dropped from
+    /// the sidecar; server.json mounts get a persisted tombstone instead, so
+    /// the hand-edited config file itself is never rewritten.
+    /// </summary>
+    public bool RemoveMount(string path)
     {
         lock (_mountLock)
         {
-            if (!_dynamicMountPaths.Contains(path)) return false;
-            Mounts.RemoveAll(m => string.Equals(m.Path, path, StringComparison.OrdinalIgnoreCase));
-            _dynamicMountPaths.Remove(path);
+            var existed = Mounts.RemoveAll(m => string.Equals(m.Path, path, StringComparison.OrdinalIgnoreCase)) > 0;
+            if (!existed) return false;
+            if (!_dynamicMountPaths.Remove(path))
+                _removedMountPaths.Add(path); // came from server.json → tombstone it
             SaveDynamicMounts();
             return true;
         }
@@ -168,8 +193,12 @@ public sealed class ServerConfig
 
     private void SaveDynamicMounts()
     {
-        var dynamic = Mounts.Where(m => _dynamicMountPaths.Contains(m.Path)).ToList();
-        File.WriteAllText(DynamicMountsFile, JsonSerializer.Serialize(dynamic, JsonOpts));
+        var sidecar = new MountSidecar
+        {
+            Added = Mounts.Where(m => _dynamicMountPaths.Contains(m.Path)).ToList(),
+            Removed = _removedMountPaths.ToList(),
+        };
+        File.WriteAllText(DynamicMountsFile, JsonSerializer.Serialize(sidecar, JsonOpts));
     }
 
     private void ApplyEnvironmentOverrides()

@@ -477,7 +477,7 @@ async function refreshMounts() {
       + '<div style="color:var(--muted);font-size:12px">' + esc(m.source) + (m.description ? " · " + esc(m.description) : "") + (m.dynamic ? " · added via dashboard" : "") + '</div></div>'
       + '<button data-preview="' + esc(m.path) + '" onclick="togglePreview(this)">▶ Play</button>'
       + '<button onclick="copyText(this,\'' + esc(uri) + '\')">Copy</button>'
-      + (m.dynamic ? '<button class="danger" title="Remove mount" onclick="removeMount(\'' + esc(m.path) + '\')">✕</button>' : "")
+      + '<button class="danger" title="Remove mount" onclick="removeMount(\'' + esc(m.path) + '\')">✕</button>'
       + '</div>';
   }
   if (data.announcementService) {
@@ -607,7 +607,8 @@ async function refreshHls() {
       h += '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
         + '<div style="flex:1;min-width:0"><a class="mono" href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(s.name) + '</a></div>'
         + '<button onclick="playHls(\'' + esc(url) + '\')">▶ Play</button>'
-        + '<button onclick="copyText(this,\'' + esc(url) + '\')">Copy</button></div>';
+        + '<button onclick="copyText(this,\'' + esc(url) + '\')">Copy</button>'
+        + '<button class="danger" title="Delete this stream\'s playlist and segments" onclick="removeHlsStream(\'' + esc(s.name) + '\')">✕</button></div>';
     }
     $("hls").innerHTML = h;
   } catch {
@@ -944,10 +945,20 @@ async function submitAddMount() {
 }
 
 async function removeMount(path) {
-  if (!confirm("Remove mount " + path + "?")) return;
+  if (!confirm("Remove mount " + path + "? (Mounts from server.json are hidden persistently but the config file itself is not modified.)")) return;
   await fetch("/api/mounts?path=" + encodeURIComponent(path), { method: "DELETE", headers: headers() });
   mountsLoaded = 0;
   refreshMounts();
+}
+
+async function removeHlsStream(name) {
+  if (!confirm("Delete HLS stream '" + name + "'? Its playlist and segment files are removed from disk.")) return;
+  const r = await fetch("/api/hls?stream=" + encodeURIComponent(name), { method: "DELETE", headers: headers() });
+  if (!r.ok) {
+    const data = await r.json().catch(() => ({}));
+    alert(data.error || "delete failed");
+  }
+  refreshHls();
 }
 
 /* ==== pickPath(): reusable drive / folder / file picker =================
