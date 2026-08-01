@@ -161,6 +161,7 @@ var mediaRoot = Path.GetFullPath(Path.IsPathRooted(config.Hls.MediaRoot)
 try
 {
     ffmpeg = new J0kersMediaServer.Media.FfmpegManager(config.Ffmpeg, mediaRoot, baseDirectory);
+    J0kersMediaServer.Services.WindowsUrlAcl.EnsureFor(config);
     services = new J0kersMediaServer.Services.ServiceController(config, baseDirectory);
     services.StartServices();
     if (config.Control.Enabled)
