@@ -4,15 +4,24 @@ using J0kersMediaServer.Hls;
 using J0kersMediaServer.Logging;
 using J0kersMediaServer.Rtsp;
 
+// Config resolution: explicit argument, then $J0KERS_CONFIG, then the first
+// of ./server.json, ./config/server.json, <binary dir>/server.json that
+// exists — so a bare `dotnet run` from the repo root just works.
 var configPath = args.Length > 0 ? args[0]
     : Environment.GetEnvironmentVariable("J0KERS_CONFIG")
-    ?? Path.Combine(AppContext.BaseDirectory, "server.json");
+    ?? new[]
+    {
+        Path.Combine(Directory.GetCurrentDirectory(), "server.json"),
+        Path.Combine(Directory.GetCurrentDirectory(), "config", "server.json"),
+        Path.Combine(AppContext.BaseDirectory, "server.json"),
+    }.FirstOrDefault(File.Exists)
+    ?? "server.json";
 
 if (args.Length > 0 && args[0] is "--help" or "-h")
 {
     Console.WriteLine("j0kers Media Server");
     Console.WriteLine("usage: j0kers-media-server [config.json]");
-    Console.WriteLine("       config path defaults to $J0KERS_CONFIG or ./server.json;");
+    Console.WriteLine("       config path defaults to $J0KERS_CONFIG, ./server.json, or ./config/server.json;");
     Console.WriteLine("       missing file = built-in defaults. See config/server.json for all options.");
     return 0;
 }

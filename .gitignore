@@ -2,5 +2,7 @@ bin/
 obj/
 *.user
 .vs/
-media/
-clips/
+# runtime media/clip directories (anchored under config/ so the Media/
+# source folder, which matches case-insensitively on Windows, stays tracked)
+/config/media/
+/config/clips/

@@ -17,8 +17,11 @@ isn't covered from each document.
 ## Quick start
 
 ```bash
-dotnet run --project src/J0kersMediaServer -- config/server.json
+dotnet run
 ```
+
+That's it — from the repo root it picks up [config/server.json](config/server.json)
+automatically (pass a path or set `J0KERS_CONFIG` to use a different one).
 
 Then play the built-in test tone:
 
@@ -96,17 +99,17 @@ more widely.
 ## Layout
 
 ```
-src/J0kersMediaServer/
-  Config/    JSON config model, env overrides, validation
-  Rtsp/      RTSP parser, server, sessions, SDP
-  Rtp/       RTP packetization, RTCP sender reports, port allocator
-  Hls/       RFC 8216 playlist generation + segment serving
-  Control/   HTTP/JSON control API
-  Media/     G.711 sources (tone generator, file looper)
+Configuration/  JSON config model, env overrides, validation
+Rtsp/           RTSP parser, server, sessions, SDP
+Rtp/            RTP packetization, RTCP sender reports, port allocator
+Hls/            RFC 8216 playlist generation + segment serving
+Control/        HTTP/JSON control API
+Media/          G.711 sources (tone generator, file looper)
+config/         sample/default server.json (runtime media/ and clips/ live here too)
 ```
 
 ## Build
 
 ```bash
-dotnet build J0kersMediaServer.slnx
+dotnet build
 ```
