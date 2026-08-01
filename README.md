@@ -140,6 +140,23 @@ with defaults and a `/test` tone mount.
 Common environment overrides: `J0KERS_RTSP_PORT`, `J0KERS_HLS_PORT`,
 `J0KERS_CONTROL_PORT`, `J0KERS_BIND_ADDRESS`, `J0KERS_LOG_LEVEL`.
 
+Command-line flags override everything:
+
+```bash
+dotnet run -- -h 0.0.0.0 -r 8554 -H 8080 -c 9090
+```
+
+| Flag | Meaning |
+|---|---|
+| `-h`, `--host <ip>` | bind address / hostname (`0.0.0.0` = all interfaces, `localhost`) |
+| `-r`, `--rtsp-port <port>` | RTSP port |
+| `-H`, `--hls-port <port>` | HLS port |
+| `-c`, `--control-port <port>` | control/dashboard port |
+| `--help` | usage |
+
+Precedence, lowest to highest: `server.json` → `settings.json` (dashboard
+Config dialog) → `J0KERS_*` env vars → command-line flags.
+
 ### RTSP mounts
 
 ```json
