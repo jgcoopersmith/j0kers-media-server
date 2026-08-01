@@ -171,24 +171,20 @@ try
         if (config.Control.OpenDashboardOnStart)
         {
             var url = $"http://localhost:{config.Control.Port}/";
-            try
+            if (OperatingSystem.IsLinux()
+                && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISPLAY"))
+                && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY")))
             {
-                // each OS has its own way to hand a URL to the default browser
-                if (OperatingSystem.IsWindows())
-                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                    {
-                        FileName = url,
-                        UseShellExecute = true,
-                    });
-                else if (OperatingSystem.IsMacOS())
-                    System.Diagnostics.Process.Start("open", url);
-                else
-                    System.Diagnostics.Process.Start("xdg-open", url);
+                // headless box — nothing to open a browser on
+                Log.Info("main", $"dashboard: {url}");
+            }
+            else if (TryOpenBrowser(url))
+            {
                 Log.Info("main", $"dashboard opened at {url} (disable with control.openDashboardOnStart=false)");
             }
-            catch (Exception ex)
+            else
             {
-                Log.Warn("main", $"could not open browser ({ex.Message}); dashboard is at {url}");
+                Log.Info("main", $"no browser opener found on this system; dashboard: {url}");
             }
         }
     }
@@ -198,6 +194,39 @@ catch (Exception ex)
     Console.Error.WriteLine($"Startup failed: {ex.Message}");
     services?.Dispose(); control?.Dispose(); ffmpeg?.Dispose();
     return 1;
+}
+
+static bool TryOpenBrowser(string url)
+{
+    // each OS has its own way to hand a URL to the default browser; not
+    // every Linux install ships xdg-open, so walk the common openers
+    var attempts = OperatingSystem.IsWindows()
+        ? new[] { new[] { url } }
+        : OperatingSystem.IsMacOS()
+            ? new[] { new[] { "open", url } }
+            : new[]
+            {
+                new[] { "xdg-open", url },
+                new[] { "sensible-browser", url },
+                new[] { "x-www-browser", url },
+            };
+    foreach (var attempt in attempts)
+    {
+        try
+        {
+            if (attempt.Length == 1)
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = attempt[0],
+                    UseShellExecute = true,
+                });
+            else
+                System.Diagnostics.Process.Start(attempt[0], attempt[1]);
+            return true;
+        }
+        catch { /* opener not present — try the next */ }
+    }
+    return false;
 }
 
 var shutdown = new TaskCompletionSource();
