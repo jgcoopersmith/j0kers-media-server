@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <EmbeddedResource Include="wwwroot\dashboard.html" LogicalName="dashboard.html" />
+    <EmbeddedResource Include="wwwroot\hls.min.js" LogicalName="hls.min.js" />
   </ItemGroup>
 
 </Project>

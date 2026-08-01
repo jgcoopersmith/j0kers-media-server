@@ -742,13 +742,26 @@ async function playHls(url) {
   msg.textContent = "";
   if (window._hls) { window._hls.destroy(); window._hls = null; }
 
-  // always start at the beginning (event playlists otherwise join at the
-  // live edge while a transcode is still running) and keep the chosen speed
+  // Recordings start at the beginning; live channels (ch-*) join the live
+  // edge. A playlist from an in-progress transcode has no ENDLIST, so the
+  // player treats it as live and seeks to the edge AFTER loading — the
+  // loadeddata/playing guards below yank it back to 0 once, post-seek.
+  const fromStart = !/\/ch-[^/]*\//.test(url);
   video.addEventListener("loadedmetadata", function once() {
     video.removeEventListener("loadedmetadata", once);
-    if (video.currentTime > 0.5) video.currentTime = 0;
     video.playbackRate = parseFloat($("pc-speed").value) || 1;
   });
+  if (fromStart) {
+    const enforceStart = () => { if (video.currentTime > 2) video.currentTime = 0; };
+    video.addEventListener("loadeddata", function once2() {
+      video.removeEventListener("loadeddata", once2);
+      enforceStart();
+    });
+    video.addEventListener("playing", function once3() {
+      video.removeEventListener("playing", once3);
+      enforceStart();
+    });
+  }
 
   if (video.canPlayType("application/vnd.apple.mpegurl")) {
     video.src = url;
@@ -757,22 +770,27 @@ async function playHls(url) {
   }
   if (!window.Hls) {
     msg.textContent = "loading player…";
-    await new Promise(resolve => {
-      const s = document.createElement("script");
-      s.src = "https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js";
-      s.onload = resolve;
-      s.onerror = resolve;
-      document.head.appendChild(s);
-    });
+    // hls.js is embedded in the server; CDN is only a fallback
+    for (const src of ["/hls.min.js", "https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"]) {
+      await new Promise(resolve => {
+        const s = document.createElement("script");
+        s.src = src;
+        s.onload = resolve;
+        s.onerror = resolve;
+        document.head.appendChild(s);
+      });
+      if (window.Hls) break;
+    }
     msg.textContent = "";
   }
   if (window.Hls && Hls.isSupported()) {
-    window._hls = new Hls({ startPosition: 0 });
+    window._hls = new Hls({ autoStartLoad: false });
     window._hls.loadSource(url);
     window._hls.attachMedia(video);
+    window._hls.startLoad(fromStart ? 0 : -1); // -1 = live edge for channels
     video.play().catch(() => {});
   } else {
-    msg.textContent = "In-browser HLS needs hls.js (no internet?) — open the URL in VLC instead.";
+    msg.textContent = "hls.js failed to load — open the URL in VLC instead.";
   }
 }
 
@@ -1651,6 +1669,16 @@ document.addEventListener("click", e => {
 });
 
 $("token").addEventListener("keydown", e => { if (e.key === "Enter") saveToken(); });
+
+/* Closing the dashboard shuts the server down cleanly (configurable via
+   control.shutdownOnClose). The server waits 5 s before acting, so page
+   refreshes and other open dashboard tabs cancel it by polling. */
+window.addEventListener("pagehide", () => {
+  let url = "/api/server/closing";
+  if (token) url += "?token=" + encodeURIComponent(token);
+  navigator.sendBeacon(url);
+});
+
 tick();
 setInterval(tick, POLL_MS);
 </script>

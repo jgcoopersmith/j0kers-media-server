@@ -33,6 +33,8 @@ public sealed class ControlApi : IDisposable
     private readonly CancellationTokenSource _cts = new();
 
     private readonly Media.FfmpegManager? _ffmpeg;
+    private readonly Action? _requestShutdown;
+    private Timer? _closeShutdownTimer;
 
     private RtspServer? RtspServer => _services.Rtsp;
     private readonly Media.PlaylistStore _playlists;
@@ -40,13 +42,14 @@ public sealed class ControlApi : IDisposable
     private readonly Media.FavoritesStore _favorites;
 
     public ControlApi(ServerConfig serverConfig, Services.ServiceController services, string baseDirectory,
-        Media.FfmpegManager? ffmpeg = null)
+        Media.FfmpegManager? ffmpeg = null, Action? requestShutdown = null)
     {
         _config = serverConfig.Control;
         _serverConfig = serverConfig;
         _services = services;
         _baseDirectory = baseDirectory;
         _ffmpeg = ffmpeg;
+        _requestShutdown = requestShutdown;
         _playlists = new Media.PlaylistStore(baseDirectory);
         _library = new Media.LibraryStore(baseDirectory);
         _favorites = new Media.FavoritesStore(baseDirectory);
@@ -76,13 +79,16 @@ public sealed class ControlApi : IDisposable
         }
     }
 
-    private static readonly Lazy<byte[]> Dashboard = new(() =>
+    private static byte[] LoadResource(string name)
     {
-        using var s = typeof(ControlApi).Assembly.GetManifestResourceStream("dashboard.html")!;
+        using var s = typeof(ControlApi).Assembly.GetManifestResourceStream(name)!;
         using var ms = new MemoryStream();
         s.CopyTo(ms);
         return ms.ToArray();
-    });
+    }
+
+    private static readonly Lazy<byte[]> Dashboard = new(() => LoadResource("dashboard.html"));
+    private static readonly Lazy<byte[]> HlsJs = new(() => LoadResource("hls.min.js"));
 
     private void Handle(HttpListenerContext ctx)
     {
@@ -110,6 +116,16 @@ public sealed class ControlApi : IDisposable
                 return;
             }
 
+            if (ctx.Request.HttpMethod == "GET" && rawPath == "/hls.min.js")
+            {
+                res.StatusCode = 200;
+                res.ContentType = "text/javascript";
+                res.Headers["Cache-Control"] = "max-age=86400";
+                res.ContentLength64 = HlsJs.Value.Length;
+                res.OutputStream.Write(HlsJs.Value);
+                return;
+            }
+
             if (_config.AuthToken.Length > 0)
             {
                 // ?token= is accepted as an alternative to the Authorization
@@ -125,6 +141,31 @@ public sealed class ControlApi : IDisposable
 
             var path = ctx.Request.Url?.AbsolutePath ?? "/";
             var method = ctx.Request.HttpMethod;
+
+            // the dashboard signals page close with a beacon; any dashboard
+            // heartbeat within the grace period cancels the shutdown (page
+            // refreshes and multi-tab setups reconnect within a second)
+            if (method == "POST" && path == "/api/server/closing")
+            {
+                if (_config.ShutdownOnClose && _requestShutdown is not null)
+                {
+                    Log.Info("control", "dashboard closed — shutting down in 5 s unless it reconnects");
+                    _closeShutdownTimer?.Dispose();
+                    _closeShutdownTimer = new Timer(_ =>
+                    {
+                        Log.Info("control", "no dashboard reconnected — shutting down");
+                        _requestShutdown();
+                    }, null, 5000, Timeout.Infinite);
+                }
+                WriteJson(res, 200, new { scheduled = _config.ShutdownOnClose });
+                return;
+            }
+            if (method == "GET" && path == "/api/status" && _closeShutdownTimer is not null)
+            {
+                Log.Info("control", "dashboard reconnected — shutdown cancelled");
+                _closeShutdownTimer.Dispose();
+                _closeShutdownTimer = null;
+            }
 
             switch (method, path)
             {

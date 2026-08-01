@@ -318,6 +318,13 @@ public sealed class ControlConfig
 
     /// <summary>Open the dashboard in the default browser on startup.</summary>
     [JsonPropertyName("openDashboardOnStart")] public bool OpenDashboardOnStart { get; set; } = true;
+
+    /// <summary>
+    /// Shut the whole server down cleanly when the dashboard page closes.
+    /// A short grace period ignores page refreshes and tab switches: if any
+    /// dashboard reconnects within 5 seconds, the shutdown is cancelled.
+    /// </summary>
+    [JsonPropertyName("shutdownOnClose")] public bool ShutdownOnClose { get; set; } = true;
 }
 
 public sealed class FfmpegConfig

@@ -153,6 +153,7 @@ if (config.Mounts.Count == 0)
 J0kersMediaServer.Services.ServiceController? services = null;
 ControlApi? control = null;
 J0kersMediaServer.Media.FfmpegManager? ffmpeg = null;
+var shutdown = new TaskCompletionSource();
 
 var mediaRoot = Path.GetFullPath(Path.IsPathRooted(config.Hls.MediaRoot)
     ? config.Hls.MediaRoot
@@ -166,7 +167,8 @@ try
     services.StartServices();
     if (config.Control.Enabled)
     {
-        control = new ControlApi(config, services, baseDirectory, ffmpeg);
+        control = new ControlApi(config, services, baseDirectory, ffmpeg,
+            requestShutdown: () => shutdown.TrySetResult());
         control.Start();
 
         if (config.Control.OpenDashboardOnStart)
@@ -261,7 +263,6 @@ static bool TryOpenBrowser(string url)
     return false;
 }
 
-var shutdown = new TaskCompletionSource();
 Console.CancelKeyPress += (_, e) =>
 {
     e.Cancel = true;

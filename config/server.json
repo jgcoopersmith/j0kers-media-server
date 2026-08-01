@@ -39,7 +39,8 @@
     "bindAddress": "0.0.0.0",         // dashboard reachable from the network; set 127.0.0.1 for this machine only
     "port": 9090,
     "authToken": "",                  // non-empty enables Bearer auth
-    "openDashboardOnStart": true      // launch the web dashboard in your browser on startup
+    "openDashboardOnStart": true,     // launch the web dashboard in your browser on startup
+    "shutdownOnClose": true           // closing the dashboard page shuts the server down (5 s reconnect grace)
   },
 
   "ffmpeg": {
