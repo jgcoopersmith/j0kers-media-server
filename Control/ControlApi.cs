@@ -666,14 +666,15 @@ public sealed class ControlApi : IDisposable
                 return;
             }
             var full = Path.GetFullPath(req.path);
-            if (!System.IO.File.Exists(full))
+            var isFolder = Directory.Exists(full);
+            if (!isFolder && !System.IO.File.Exists(full))
             {
-                WriteJson(res, 404, new { error = "file not found" });
+                WriteJson(res, 404, new { error = "file or folder not found" });
                 return;
             }
-            var name = string.IsNullOrWhiteSpace(req.name)
-                ? Path.GetFileNameWithoutExtension(full)
-                : req.name.Trim();
+            var name = !string.IsNullOrWhiteSpace(req.name) ? req.name.Trim()
+                : isFolder ? new DirectoryInfo(full).Name
+                : Path.GetFileNameWithoutExtension(full);
             if (!_favorites.Add(name, full))
             {
                 WriteJson(res, 409, new { error = "already pinned" });

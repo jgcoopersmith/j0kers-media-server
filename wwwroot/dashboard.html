@@ -829,11 +829,22 @@ async function unpinMedia(path) {
   if (currentLibPath) loadLibrary(currentLibPath);
 }
 
+/* Shared ☆/⭐ pin toggle used on folder rows, music rows, and tiles. */
+function pinButton(path) {
+  const pinned = favoritePaths.has(path.toLowerCase());
+  return '<button data-act="' + (pinned ? "fav-remove" : "fav-add") + '" data-arg="' + esc(path) + '" title="'
+    + (pinned ? "Unpin quick button" : "Pin as quick button") + '">' + (pinned ? "⭐" : "☆") + '</button>';
+}
+
 function openFavorite(path) {
   const kind = mediaKind(path);
   if (kind === "image") viewImage(path);
-  else if (ffmpegOk) { queue.items = []; queue.order = []; queue.pos = -1; $("np").style.display = "none"; playMedia(path); }
-  else alert("ffmpeg is not available for playback");
+  else if (kind === "video" || kind === "audio") {
+    if (!ffmpegOk) { alert("ffmpeg is not available for playback"); return; }
+    queue.items = []; queue.order = []; queue.pos = -1; $("np").style.display = "none";
+    playMedia(path);
+  }
+  else loadLibrary(path); // pinned folder → jump straight into it
 }
 
 /* ---- library roots: server-persisted source folders ---- */
@@ -936,10 +947,11 @@ async function loadLibrary(path) {
   if (folders.length) {
     h += '<div class="lib-h">📁 Folders <span class="cnt">' + folders.length + '</span></div>';
     for (const e of folders) {
-      const extra = ffmpegOk
-        ? '<button data-act="lib-playfolder" data-arg="' + esc(join(e.name)) + '" title="Play everything in this folder">▶ All</button>'
-        : "";
-      h += libRow("📁", e.name, "", "lib-open", join(e.name), extra);
+      const full = join(e.name);
+      let extra = pinButton(full);
+      if (ffmpegOk)
+        extra = '<button data-act="lib-playfolder" data-arg="' + esc(full) + '" title="Play everything in this folder">▶ All</button>' + extra;
+      h += libRow("📁", e.name, "", "lib-open", full, extra);
     }
   }
 
@@ -952,10 +964,7 @@ async function loadLibrary(path) {
     h += '<div class="lib-h">🎵 Music <span class="cnt">' + music.length + '</span></div>';
     for (const e of music) {
       const full = join(e.name);
-      const pinned = favoritePaths.has(full.toLowerCase());
-      const star = '<button data-act="' + (pinned ? "fav-remove" : "fav-add") + '" data-arg="' + esc(full) + '" title="'
-        + (pinned ? "Unpin quick button" : "Pin as quick button") + '">' + (pinned ? "⭐" : "☆") + '</button>';
-      h += libRow("🎵", e.name, e.detail, ffmpegOk ? "lib-play" : "", full, star);
+      h += libRow("🎵", e.name, e.detail, ffmpegOk ? "lib-play" : "", full, pinButton(full));
     }
   }
 
