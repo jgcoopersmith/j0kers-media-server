@@ -528,7 +528,7 @@ async function refreshMounts() {
       + '<div style="flex:1;min-width:0"><div class="mono" style="color:var(--ink)">' + esc(uri) + '</div>'
       + '<div style="color:var(--muted);font-size:12px">' + esc(m.source) + (m.description ? " · " + esc(m.description) : "") + (m.dynamic ? " · added via dashboard" : "") + '</div></div>'
       + '<button data-preview="' + esc(m.path) + '" data-act="preview">▶ Play</button>'
-      + '<button data-act="copy" data-arg="' + esc(uri) + '">Copy</button>'
+      + '<button data-act="mount-stop" data-arg="' + esc(m.path) + '">■ Stop</button>'
       + '<button class="danger" title="Remove mount" data-act="mount-remove" data-arg="' + esc(m.path) + '">✕</button>'
       + '</div>';
   }
@@ -550,9 +550,7 @@ let previewPath = null; // kept for button sync
 
 function syncPreviewButtons() {
   document.querySelectorAll("[data-preview]").forEach(b => {
-    const on = previewPath === b.dataset.preview;
-    b.textContent = on ? "■ Stop" : "▶ Play";
-    b.classList.toggle("playing", on);
+    b.classList.toggle("playing", previewPath === b.dataset.preview);
   });
 }
 
@@ -568,7 +566,7 @@ function stopPreview() {
 
 async function togglePreview(btn) {
   const path = btn.dataset.preview;
-  if (previewPath === path) { stopPreview(); return; }
+  if (previewPath === path) return; // already playing; the Stop button ends it
   stopPreview();
 
   const msg = $("mountmsg");
@@ -659,7 +657,7 @@ async function refreshHls() {
       h += '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
         + '<div style="flex:1;min-width:0"><a class="mono" href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(s.name) + '</a></div>'
         + '<button data-act="hls-play" data-arg="' + esc(url) + '">▶ Play</button>'
-        + '<button data-act="copy" data-arg="' + esc(url) + '">Copy</button>'
+        + '<button data-act="hls-stop" data-arg="' + esc(url) + '">■ Stop</button>'
         + '<button class="danger" title="Delete this stream\'s playlist and segments" data-act="hls-remove" data-arg="' + esc(s.name) + '">✕</button></div>';
     }
     $("hls").innerHTML = h;
@@ -668,6 +666,14 @@ async function refreshHls() {
   }
 }
 
+
+/* Stop button for HLS/mount video playback: ends whatever the inline
+   player is doing (single stream or playlist) and hides it. */
+function stopHlsVideo() {
+  stopQueue(); // tears down the video element and any playlist state
+  $("hlsplayer").style.display = "none";
+  $("hlsmsg").textContent = "";
+}
 
 /* ---- inline HLS player: native where supported, else hls.js from CDN ---- */
 async function playHls(url) {
@@ -1523,8 +1529,10 @@ document.addEventListener("click", e => {
   switch (el.dataset.act) {
     case "preview":     togglePreview(el); break;
     case "copy":        copyText(el, arg); break;
+    case "mount-stop":  if (previewPath === arg) stopPreview(); break;
     case "mount-remove": removeMount(arg); break;
     case "hls-play":    playHls(arg); break;
+    case "hls-stop":    stopHlsVideo(); break;
     case "hls-remove":  removeHlsStream(arg); break;
     case "ch-restart":  restartChannel(arg); break;
     case "ch-remove":   removeChannel(arg); break;
