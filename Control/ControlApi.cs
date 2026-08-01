@@ -489,15 +489,7 @@ public sealed class ControlApi : IDisposable
 
         var controlPortChanged = s.ControlPort is int ncp && ncp != _serverConfig.Control.Port;
 
-        _serverConfig.ApplySettings(s);
-        _serverConfig.SaveSettings(new ServerConfig.SettingsOverrides
-        {
-            ServerName = _serverConfig.ServerName,
-            BindAddress = _serverConfig.Rtsp.BindAddress,
-            RtspPort = _serverConfig.Rtsp.Port,
-            HlsPort = _serverConfig.Hls.Port,
-            ControlPort = _serverConfig.Control.Port,
-        });
+        _serverConfig.UpdateSettings(s);
 
         try
         {
@@ -724,6 +716,20 @@ public sealed class ControlApi : IDisposable
                 if (!System.IO.File.Exists(full))
                 {
                     WriteJson(res, 400, new { error = "file not found: " + full });
+                    return;
+                }
+                // RTSP mounts stream the file as-is (raw G.711 µ-law) —
+                // an MP3 here would play as static. Other formats belong in
+                // the Media Library, or convert first.
+                var ext = Path.GetExtension(full).ToLowerInvariant();
+                if (ext is not (".ulaw" or ".ul" or ".raw" or ".g711" or ".pcmu" or ".mulaw"))
+                {
+                    WriteJson(res, 400, new
+                    {
+                        error = $"'{ext}' is not raw G.711 µ-law — RTSP mounts play headerless 8 kHz µ-law only. " +
+                                "Use the Media Library to play this file, or convert it: " +
+                                "ffmpeg -i input -ar 8000 -ac 1 -f mulaw output.ulaw",
+                    });
                     return;
                 }
                 mount.File = Path.GetFullPath(full);

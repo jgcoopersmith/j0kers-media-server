@@ -467,9 +467,9 @@ async function refreshMounts() {
     h += '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
       + '<div style="flex:1;min-width:0"><div class="mono" style="color:var(--ink)">' + esc(uri) + '</div>'
       + '<div style="color:var(--muted);font-size:12px">' + esc(m.source) + (m.description ? " · " + esc(m.description) : "") + (m.dynamic ? " · added via dashboard" : "") + '</div></div>'
-      + '<button data-preview="' + esc(m.path) + '" onclick="togglePreview(this)">▶ Play</button>'
-      + '<button onclick="copyText(this,\'' + esc(uri) + '\')">Copy</button>'
-      + '<button class="danger" title="Remove mount" onclick="removeMount(\'' + esc(m.path) + '\')">✕</button>'
+      + '<button data-preview="' + esc(m.path) + '" data-act="preview">▶ Play</button>'
+      + '<button data-act="copy" data-arg="' + esc(uri) + '">Copy</button>'
+      + '<button class="danger" title="Remove mount" data-act="mount-remove" data-arg="' + esc(m.path) + '">✕</button>'
       + '</div>';
   }
   if (data.announcementService) {
@@ -598,9 +598,9 @@ async function refreshHls() {
       const url = "http://" + location.hostname + ":" + hlsPort + s.playlist;
       h += '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
         + '<div style="flex:1;min-width:0"><a class="mono" href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(s.name) + '</a></div>'
-        + '<button onclick="playHls(\'' + esc(url) + '\')">▶ Play</button>'
-        + '<button onclick="copyText(this,\'' + esc(url) + '\')">Copy</button>'
-        + '<button class="danger" title="Delete this stream\'s playlist and segments" onclick="removeHlsStream(\'' + esc(s.name) + '\')">✕</button></div>';
+        + '<button data-act="hls-play" data-arg="' + esc(url) + '">▶ Play</button>'
+        + '<button data-act="copy" data-arg="' + esc(url) + '">Copy</button>'
+        + '<button class="danger" title="Delete this stream\'s playlist and segments" data-act="hls-remove" data-arg="' + esc(s.name) + '">✕</button></div>';
     }
     $("hls").innerHTML = h;
   } catch {
@@ -653,10 +653,13 @@ async function togglePower() {
 }
 
 /* ---- config dialog: hostname (bind address) and ports ---- */
+let cfgLoaded = null; // values as loaded, so Save only sends what changed
+
 async function openConfig() {
   $("cfg-msg").textContent = "";
   try {
     const s = await api("/api/settings");
+    cfgLoaded = s;
     $("cfg-bind").value = s.bindAddress;
     $("cfg-rtsp").value = s.rtspPort;
     $("cfg-hls").value = s.hlsPort;
@@ -672,12 +675,18 @@ function closeConfig() { $("cfg-overlay").style.display = "none"; }
 async function saveConfig() {
   const msg = $("cfg-msg");
   msg.textContent = "";
-  const body = {
+  const current = {
     bindAddress: $("cfg-bind").value.trim(),
     rtspPort: parseInt($("cfg-rtsp").value, 10),
     hlsPort: parseInt($("cfg-hls").value, 10),
     controlPort: parseInt($("cfg-ctl").value, 10),
   };
+  // only send fields the user actually changed, so untouched settings
+  // keep following server.json instead of being frozen in settings.json
+  const body = {};
+  for (const k in current)
+    if (!cfgLoaded || current[k] !== cfgLoaded[k]) body[k] = current[k];
+  if (!Object.keys(body).length) { closeConfig(); return; }
   try {
     const r = await fetch("/api/settings", {
       method: "POST",
@@ -733,28 +742,27 @@ async function loadLibrary(path) {
 
   let h = "";
   if (data.parent && localStorage.getItem("j0kers-library") !== data.path)
-    h += libRow("⬆️", "..", "", "loadLibrary('" + esc(data.parent).replace(/\\/g, "\\\\") + "')");
+    h += libRow("⬆️", "..", "", "lib-open", data.parent);
 
   for (const e of data.entries) {
     const full = (data.path.endsWith("\\") || data.path.endsWith("/")) ? data.path + e.name : data.path + "\\" + e.name;
-    const fullJs = esc(full).replace(/\\/g, "\\\\");
     if (e.type === "folder") {
-      h += libRow("📁", e.name, "", "loadLibrary('" + fullJs + "')");
+      h += libRow("📁", e.name, "", "lib-open", full);
     } else {
       const kind = mediaKind(e.name);
       if (kind === "image")
-        h += libRow("🖼️", e.name, e.detail, "viewImage('" + fullJs + "')");
-      else if (kind === "video")
-        h += libRow("🎬", e.name, e.detail, ffmpegOk ? "playMedia('" + fullJs + "', this)" : "");
-      else if (kind === "audio")
-        h += libRow("🎵", e.name, e.detail, ffmpegOk ? "playMedia('" + fullJs + "', this)" : "");
+        h += libRow("🖼️", e.name, e.detail, "lib-img", full);
+      else if (kind === "video" || kind === "audio")
+        h += libRow(kind === "video" ? "🎬" : "🎵", e.name, e.detail, ffmpegOk ? "lib-play" : "", full);
     }
   }
   box.innerHTML = h || '<div class="empty">no playable media in this folder</div>';
 }
 
-function libRow(icon, name, detail, onclick) {
-  const clickable = onclick ? ' onclick="' + onclick + '" style="cursor:pointer"' : ' style="opacity:.55"';
+function libRow(icon, name, detail, act, arg) {
+  const clickable = act
+    ? ' data-act="' + act + '" data-arg="' + esc(arg) + '" style="cursor:pointer"'
+    : ' style="opacity:.55"';
   return '<div class="pick-row"' + clickable + '><span class="icon">' + icon + '</span><span class="nm">'
     + esc(name) + '</span><span class="det">' + esc(detail || "") + '</span></div>';
 }
@@ -847,9 +855,9 @@ async function refreshChannels(force) {
       + '<span class="state ' + (live ? "playing" : "ready") + '"><span class="dot"></span></span>'
       + '<div style="flex:1;min-width:0"><div style="color:var(--ink)">' + esc(c.name) + '</div>'
       + '<div class="mono" style="color:var(--muted);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(c.url) + ' · ' + esc(c.status) + '</div></div>'
-      + '<button onclick="playHls(\'' + esc(url) + '\')">▶ Play</button>'
-      + '<button title="Restart channel" onclick="restartChannel(\'' + esc(c.name) + '\')">↻</button>'
-      + '<button class="danger" title="Remove channel" onclick="removeChannel(\'' + esc(c.name) + '\')">✕</button>'
+      + '<button data-act="hls-play" data-arg="' + esc(url) + '">▶ Play</button>'
+      + '<button title="Restart channel" data-act="ch-restart" data-arg="' + esc(c.name) + '">↻</button>'
+      + '<button class="danger" title="Remove channel" data-act="ch-remove" data-arg="' + esc(c.name) + '">✕</button>'
       + '</div>';
   }
   $("channels").innerHTML = h;
@@ -957,6 +965,7 @@ async function removeHlsStream(name) {
 const picker = { resolve: null, mode: "any", path: "", parentPath: null, selected: null, selectedType: null };
 
 function pickPath(opts = {}) {
+  if (picker.resolve) pickerCancel(); // a second picker cancels the first
   return new Promise(resolve => {
     picker.resolve = resolve;
     picker.mode = opts.mode || "any";
@@ -1136,6 +1145,27 @@ function drawChart() {
   };
   svg.onmouseleave = () => { const g = $("cross"); if (g) g.style.display = "none"; $("tooltip").style.display = "none"; };
 }
+
+/* Delegated clicks for all rendered rows. Arguments travel as data-arg
+   attributes rather than inline JS strings, so file names and mount paths
+   containing quotes or backslashes work. */
+document.addEventListener("click", e => {
+  const el = e.target.closest("[data-act]");
+  if (!el) return;
+  const arg = el.dataset.arg;
+  switch (el.dataset.act) {
+    case "preview":     togglePreview(el); break;
+    case "copy":        copyText(el, arg); break;
+    case "mount-remove": removeMount(arg); break;
+    case "hls-play":    playHls(arg); break;
+    case "hls-remove":  removeHlsStream(arg); break;
+    case "ch-restart":  restartChannel(arg); break;
+    case "ch-remove":   removeChannel(arg); break;
+    case "lib-open":    loadLibrary(arg); break;
+    case "lib-img":     viewImage(arg); break;
+    case "lib-play":    playMedia(arg); break;
+  }
+});
 
 $("token").addEventListener("keydown", e => { if (e.key === "Enter") saveToken(); });
 tick();

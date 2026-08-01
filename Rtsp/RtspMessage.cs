@@ -109,11 +109,30 @@ public static class RtspParser
 {
     /// <summary>
     /// Reads one RTSP request from the stream. Returns null on clean EOF.
-    /// Throws on malformed input.
+    /// Throws on malformed input. Interleaved binary frames sent by the
+    /// client ('$'-prefixed, RFC 7826 §14 — typically RTCP receiver reports
+    /// on a TCP transport) are consumed and discarded, not treated as text.
     /// </summary>
     public static async Task<RtspRequest?> ReadRequestAsync(Stream stream, CancellationToken ct)
     {
-        var headerBytes = await ReadUntilDoubleCrlfAsync(stream, ct);
+        var one = new byte[1];
+        int first;
+        while (true)
+        {
+            var n = await stream.ReadAsync(one, ct);
+            if (n == 0) return null; // clean EOF
+            first = one[0];
+            if (first != 0x24) break;
+
+            // '$' <channel> <2-byte length> <payload> — drain and ignore
+            var header = new byte[3];
+            await stream.ReadExactlyAsync(header, ct);
+            var length = (header[1] << 8) | header[2];
+            if (length > 0)
+                await stream.ReadExactlyAsync(new byte[length], ct);
+        }
+
+        var headerBytes = await ReadUntilDoubleCrlfAsync(stream, first, ct);
         if (headerBytes is null) return null;
 
         var text = Encoding.UTF8.GetString(headerBytes);
@@ -144,9 +163,9 @@ public static class RtspParser
         return request;
     }
 
-    private static async Task<byte[]?> ReadUntilDoubleCrlfAsync(Stream stream, CancellationToken ct)
+    private static async Task<byte[]?> ReadUntilDoubleCrlfAsync(Stream stream, int firstByte, CancellationToken ct)
     {
-        var buffer = new List<byte>(512);
+        var buffer = new List<byte>(512) { (byte)firstByte };
         var one = new byte[1];
         while (true)
         {

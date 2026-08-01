@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Sockets;
 using J0kersMediaServer.Config;
 using J0kersMediaServer.Logging;
@@ -34,7 +34,7 @@ public sealed class RtspServer : IDisposable
 
     public void Start()
     {
-        var bind = IPAddress.Parse(_config.Rtsp.BindAddress);
+        var bind = ServerConfig.ResolveBindAddress(_config.Rtsp.BindAddress);
         _listener = new TcpListener(bind, _config.Rtsp.Port);
         _listener.Start();
         Log.Info("rtsp", $"listening on rtsp://{_config.Rtsp.BindAddress}:{_config.Rtsp.Port}");
@@ -214,7 +214,7 @@ public sealed class RtspServer : IDisposable
         }
         else
         {
-            var sockets = RtpPortAllocator.Allocate(_config.Rtp, IPAddress.Parse(_config.Rtsp.BindAddress));
+            var sockets = RtpPortAllocator.Allocate(_config.Rtp, ServerConfig.ResolveBindAddress(_config.Rtsp.BindAddress));
             sender = new RtpSender(source, _config.Rtp, remote.Address,
                 transport.ClientRtpPort, transport.ClientRtcpPort, sockets);
             transportResponse =

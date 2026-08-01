@@ -59,6 +59,14 @@ public sealed class SessionManager : IDisposable
         var cutoff = DateTime.UtcNow.AddSeconds(-_timeoutSeconds);
         foreach (var (id, session) in _sessions)
         {
+            // An actively-pumping stream counts as liveness even without
+            // RTSP keepalives; the pump clears Playing when the transport
+            // dies, at which point the idle timeout takes over.
+            if (session.Sender.Playing)
+            {
+                session.Touch();
+                continue;
+            }
             if (session.LastActivity < cutoff)
             {
                 Logging.Log.Info("rtsp", $"session {id} timed out (idle > {_timeoutSeconds}s)");

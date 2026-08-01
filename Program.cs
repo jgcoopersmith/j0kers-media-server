@@ -7,8 +7,16 @@ using J0kersMediaServer.Rtsp;
 // Config resolution: explicit argument, then $J0KERS_CONFIG, then the first
 // of ./server.json, ./config/server.json, <binary dir>/server.json that
 // exists — so a bare `dotnet run` from the repo root just works.
-var configPath = args.Length > 0 ? args[0]
-    : Environment.GetEnvironmentVariable("J0KERS_CONFIG")
+// An explicitly named config that doesn't exist is an error, not a silent
+// fall-through to defaults.
+var explicitConfig = args.Length > 0 ? args[0] : Environment.GetEnvironmentVariable("J0KERS_CONFIG");
+if (explicitConfig is not null && !File.Exists(explicitConfig)
+    && explicitConfig is not "--help" and not "-h")
+{
+    Console.Error.WriteLine($"Config file not found: {Path.GetFullPath(explicitConfig)}");
+    return 1;
+}
+var configPath = explicitConfig
     ?? new[]
     {
         Path.Combine(Directory.GetCurrentDirectory(), "server.json"),

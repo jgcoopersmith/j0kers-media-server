@@ -42,6 +42,16 @@
     "openDashboardOnStart": true      // launch the web dashboard in your browser on startup
   },
 
+  "ffmpeg": {
+    "path": "ffmpeg",                 // auto-detects PATH and winget installs
+    "preset": "veryfast",             // x264 preset for transcodes
+    "crf": 23,                        // VOD quality (lower = better)
+    "liveSegmentSeconds": 4,
+    "liveWindowSegments": 6,
+    "liveVideoMode": "transcode",     // or "copy" to remux H.264/AAC sources
+    "vodCacheMaxGb": 10               // LRU cap for vod-* transcode cache; 0 = keep forever
+  },
+
   "services": {
     "announcementEnabled": true,      // RFC 4240-style: rtsp://host:8554/annc?play=<clip>
     "announcementClipDirectory": "clips"

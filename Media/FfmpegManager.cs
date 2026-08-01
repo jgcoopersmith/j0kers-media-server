@@ -119,10 +119,14 @@ public sealed class FfmpegManager : IDisposable
         {
             var running = _vodJobs.TryGetValue(stream, out var proc) && !proc.HasExited;
             if (File.Exists(playlist) && !running)
+            {
+                Directory.SetLastWriteTimeUtc(dir, DateTime.UtcNow); // LRU touch
                 return (stream, true); // finished earlier
+            }
             if (running)
                 return (stream, File.Exists(playlist));
 
+            EvictVodCache(keep: stream);
             Directory.CreateDirectory(dir);
             var args =
                 $"-hide_banner -loglevel error -y -i \"{info.FullName}\" " +
@@ -130,8 +134,54 @@ public sealed class FfmpegManager : IDisposable
                 $"-c:a aac -b:a 160k -ac 2 " +
                 $"-f hls -hls_time 6 -hls_list_size 0 -hls_playlist_type event " +
                 $"-hls_segment_filename \"{Path.Combine(dir, "seg_%05d.ts")}\" \"{playlist}\"";
-            _vodJobs[stream] = Spawn(args, $"vod {info.Name}");
+            var job = Spawn(args, $"vod {info.Name}");
+            _vodJobs[stream] = job;
+            job.Exited += (_, _) =>
+            {
+                // keep the job table from accumulating finished processes
+                lock (_lock)
+                {
+                    if (_vodJobs.TryGetValue(stream, out var q) && ReferenceEquals(q, job))
+                        _vodJobs.Remove(stream);
+                }
+            };
             return (stream, false);
+        }
+    }
+
+    /// <summary>
+    /// Evicts least-recently-played vod-* conversions until the cache fits
+    /// under ffmpeg.vodCacheMaxGb. Running jobs and <paramref name="keep"/>
+    /// are never evicted.
+    /// </summary>
+    private void EvictVodCache(string keep)
+    {
+        if (_config.VodCacheMaxGb <= 0) return;
+        var budget = (long)(_config.VodCacheMaxGb * 1024 * 1024 * 1024);
+
+        List<(DirectoryInfo dir, long size)> entries;
+        try
+        {
+            entries = new DirectoryInfo(_mediaRoot)
+                .EnumerateDirectories("vod-*")
+                .Select(d => (d, d.EnumerateFiles().Sum(f => f.Length)))
+                .ToList();
+        }
+        catch { return; }
+
+        var total = entries.Sum(e => e.size);
+        foreach (var (dir, size) in entries.OrderBy(e => e.dir.LastWriteTimeUtc))
+        {
+            if (total <= budget) break;
+            if (dir.Name.Equals(keep, StringComparison.OrdinalIgnoreCase)) continue;
+            if (_vodJobs.TryGetValue(dir.Name, out var p) && !p.HasExited) continue;
+            try
+            {
+                dir.Delete(recursive: true);
+                total -= size;
+                Log.Info("ffmpeg", $"evicted VOD cache entry {dir.Name} ({size / (1024.0 * 1024):0.#} MB)");
+            }
+            catch { /* files in use — try again next time */ }
         }
     }
 

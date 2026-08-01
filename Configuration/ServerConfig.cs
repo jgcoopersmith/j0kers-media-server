@@ -95,18 +95,37 @@ public sealed class ServerConfig
         [JsonPropertyName("controlPort")] public int? ControlPort { get; set; }
     }
 
+    private SettingsOverrides _persistedSettings = new();
+
     private void LoadSettingsOverrides()
     {
         if (!File.Exists(SettingsFile)) return;
         try
         {
-            var s = JsonSerializer.Deserialize<SettingsOverrides>(File.ReadAllText(SettingsFile), JsonOpts);
-            if (s is not null) ApplySettings(s);
+            _persistedSettings = JsonSerializer.Deserialize<SettingsOverrides>(
+                File.ReadAllText(SettingsFile), JsonOpts) ?? new SettingsOverrides();
+            ApplySettings(_persistedSettings);
         }
         catch (Exception ex)
         {
             throw new InvalidOperationException($"settings.json is invalid: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Applies and persists dashboard settings. Only the fields actually
+    /// provided are stored in the sidecar, so anything the user never
+    /// touched keeps following server.json.
+    /// </summary>
+    public void UpdateSettings(SettingsOverrides s)
+    {
+        ApplySettings(s);
+        if (s.ServerName is not null) _persistedSettings.ServerName = s.ServerName;
+        if (s.BindAddress is not null) _persistedSettings.BindAddress = s.BindAddress;
+        if (s.RtspPort is not null) _persistedSettings.RtspPort = s.RtspPort;
+        if (s.HlsPort is not null) _persistedSettings.HlsPort = s.HlsPort;
+        if (s.ControlPort is not null) _persistedSettings.ControlPort = s.ControlPort;
+        File.WriteAllText(SettingsFile, JsonSerializer.Serialize(_persistedSettings, JsonOpts));
     }
 
     /// <summary>Applies dashboard settings on top of the loaded config.</summary>
@@ -123,9 +142,6 @@ public sealed class ServerConfig
         if (s.HlsPort is int hp) Hls.Port = hp;
         if (s.ControlPort is int cp) Control.Port = cp;
     }
-
-    public void SaveSettings(SettingsOverrides s) =>
-        File.WriteAllText(SettingsFile, JsonSerializer.Serialize(s, JsonOpts));
 
     private sealed class MountSidecar
     {
@@ -246,6 +262,16 @@ public sealed class ServerConfig
     }
 
     public string ToJson() => JsonSerializer.Serialize(this, JsonOpts);
+
+    /// <summary>
+    /// Bind addresses accept "localhost" as well as literal IPs; socket
+    /// binds need an IPAddress, so map the name here instead of letting
+    /// IPAddress.Parse throw.
+    /// </summary>
+    public static System.Net.IPAddress ResolveBindAddress(string bindAddress) =>
+        bindAddress.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+            ? System.Net.IPAddress.Loopback
+            : System.Net.IPAddress.Parse(bindAddress);
 }
 
 public sealed class RtspConfig
@@ -319,6 +345,13 @@ public sealed class FfmpegConfig
     /// (remux only — cheap, but the source codecs must be HLS-compatible).
     /// </summary>
     [JsonPropertyName("liveVideoMode")] public string LiveVideoMode { get; set; } = "transcode";
+
+    /// <summary>
+    /// Cap on the vod-* transcode cache under the HLS media root, in GB.
+    /// Least-recently-played conversions are evicted when exceeded. 0
+    /// disables eviction.
+    /// </summary>
+    [JsonPropertyName("vodCacheMaxGb")] public double VodCacheMaxGb { get; set; } = 10;
 }
 
 public sealed class ServicesConfig

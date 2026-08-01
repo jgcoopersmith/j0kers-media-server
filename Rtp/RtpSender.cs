@@ -91,13 +91,19 @@ public sealed class RtpSender : IDisposable
 
     public void Pause()
     {
+        Task? pump;
         lock (_stateLock)
         {
             if (!Playing) return;
             Playing = false;
             _cts?.Cancel();
             _cts = null;
+            pump = _pumpTask;
+            _pumpTask = null;
         }
+        // Wait for the old pump to wind down so a subsequent Play() can't
+        // race it (stray packet with a duplicate sequence number).
+        try { pump?.Wait(TimeSpan.FromMilliseconds(500)); } catch { }
     }
 
     private async Task PumpAsync(CancellationToken ct)
@@ -143,6 +149,9 @@ public sealed class RtpSender : IDisposable
         catch (Exception ex)
         {
             Log.Warn("rtp", $"stream pump stopped: {ex.Message}");
+            // Transport is dead (e.g. ICMP unreachable on UDP, closed TCP
+            // stream). Mark not-playing so the session sweeper can reap us.
+            lock (_stateLock) Playing = false;
         }
     }
 
