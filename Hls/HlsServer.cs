@@ -142,6 +142,7 @@ public sealed class HlsServer : IDisposable
     private string? SafeStreamDirectory(string name)
     {
         if (name.Contains("..") || name.Contains('\\') || name.Contains('/')) return null;
+        if (name.StartsWith('.')) return null; // internal dirs (.thumbs) are never streams
         var full = Path.GetFullPath(Path.Combine(_mediaRoot, name));
         return full.StartsWith(_mediaRoot, StringComparison.OrdinalIgnoreCase) ? full : null;
     }
@@ -191,8 +192,10 @@ public sealed class HlsServer : IDisposable
 
     private string ListStreamsJson()
     {
+        // dot-directories are internal (.thumbs thumbnail cache), not streams
         var streams = Directory.Exists(_mediaRoot)
-            ? Directory.GetDirectories(_mediaRoot).Select(Path.GetFileName).Where(n => n is not null)
+            ? Directory.GetDirectories(_mediaRoot).Select(Path.GetFileName)
+                .Where(n => n is not null && !n.StartsWith('.'))
             : Enumerable.Empty<string?>();
         return System.Text.Json.JsonSerializer.Serialize(new
         {
