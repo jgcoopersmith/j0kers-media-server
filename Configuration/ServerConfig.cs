@@ -347,6 +347,20 @@ public sealed class FfmpegConfig
     [JsonPropertyName("liveVideoMode")] public string LiveVideoMode { get; set; } = "transcode";
 
     /// <summary>
+    /// Output video codec for transcodes: h264 (default), h265/hevc, vp9,
+    /// av1, copy, or any raw ffmpeg encoder name (e.g. libx264). Validated
+    /// against the installed ffmpeg's encoder list at startup; falls back
+    /// to h264 with a warning if unavailable.
+    /// </summary>
+    [JsonPropertyName("videoCodec")] public string VideoCodec { get; set; } = "h264";
+
+    /// <summary>
+    /// Output audio codec for transcodes: aac (default), mp3, opus, ac3,
+    /// flac, copy, or any raw ffmpeg encoder name. Same validation rules.
+    /// </summary>
+    [JsonPropertyName("audioCodec")] public string AudioCodec { get; set; } = "aac";
+
+    /// <summary>
     /// Cap on the vod-* transcode cache under the HLS media root, in GB.
     /// Least-recently-played conversions are evicted when exceeded. 0
     /// disables eviction.

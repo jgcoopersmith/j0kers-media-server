@@ -49,6 +49,8 @@
     "liveSegmentSeconds": 4,
     "liveWindowSegments": 6,
     "liveVideoMode": "transcode",     // or "copy" to remux H.264/AAC sources
+    "videoCodec": "h264",             // h264 | h265/hevc | vp9 | av1 | mpeg2 | mpeg4 | copy | raw encoder name
+    "audioCodec": "aac",              // aac | mp3 | opus | vorbis | ac3 | eac3 | flac | alac | pcm | copy | raw name
     "vodCacheMaxGb": 10               // LRU cap for vod-* transcode cache; 0 = keep forever
   },
 

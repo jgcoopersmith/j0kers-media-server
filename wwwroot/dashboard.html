@@ -842,9 +842,11 @@ $("cfg-overlay").addEventListener("mousedown", e => { if (e.target.id === "cfg-o
 
 /* ---- media library: browse a folder; play movies/music, view pictures ---- */
 const EXT = {
-  video: ["mp4","mkv","avi","mov","webm","ts","m2ts","mts","wmv","flv","mpg","mpeg","vob","3gp"],
-  audio: ["mp3","flac","wav","m4a","ogg","aac","wma","opus","aiff","ape","ulaw"],
-  image: ["jpg","jpeg","png","gif","webp","bmp","svg","avif"],
+  video: ["mp4","m4v","mkv","avi","mov","webm","ts","m2ts","mts","wmv","flv","f4v","mpg","mpeg","mpe","m1v","m2v",
+          "vob","3gp","3g2","ogv","mxf","asf","rm","rmvb","divx","dv","y4m","hevc","h264","264","265","av1","ivf","nut"],
+  audio: ["mp3","flac","wav","m4a","m4b","ogg","oga","aac","wma","opus","aiff","aif","ape","wv","mka","ac3","eac3",
+          "dts","amr","au","caf","mp2","mpa","ra","spx","tta","mid","ulaw","alaw","gsm"],
+  image: ["jpg","jpeg","png","gif","webp","bmp","svg","avif","tif","tiff","ico","heic","heif","jxl","tga","dds","exr"],
 };
 function mediaKind(name) {
   const e = name.split(".").pop().toLowerCase();

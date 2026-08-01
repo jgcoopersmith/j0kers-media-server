@@ -138,6 +138,8 @@ public sealed class ControlApi : IDisposable
                         {
                             available = _ffmpeg?.Available ?? false,
                             version = _ffmpeg?.VersionLine ?? "not configured",
+                            videoCodec = _ffmpeg?.VideoEncoder,
+                            audioCodec = _ffmpeg?.AudioEncoder,
                         },
                     });
                     return;
@@ -277,6 +279,18 @@ public sealed class ControlApi : IDisposable
                 var name = ctx.Request.QueryString["name"] ?? "";
                 if (_ffmpeg?.RestartChannel(name) == true) WriteJson(res, 200, new { restarted = name });
                 else WriteJson(res, 404, new { error = "unknown channel" });
+                return;
+            }
+
+            if (method == "GET" && path == "/api/codecs")
+            {
+                WriteJson(res, 200, new
+                {
+                    active = new { video = _ffmpeg?.VideoEncoder, audio = _ffmpeg?.AudioEncoder },
+                    videoEncoders = _ffmpeg?.VideoEncoders.OrderBy(x => x) ?? Enumerable.Empty<string>(),
+                    audioEncoders = _ffmpeg?.AudioEncoders.OrderBy(x => x) ?? Enumerable.Empty<string>(),
+                    note = "set ffmpeg.videoCodec / ffmpeg.audioCodec in the config (friendly name, raw encoder name, or 'copy')",
+                });
                 return;
             }
 

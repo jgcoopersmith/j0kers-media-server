@@ -35,6 +35,15 @@ public sealed class FfmpegManager : IDisposable
     public string VersionLine { get; private set; } = "ffmpeg not found";
     public string FfmpegPath { get; private set; }
 
+    private readonly HashSet<string> _videoEncoders = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _audioEncoders = new(StringComparer.OrdinalIgnoreCase);
+    public IReadOnlyCollection<string> VideoEncoders => _videoEncoders;
+    public IReadOnlyCollection<string> AudioEncoders => _audioEncoders;
+
+    /// <summary>Resolved ffmpeg encoder names actually used for transcodes.</summary>
+    public string VideoEncoder { get; private set; } = "libx264";
+    public string AudioEncoder { get; private set; } = "aac";
+
     public FfmpegManager(FfmpegConfig config, string mediaRoot, string baseDirectory)
     {
         _config = config;
@@ -43,8 +52,107 @@ public sealed class FfmpegManager : IDisposable
         FfmpegPath = config.Path;
         Directory.CreateDirectory(_mediaRoot);
         Detect();
+        if (Available)
+        {
+            DiscoverEncoders();
+            VideoEncoder = ResolveEncoder(_config.VideoCodec, video: true);
+            AudioEncoder = ResolveEncoder(_config.AudioCodec, video: false);
+            Log.Info("ffmpeg", $"transcode codecs: video={VideoEncoder} audio={AudioEncoder} " +
+                               $"({_videoEncoders.Count} video / {_audioEncoders.Count} audio encoders available)");
+        }
         LoadChannels();
     }
+
+    /// <summary>Friendly codec names → ffmpeg encoders, in preference order.</summary>
+    private static readonly Dictionary<string, string[]> VideoCodecMap = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["h264"] = new[] { "libx264" },
+        ["h265"] = new[] { "libx265" },
+        ["hevc"] = new[] { "libx265" },
+        ["vp9"] = new[] { "libvpx-vp9" },
+        ["vp8"] = new[] { "libvpx" },
+        ["av1"] = new[] { "libsvtav1", "libaom-av1", "librav1e" },
+        ["mpeg2"] = new[] { "mpeg2video" },
+        ["mpeg4"] = new[] { "mpeg4" },
+    };
+
+    private static readonly Dictionary<string, string[]> AudioCodecMap = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["aac"] = new[] { "aac" },
+        ["mp3"] = new[] { "libmp3lame" },
+        ["opus"] = new[] { "libopus" },
+        ["vorbis"] = new[] { "libvorbis" },
+        ["ac3"] = new[] { "ac3" },
+        ["eac3"] = new[] { "eac3" },
+        ["flac"] = new[] { "flac" },
+        ["alac"] = new[] { "alac" },
+        ["pcm"] = new[] { "pcm_s16le" },
+    };
+
+    private void DiscoverEncoders()
+    {
+        try
+        {
+            using var p = Process.Start(new ProcessStartInfo(FfmpegPath, "-hide_banner -encoders")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
+            if (p is null) return;
+            var inList = false;
+            while (p.StandardOutput.ReadLine() is { } line)
+            {
+                if (!inList) { inList = line.TrimStart().StartsWith("----"); continue; }
+                // format: " V....D libx264   H.264 / AVC ..." — flags, name, description
+                var parts = line.Trim().Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 2 || parts[0].Length == 0) continue;
+                if (parts[0][0] == 'V') _videoEncoders.Add(parts[1]);
+                else if (parts[0][0] == 'A') _audioEncoders.Add(parts[1]);
+            }
+            p.WaitForExit(3000);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("ffmpeg", $"could not enumerate encoders: {ex.Message}");
+        }
+    }
+
+    private string ResolveEncoder(string requested, bool video)
+    {
+        var available = video ? _videoEncoders : _audioEncoders;
+        var fallback = video ? "libx264" : "aac";
+        if (requested.Equals("copy", StringComparison.OrdinalIgnoreCase)) return "copy";
+
+        var map = video ? VideoCodecMap : AudioCodecMap;
+        if (map.TryGetValue(requested, out var candidates))
+        {
+            foreach (var c in candidates)
+                if (available.Contains(c)) return c;
+        }
+        else if (available.Contains(requested))
+        {
+            return requested; // raw ffmpeg encoder name
+        }
+
+        Log.Warn("ffmpeg", $"{(video ? "video" : "audio")} codec '{requested}' is not available in this ffmpeg build — using {fallback}");
+        return fallback;
+    }
+
+    /// <summary>x264/x265 take preset+crf; other encoders get sane defaults of their own.</summary>
+    private string VideoQualityArgs() => VideoEncoder switch
+    {
+        "libx264" or "libx265" => $"-preset {_config.Preset} -crf {_config.Crf} ",
+        "libvpx-vp9" => $"-crf {_config.Crf} -b:v 0 ",
+        "libaom-av1" or "libsvtav1" or "librav1e" => $"-crf {_config.Crf} ",
+        _ => "",
+    };
+
+    /// <summary>MPEG-TS only carries the classic codecs; anything newer needs fMP4 segments (RFC 8216 §3).</summary>
+    private bool NeedsFmp4() =>
+        VideoEncoder is "libvpx-vp9" or "libvpx" or "libaom-av1" or "libsvtav1" or "librav1e" or "libx265"
+        || AudioEncoder is "libopus" or "libvorbis" or "flac" or "alac";
 
     private void Detect()
     {
@@ -110,9 +218,9 @@ public sealed class FfmpegManager : IDisposable
         var info = new FileInfo(file);
         if (!info.Exists) throw new FileNotFoundException("no such file", file);
 
-        // cache key: same file+size+mtime+height → same output dir, converted once
+        // cache key: same file+size+mtime+height+codecs → same output dir, converted once
         var key = Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(
-            $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}|{height}")))[..12].ToLowerInvariant();
+            $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}|{height}|{VideoEncoder}|{AudioEncoder}")))[..12].ToLowerInvariant();
         var stream = "vod-" + key;
         var dir = Path.Combine(_mediaRoot, stream);
         var playlist = Path.Combine(dir, "index.m3u8");
@@ -130,14 +238,23 @@ public sealed class FfmpegManager : IDisposable
 
             EvictVodCache(keep: stream);
             Directory.CreateDirectory(dir);
-            var scale = height > 0 ? $"-vf scale=-2:{height} " : "";
+            var video = VideoEncoder == "copy"
+                ? "-c:v copy "
+                : $"{(height > 0 ? $"-vf scale=-2:{height} " : "")}-c:v {VideoEncoder} {VideoQualityArgs()}-pix_fmt yuv420p ";
+            var audio = AudioEncoder == "copy"
+                ? "-c:a copy "
+                : $"-c:a {AudioEncoder} -b:a 160k -ac 2 ";
+            var segExt = NeedsFmp4() ? "m4s" : "ts";
+            // keep the init filename relative so the EXT-X-MAP URI stays
+            // fetchable; the job's working directory (below) puts the file
+            // in the stream folder
+            var segType = NeedsFmp4() ? "-hls_segment_type fmp4 -hls_fmp4_init_filename init.mp4 " : "";
             var args =
-                $"-hide_banner -loglevel error -y -i \"{info.FullName}\" {scale}" +
-                $"-c:v libx264 -preset {_config.Preset} -crf {_config.Crf} -pix_fmt yuv420p " +
-                $"-c:a aac -b:a 160k -ac 2 " +
-                $"-f hls -hls_time 6 -hls_list_size 0 -hls_playlist_type event " +
-                $"-hls_segment_filename \"{Path.Combine(dir, "seg_%05d.ts")}\" \"{playlist}\"";
-            var job = Spawn(args, $"vod {info.Name}");
+                $"-hide_banner -loglevel error -y -i \"{info.FullName}\" " +
+                video + audio +
+                $"-f hls -hls_time 6 -hls_list_size 0 -hls_playlist_type event {segType}" +
+                $"-hls_segment_filename \"{Path.Combine(dir, $"seg_%05d.{segExt}")}\" \"{playlist}\"";
+            var job = Spawn(args, $"vod {info.Name}", dir);
             _vodJobs[stream] = job;
             job.Exited += (_, _) =>
             {
@@ -195,8 +312,13 @@ public sealed class FfmpegManager : IDisposable
 
     private static readonly HashSet<string> ThumbSourceExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".mp4", ".mkv", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mts", ".wmv", ".flv", ".mpg", ".mpeg", ".vob", ".3gp",
-        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif",
+        // video (matches the dashboard's EXT.video list)
+        ".mp4", ".m4v", ".mkv", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mts", ".wmv", ".flv", ".f4v",
+        ".mpg", ".mpeg", ".mpe", ".m1v", ".m2v", ".vob", ".3gp", ".3g2", ".ogv", ".mxf", ".asf",
+        ".rm", ".rmvb", ".divx", ".dv", ".y4m", ".hevc", ".h264", ".264", ".265", ".av1", ".ivf", ".nut",
+        // pictures
+        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif", ".tif", ".tiff", ".ico",
+        ".heic", ".heif", ".jxl", ".tga", ".dds", ".exr",
     };
 
     /// <summary>
@@ -325,20 +447,24 @@ public sealed class FfmpegManager : IDisposable
         var input = url.StartsWith("rtsp://", StringComparison.OrdinalIgnoreCase)
             ? $"-rtsp_transport tcp -i \"{url}\""
             : $"-i \"{url}\"";
+        var zerolatency = VideoEncoder is "libx264" or "libx265" ? "-tune zerolatency " : "";
         var codecs = _config.LiveVideoMode.Equals("copy", StringComparison.OrdinalIgnoreCase)
             ? "-c copy"
-            : $"-c:v libx264 -preset {_config.Preset} -tune zerolatency -pix_fmt yuv420p -c:a aac -b:a 160k -ac 2";
+            : (VideoEncoder == "copy" ? "-c:v copy " : $"-c:v {VideoEncoder} {VideoQualityArgs()}{zerolatency}-pix_fmt yuv420p ")
+              + (AudioEncoder == "copy" ? "-c:a copy" : $"-c:a {AudioEncoder} -b:a 160k -ac 2");
+        var liveSegExt = NeedsFmp4() ? "m4s" : "ts";
+        var liveSegType = NeedsFmp4() ? "-hls_segment_type fmp4 -hls_fmp4_init_filename init.mp4 " : "";
         var args =
             $"-hide_banner -loglevel error -y {input} {codecs} " +
             $"-f hls -hls_time {_config.LiveSegmentSeconds} -hls_list_size {_config.LiveWindowSegments} " +
-            $"-hls_flags delete_segments+independent_segments " +
-            $"-hls_segment_filename \"{Path.Combine(dir, "seg_%05d.ts")}\" \"{Path.Combine(dir, "index.m3u8")}\"";
-        _liveJobs[stream] = Spawn(args, $"channel {name}");
+            $"-hls_flags delete_segments+independent_segments {liveSegType}" +
+            $"-hls_segment_filename \"{Path.Combine(dir, $"seg_%05d.{liveSegExt}")}\" \"{Path.Combine(dir, "index.m3u8")}\"";
+        _liveJobs[stream] = Spawn(args, $"channel {name}", dir);
     }
 
     // ---- plumbing -------------------------------------------------------
 
-    private Process Spawn(string args, string label)
+    private Process Spawn(string args, string label, string? workingDir = null)
     {
         var p = new Process
         {
@@ -347,6 +473,7 @@ public sealed class FfmpegManager : IDisposable
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
+                WorkingDirectory = workingDir ?? "",
             },
             EnableRaisingEvents = true,
         };

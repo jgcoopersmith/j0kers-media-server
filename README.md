@@ -66,6 +66,17 @@ set `ffmpeg.path`), the dashboard becomes a full media center:
   grabs, cached under the media root) with icon fallbacks. Movies and
   music transcode to HLS on the fly and play inline; pictures open in a
   lightbox viewer.
+- **Codecs** — transcode output codecs are configurable:
+  `ffmpeg.videoCodec` (h264 default, h265/hevc, vp9, av1, mpeg2, mpeg4,
+  `copy`, or any raw ffmpeg encoder name) and `ffmpeg.audioCodec` (aac
+  default, mp3, opus, vorbis, ac3, eac3, flac, alac, pcm, `copy`, or raw
+  name). Choices are validated against the installed ffmpeg's encoder
+  list at startup (fallback to h264/aac with a warning), modern codecs
+  automatically switch HLS to fMP4 segments, and `GET /api/codecs` lists
+  every encoder your ffmpeg build ships. Input side, the library
+  recognizes virtually every container/format ffmpeg can read.
+  (Browser note: h264+aac plays everywhere; hevc/vp9/av1 depend on the
+  viewer's browser support.)
 - **Player controls** — the inline player has ⏪/⏩ 10-second seek
   buttons, playback speed (0.5×–2×), and a quality selector
   (Source/1080p/720p/480p/360p — each height transcodes and caches
@@ -212,6 +223,7 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `GET/POST/DELETE /api/library` | list / add / remove library root folders (persisted to `library.json`) |
 | `GET /api/thumb?path=` | cached JPEG thumbnail for a video or picture (ffmpeg) |
 | `GET/POST/DELETE /api/favorites` | list / pin / unpin quick-button media (persisted to `favorites.json`) |
+| `GET /api/codecs` | active transcode codecs + every encoder in the ffmpeg build |
 | `GET /api/image?path=` | serve a picture for the library viewer |
 | `POST /api/server/start` / `stop` | start / stop the streaming services |
 | `GET/POST /api/settings` | read / save hostname + ports (persisted to `settings.json`) |
