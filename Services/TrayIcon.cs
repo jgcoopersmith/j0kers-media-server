@@ -330,6 +330,8 @@ public sealed class TrayIcon : IDisposable
         catch (Exception ex) { Log.Warn("tray", $"menu action failed: {ex.Message}"); }
     }
 
+    private const int WM_CLOSE = 0x0010;
+
     public void Dispose()
     {
         if (_disposed) return;
@@ -338,10 +340,19 @@ public sealed class TrayIcon : IDisposable
 
         var data = NewData();
         Shell_NotifyIcon(NIM_DELETE, ref data);
+
         // restore the console so a following shutdown log isn't invisible
         var console = GetConsoleWindow();
         if (console != IntPtr.Zero && !IsWindowVisible(console)) ShowWindow(console, SW_SHOW);
-        DestroyWindow(_hwnd);
+
+        // A window may only be destroyed by the thread that created it, so
+        // ask the pump thread to do it (DefWindowProc turns WM_CLOSE into
+        // DestroyWindow, whose WM_DESTROY ends the message loop). Calling
+        // DestroyWindow from here silently failed and leaked the window and
+        // its thread, so re-enabling tray mode created a second one.
+        PostMessage(_hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+        try { _thread?.Join(2000); } catch { }
         _hwnd = IntPtr.Zero;
+        _thread = null;
     }
 }

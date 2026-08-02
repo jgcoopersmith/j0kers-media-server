@@ -115,6 +115,7 @@ public sealed class ServerConfig
         [JsonPropertyName("hlsPort")] public int? HlsPort { get; set; }
         [JsonPropertyName("controlPort")] public int? ControlPort { get; set; }
         [JsonPropertyName("authToken")] public string? AuthToken { get; set; }
+        [JsonPropertyName("minimizeToTray")] public bool? MinimizeToTray { get; set; }
     }
 
     private SettingsOverrides _persistedSettings = new();
@@ -148,6 +149,7 @@ public sealed class ServerConfig
         if (s.HlsPort is not null) _persistedSettings.HlsPort = s.HlsPort;
         if (s.ControlPort is not null) _persistedSettings.ControlPort = s.ControlPort;
         if (s.AuthToken is not null) _persistedSettings.AuthToken = s.AuthToken;
+        if (s.MinimizeToTray is not null) _persistedSettings.MinimizeToTray = s.MinimizeToTray;
         File.WriteAllText(SettingsFile, JsonSerializer.Serialize(_persistedSettings, JsonOpts));
     }
 
@@ -165,6 +167,7 @@ public sealed class ServerConfig
         if (s.HlsPort is int hp) Hls.Port = hp;
         if (s.ControlPort is int cp) Control.Port = cp;
         if (!string.IsNullOrWhiteSpace(s.AuthToken)) Control.AuthToken = s.AuthToken;
+        if (s.MinimizeToTray is bool tray) MinimizeToTray = tray;
     }
 
     private sealed class MountSidecar

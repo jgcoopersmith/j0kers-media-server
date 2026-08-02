@@ -418,6 +418,13 @@
       <div style="flex:1"><label>HLS port</label><input id="cfg-hls" class="am-in" type="number" min="1" max="65535"></div>
       <div style="flex:1"><label>Control port</label><input id="cfg-ctl" class="am-in" type="number" min="1" max="65535"></div>
     </div>
+    <label style="margin-top:12px">Background mode</label>
+    <label id="cfg-tray-row" style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;color:var(--ink);font-size:13px;cursor:pointer;margin:0">
+      <input id="cfg-tray" type="checkbox" style="width:16px;height:16px">
+      <span>Minimize to the system tray (hide the console window)</span>
+    </label>
+    <div id="cfg-tray-note" style="color:var(--muted);font-size:11.5px;margin-top:3px"></div>
+
     <div id="cfg-msg" style="color:var(--critical);font-size:12px;margin-top:10px;min-height:16px"></div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
       <button onclick="closeConfig()">Cancel</button>
@@ -960,6 +967,12 @@ async function openConfig() {
     $("cfg-ctl").value = s.controlPort;
     cfgInterfaces = s.interfaces || [];
     renderCfgInterfaces();
+
+    $("cfg-tray").checked = !!s.minimizeToTray;
+    $("cfg-tray").disabled = !s.traySupported;
+    $("cfg-tray-note").textContent = s.traySupported
+      ? "Applies immediately. The icon starts in the taskbar's hidden ^ area — drag it out to pin it."
+      : "Windows only — on macOS/Linux run the server under systemd, launchd, or nohup.";
   } catch (e) {
     $("cfg-msg").textContent = "could not load settings: " + e.message;
   }
@@ -1017,6 +1030,7 @@ async function saveConfig() {
     rtspPort: parseInt($("cfg-rtsp").value, 10),
     hlsPort: parseInt($("cfg-hls").value, 10),
     controlPort: parseInt($("cfg-ctl").value, 10),
+    minimizeToTray: $("cfg-tray").checked,
   };
   // only send fields the user actually changed, so untouched settings
   // keep following server.json instead of being frozen in settings.json

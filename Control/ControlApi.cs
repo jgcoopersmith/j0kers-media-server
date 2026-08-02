@@ -62,6 +62,12 @@ public sealed class ControlApi : IDisposable
     public string BoundHost { get; private set; } = "localhost";
 
     /// <summary>
+    /// Turns background/tray mode on or off while running (set by Program).
+    /// Returns true if the mode is now active.
+    /// </summary>
+    public Func<bool, bool>? SetTrayMode { get; set; }
+
+    /// <summary>
     /// Cancels a pending shutdown-on-close. Called for dashboard polls and
     /// for any HLS request, so navigating to a watch page — or a phone
     /// streaming a movie — keeps the server alive.
@@ -325,6 +331,9 @@ public sealed class ControlApi : IDisposable
                     rtspPort = _serverConfig.Rtsp.Port,
                     hlsPort = _serverConfig.Hls.Port,
                     controlPort = _serverConfig.Control.Port,
+                    minimizeToTray = _serverConfig.MinimizeToTray,
+                    // the tray lives in the Windows notification area
+                    traySupported = OperatingSystem.IsWindows(),
                     // what "0.0.0.0" actually resolves to right now, so the
                     // Config dialog can show which addresses are reachable
                     interfaces = Services.NetworkInfo.Active().Select(i => new
@@ -722,25 +731,50 @@ public sealed class ControlApi : IDisposable
 
         var controlPortChanged = s.ControlPort is int ncp && ncp != _serverConfig.Control.Port;
 
+        // background/tray mode toggles live — no restart needed
+        bool? trayNow = null;
+        if (s.MinimizeToTray is bool wantTray)
+        {
+            trayNow = SetTrayMode?.Invoke(wantTray) ?? false;
+            if (wantTray && trayNow == false)
+            {
+                WriteJson(res, 400, new
+                {
+                    error = OperatingSystem.IsWindows()
+                        ? "could not create the tray icon"
+                        : "background tray mode is Windows-only; use systemd/launchd or nohup here",
+                });
+                return;
+            }
+            s.MinimizeToTray = trayNow; // persist what actually happened
+        }
+
         _serverConfig.UpdateSettings(s);
 
-        try
+        // only a bind/port change needs the listeners rebuilt
+        var needsRestart = s.BindAddress is not null || s.RtspPort is not null
+                           || s.HlsPort is not null || s.ControlPort is not null;
+        if (needsRestart)
         {
-            if (_services.Running) _services.RestartServices();
-            else _services.StartServices();
-        }
-        catch (Exception ex)
-        {
-            WriteJson(res, 500, new { error = "saved, but restart failed: " + ex.Message });
-            return;
+            try
+            {
+                if (_services.Running) _services.RestartServices();
+                else _services.StartServices();
+            }
+            catch (Exception ex)
+            {
+                WriteJson(res, 500, new { error = "saved, but restart failed: " + ex.Message });
+                return;
+            }
         }
 
-        Log.Info("control", $"settings saved: bind={_serverConfig.Rtsp.BindAddress} rtsp={_serverConfig.Rtsp.Port} hls={_serverConfig.Hls.Port} control={_serverConfig.Control.Port}");
+        Log.Info("control", $"settings saved: bind={_serverConfig.Rtsp.BindAddress} rtsp={_serverConfig.Rtsp.Port} hls={_serverConfig.Hls.Port} control={_serverConfig.Control.Port} tray={_serverConfig.MinimizeToTray}");
         WriteJson(res, 200, new
         {
             saved = true,
-            servicesRestarted = true,
+            servicesRestarted = needsRestart,
             controlPortChanged,
+            minimizeToTray = trayNow,
             note = controlPortChanged ? "control port applies after the server process restarts" : null,
         });
     }

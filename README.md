@@ -39,6 +39,11 @@ URIs, HLS stream list, and the effective config. (Set
 
 ### Run it in the background (Windows)
 
+Tick **Minimize to the system tray** in the dashboard's ⚙ Config dialog —
+it applies immediately, no restart. (Windows puts new tray icons in the
+hidden **^** area of the taskbar; drag it out to pin it.) The same thing
+is available at startup:
+
 ```bash
 dotnet run -- -t
 ```

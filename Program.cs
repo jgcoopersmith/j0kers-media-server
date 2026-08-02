@@ -95,7 +95,7 @@ if (hostArg is not null && !System.Net.IPAddress.TryParse(hostArg, out _)
 
 // Config resolution: explicit argument, then $J0KERS_CONFIG, then the first
 // of ./server.json, ./config/server.json, <binary dir>/server.json that
-// exists â€” so a bare `dotnet run` from the repo root just works.
+// exists — so a bare `dotnet run` from the repo root just works.
 // An explicitly named config that doesn't exist is an error, not a silent
 // fall-through to defaults.
 var explicitConfig = cfgArg ?? Environment.GetEnvironmentVariable("J0KERS_CONFIG");
@@ -113,7 +113,7 @@ var configPath = explicitConfig
     }.FirstOrDefault(File.Exists)
     ?? "server.json";
 
-try { Console.Title = "ðŸƒ j0kers Media Server"; } catch { /* no console attached */ }
+try { Console.Title = "🃏 j0kers Media Server"; } catch { /* no console attached */ }
 
 ServerConfig config;
 try
@@ -174,17 +174,11 @@ if (config.MinimizeToTray && !OperatingSystem.IsWindows())
     config.MinimizeToTray = false;
 }
 
-// Running as a background daemon means no browser tab is "the session" â€”
-// closing the dashboard must not take the server down with it.
-if (config.MinimizeToTray && config.Control.ShutdownOnClose)
-{
-    config.Control.ShutdownOnClose = false;
-    Log.Debug("main", "tray mode: closing the dashboard no longer shuts the server down");
-}
+// (tray mode also turns off shutdown-on-close; see ApplyTrayMode below)
 
 // The control API's drive-by-RCE risk is closed by the CSRF guard (no
 // website can drive it). A LAN peer reaching it directly is the operator's
-// own call, so we don't force a token â€” just note it once when it's exposed
+// own call, so we don't force a token — just note it once when it's exposed
 // beyond loopback with none set. Set control.authToken to require one.
 if (config.Control.Enabled
     && config.Control.BindAddress is not ("127.0.0.1" or "localhost" or "::1")
@@ -219,14 +213,14 @@ try
 
         if (config.Control.OpenDashboardOnStart)
         {
-            var urlList = string.Join(" Â· ", urls);
+            var urlList = string.Join(" · ", urls);
             if (control.BoundHost == "0.0.0.0")
-                urlList += " (bound to 0.0.0.0 â€” reachable on any of this machine's addresses)";
+                urlList += " (bound to 0.0.0.0 — reachable on any of this machine's addresses)";
             if (OperatingSystem.IsLinux()
                 && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISPLAY"))
                 && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY")))
             {
-                // headless box â€” nothing to open a browser on
+                // headless box — nothing to open a browser on
                 Log.Info("main", $"dashboard: {urlList}");
             }
             else if (TryOpenBrowser(dashboardUrl))
@@ -239,28 +233,52 @@ try
             }
         }
 
-        if (config.MinimizeToTray)
-        {
-            var svc = services; // captured for the menu callbacks
-            tray = new J0kersMediaServer.Services.TrayIcon(
-                tip: $"{config.ServerName} â€” {dashboardUrl}",
-                openDashboard: () => TryOpenBrowser(dashboardUrl),
-                servicesRunning: () => svc.Running,
-                setServices: run => { if (run) svc.StartServices(); else svc.StopServices(); },
-                requestShutdown: () => shutdown.TrySetResult());
+        // Background/tray mode can be switched on and off while running —
+        // the Config dialog calls this, and startup uses it too.
+        var svc = services;                                   // for the menu callbacks
+        var shutdownOnCloseDefault = config.Control.ShutdownOnClose;
 
-            if (tray.Start(hideConsole: true))
+        bool ApplyTrayMode(bool on)
+        {
+            if (on)
             {
-                Log.Info("main", $"running in the tray â€” double-click the joker icon for the dashboard ({dashboardUrl})");
-                tray.Notify("j0kers Media Server", $"Running in the background\n{dashboardUrl}");
+                if (tray is not null) return true;             // already in the tray
+                if (!OperatingSystem.IsWindows()) return false;
+
+                var icon = new J0kersMediaServer.Services.TrayIcon(
+                    tip: $"{config.ServerName} — {dashboardUrl}",
+                    openDashboard: () => TryOpenBrowser(dashboardUrl),
+                    servicesRunning: () => svc.Running,
+                    setServices: run => { if (run) svc.StartServices(); else svc.StopServices(); },
+                    requestShutdown: () => shutdown.TrySetResult());
+
+                if (!icon.Start(hideConsole: true))
+                {
+                    Log.Warn("main", "could not create the tray icon; keeping the console window");
+                    icon.Dispose();
+                    return false;
+                }
+                tray = icon;
+                config.MinimizeToTray = true;
+                // as a background daemon there is no "session" tab, so closing
+                // the dashboard must not take the server down
+                config.Control.ShutdownOnClose = false;
+                Log.Info("main", $"running in the tray — double-click the joker icon for the dashboard ({dashboardUrl})");
+                icon.Notify("j0kers Media Server",
+                    $"Running in the background.\nIf you don't see the icon, click the ^ arrow on the taskbar.\n{dashboardUrl}");
+                return true;
             }
-            else
-            {
-                Log.Warn("main", "could not create the tray icon; keeping the console window");
-                tray.Dispose();
-                tray = null;
-            }
+
+            tray?.Dispose();   // also restores the hidden console window
+            tray = null;
+            config.MinimizeToTray = false;
+            config.Control.ShutdownOnClose = shutdownOnCloseDefault;
+            Log.Info("main", "background mode off — console restored");
+            return false;
         }
+
+        control.SetTrayMode = ApplyTrayMode;
+        if (config.MinimizeToTray) ApplyTrayMode(true);
     }
 }
 catch (Exception ex)
@@ -271,7 +289,7 @@ catch (Exception ex)
 }
 
 /// <summary>
-/// URLs the dashboard is reachable on — see Services/NetworkInfo for the
+/// URLs the dashboard is reachable on � see Services/NetworkInfo for the
 /// interface selection rules (connected physical networks only).
 /// </summary>
 static string[] DashboardUrls(string bindAddress, int port) =>
@@ -305,7 +323,7 @@ static bool TryOpenBrowser(string url)
                 System.Diagnostics.Process.Start(attempt[0], attempt[1]);
             return true;
         }
-        catch { /* opener not present â€” try the next */ }
+        catch { /* opener not present — try the next */ }
     }
     return false;
 }
@@ -327,8 +345,8 @@ Console.CancelKeyPress += (_, e) =>
 AppDomain.CurrentDomain.ProcessExit += (_, _) => shutdown.TrySetResult();
 
 Log.Info("main", tray is not null
-    ? "ready â€” right-click the tray icon to exit"
-    : "ready â€” press Ctrl+C to stop");
+    ? "ready — right-click the tray icon to exit"
+    : "ready — press Ctrl+C to stop");
 await shutdown.Task;
 
 // take the icon down first: it also restores a hidden console so the
@@ -339,7 +357,7 @@ Log.Info("main", "shutting down (Ctrl+C again to force)");
 // watchdog: if any teardown blocks, exit anyway instead of hanging the console
 using var watchdog = new Timer(_ =>
 {
-    Log.Warn("main", "shutdown timed out â€” exiting");
+    Log.Warn("main", "shutdown timed out — exiting");
     Environment.Exit(0);
 }, null, dueTime: 5000, period: Timeout.Infinite);
 
