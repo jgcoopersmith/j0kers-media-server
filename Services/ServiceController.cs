@@ -31,6 +31,13 @@ public sealed class ServiceController : IDisposable
     public Auth.MediaLink? Links { get; set; }
     public Auth.AuthService? Sessions { get; set; }
 
+    /// <summary>
+    /// Live HLS viewers. Owned here rather than by the HLS server so that
+    /// restarting the services (a port change, the power button) doesn't
+    /// forget who is watching.
+    /// </summary>
+    public HlsViewers Viewers { get; } = new();
+
     private Action? _onHlsActivity;
 
     /// <summary>Invoked on each HLS request; also applied to a running server.</summary>
@@ -69,6 +76,7 @@ public sealed class ServiceController : IDisposable
                     OnActivity = _onHlsActivity,
                     Links = Links,
                     Sessions = Sessions,
+                    Viewers = Viewers,
                 };
                 Hls.Start();
             }

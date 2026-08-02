@@ -355,7 +355,14 @@ public sealed partial class ControlApi : IDisposable
                             sessions = RtspServer?.Sessions.Count ?? 0,
                             maxSessions = _serverConfig.Rtsp.MaxSessions,
                         },
-                        hls = new { enabled = _serverConfig.Hls.Enabled, port = _serverConfig.Hls.Port },
+                        hls = new
+                        {
+                            enabled = _serverConfig.Hls.Enabled,
+                            port = _serverConfig.Hls.Port,
+                            // people watching over HTTP right now; RTSP
+                            // sessions above are counted separately
+                            viewers = _services.Viewers.Count,
+                        },
                         ffmpeg = new
                         {
                             available = _ffmpeg?.Available ?? false,
@@ -397,17 +404,42 @@ public sealed partial class ControlApi : IDisposable
                     return;
 
                 case ("GET", "/api/sessions"):
+                    // Both kinds of viewing in one list. RTSP has real
+                    // sessions; HLS viewers are inferred from request
+                    // traffic, which is the only thing plain HTTP gives us.
                     WriteJson(res, 200, new
                     {
                         sessions = (RtspServer?.Sessions.All ?? Array.Empty<RtspSession>()).Select(s => new
                         {
+                            protocol = "rtsp",
                             id = s.Id,
                             mount = s.MountPath,
                             state = s.State.ToString().ToLowerInvariant(),
                             client = s.ClientAddress,
+                            player = "",
+                            user = "",
+                            startedUtc = (DateTime?)null,
                             lastActivityUtc = s.LastActivity,
+                            bytes = s.Sender.Stats.octets,
+                            // a real session can be torn down; an HTTP
+                            // viewer has nothing to tear down
+                            terminable = true,
                             rtp = new { packetsSent = s.Sender.Stats.packets, octetsSent = s.Sender.Stats.octets },
-                        }),
+                        }).Concat<object>(_services.Viewers.Active.Select(v => new
+                        {
+                            protocol = "hls",
+                            id = v.Id,
+                            mount = v.Stream,
+                            state = v.State,
+                            client = v.Client,
+                            player = v.Player,
+                            user = v.User,
+                            startedUtc = (DateTime?)v.StartedUtc,
+                            lastActivityUtc = v.LastSeenUtc,
+                            bytes = v.Bytes,
+                            terminable = false,
+                            rtp = new { packetsSent = 0L, octetsSent = v.Bytes },
+                        })),
                     });
                     return;
             }

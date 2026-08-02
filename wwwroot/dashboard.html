@@ -107,6 +107,8 @@
   .state .dot { width: 7px; height: 7px; }
   .state.playing .dot { background: var(--good); }
   .state.ready .dot { background: var(--warning); }
+  /* an HLS viewer that has buffered ahead and gone quiet is still watching */
+  .state.buffered .dot { background: var(--series-1); }
 
   button {
     font: inherit; font-size: 12.5px; border-radius: 8px; cursor: pointer;
@@ -901,13 +903,18 @@ async function tick() {
   $("verpill").textContent = "v" + (status.version || "?");
   rtspPort = status.rtsp.port; hlsPort = status.hls.port;
 
-  $("t-sessions").textContent = status.rtsp.sessions;
-  $("t-sessions-d").textContent = "of " + status.rtsp.maxSessions + " max";
+  // both kinds of viewing count: RTSP sessions and people watching over HLS
+  const viewers = status.hls.viewers || 0;
+  $("t-sessions").textContent = status.rtsp.sessions + viewers;
+  $("t-sessions-d").textContent = viewers
+    ? status.rtsp.sessions + " rtsp · " + viewers + " watching"
+    : "of " + status.rtsp.maxSessions + " max";
   $("t-uptime").textContent = fmtUptime(status.uptimeSeconds);
   $("t-uptime-d").textContent = status.server;
 
-  // throughput from packet-count deltas
-  const total = sessions.sessions.reduce((a, s) => a + (s.rtp.packetsSent || 0), 0);
+  // throughput from packet-count deltas (RTSP only — HLS is plain file
+  // fetches, and its volume shows as bytes per viewer in the table)
+  const total = sessions.sessions.reduce((a, s) => a + ((s.rtp && s.rtp.packetsSent) || 0), 0);
   const now = performance.now();
   let pps = 0;
   if (lastPackets !== null && total >= lastPackets && now > lastTime)
@@ -936,23 +943,46 @@ let libraryBooted = false;
 
 let activeTranscodes = [];
 
+const fmtBytes = n => n >= 1073741824 ? (n / 1073741824).toFixed(1) + " GB"
+  : n >= 1048576 ? (n / 1048576).toFixed(1) + " MB"
+  : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " B";
+
+/* "watching for 12m", from when this viewing first appeared */
+function fmtSince(iso) {
+  if (!iso) return "";
+  const s = Math.max(0, Math.round((Date.now() - new Date(iso)) / 1000));
+  return s < 60 ? s + "s" : s < 3600 ? Math.floor(s / 60) + "m" : Math.floor(s / 3600) + "h " + Math.floor(s % 3600 / 60) + "m";
+}
+
 function renderSessions(list) {
   if (!list.length) {
     const note = activeTranscodes.length
-      ? '<div class="empty">No RTSP sessions · ⏳ ' + activeTranscodes.length + ' transcode' + (activeTranscodes.length > 1 ? 's' : '') + ' running (see HLS Streams)</div>'
-      : '<div class="empty">No active sessions — open <span class="mono">rtsp://' + location.hostname + ':' + rtspPort + '/test</span> in VLC or ffplay.</div>';
+      ? '<div class="empty">Nobody watching · ⏳ ' + activeTranscodes.length + ' transcode' + (activeTranscodes.length > 1 ? 's' : '') + ' running (see HLS Streams)</div>'
+      : '<div class="empty">Nobody watching — play something here, on a phone, or open '
+        + '<span class="mono">rtsp://' + location.hostname + ':' + rtspPort + '/test</span> in VLC.</div>';
     $("sessions").innerHTML = note;
     return;
   }
-  let h = '<table><tr><th>Session</th><th>Mount</th><th>State</th><th>Client</th><th>Packets</th><th>Bytes</th><th></th></tr>';
+  let h = '<table><tr><th>Via</th><th>Stream</th><th>State</th><th>Client</th><th>Watching</th><th>Sent</th><th></th></tr>';
   for (const s of list) {
-    h += '<tr><td class="mono">' + esc(s.id) + '</td>'
+    const hls = s.protocol === "hls";
+    // for HLS the useful identity is the device and the account, not an
+    // opaque id — "Android · kid" tells you who is streaming what
+    const who = hls
+      ? esc(s.client) + '<div style="color:var(--muted);font-size:11px">' + esc(s.player)
+        + (s.user ? " · " + esc(s.user) : "") + "</div>"
+      : esc(s.client) + '<div style="color:var(--muted);font-size:11px">' + esc(s.id) + "</div>";
+    h += '<tr><td><span class="badge' + (hls ? "" : " admin") + '">' + (hls ? "hls" : "rtsp") + "</span></td>"
       + '<td class="mono">' + esc(s.mount) + '</td>'
       + '<td><span class="state ' + esc(s.state) + '"><span class="dot"></span>' + esc(s.state) + '</span></td>'
-      + '<td class="mono">' + esc(s.client) + '</td>'
-      + '<td>' + fmtNum(s.rtp.packetsSent) + '</td>'
-      + '<td>' + fmtNum(s.rtp.octetsSent) + '</td>'
-      + '<td style="text-align:right"><button class="danger" data-act="session-kill" data-arg="' + esc(s.id) + '">Terminate</button></td></tr>';
+      + '<td class="mono">' + who + '</td>'
+      + '<td>' + esc(fmtSince(s.startedUtc)) + '</td>'
+      + '<td>' + fmtBytes(s.bytes || 0) + '</td>'
+      + '<td style="text-align:right">'
+      + (s.terminable
+          ? '<button class="danger" data-act="session-kill" data-arg="' + esc(s.id) + '">Terminate</button>'
+          : '<span style="color:var(--muted);font-size:11px" title="An HLS viewer is a series of file requests — there is no connection to cut. Revoke their key or account to stop them.">—</span>')
+      + "</td></tr>";
   }
   $("sessions").innerHTML = h + '</table>';
 }

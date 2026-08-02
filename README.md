@@ -56,6 +56,16 @@ the server in this mode, so it keeps serving your phone and other devices
 until you pick Exit. `--no-tray` overrides the config for one run. On
 macOS/Linux use your init system (systemd/launchd) or `nohup` instead.
 
+The **Sessions** card lists everyone watching, both kinds at once. RTSP has
+real sessions, so those can be terminated. HLS has none — a viewer is a
+series of unrelated file requests — so one is inferred instead: requests
+from the same client for the same stream are one viewing, live until they
+stop for 90 seconds (long enough that a player which has buffered ahead
+and gone quiet doesn't vanish mid-film; it shows as *buffered* rather than
+*playing*). There's no connection to cut, so those rows have no Terminate
+button — revoke the account or key instead. The RTP throughput chart counts
+RTSP packets only; HLS volume shows as bytes per viewer in the table.
+
 The header has a **⏻ Start/Stop** button that stops or starts the streaming
 services (RTSP + HLS) while the dashboard stays up, a **👥 Users** dialog for
 accounts and keys, a **👤 Account** panel for your own password and keys, and
@@ -239,7 +249,7 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `GET /api/status` | identity, uptime, session counts |
 | `GET /api/config` | effective config (token redacted) |
 | `GET /api/mounts` | configured mounts + announcement URI |
-| `GET /api/sessions` | live RTSP sessions with RTP stats |
+| `GET /api/sessions` | who is watching: RTSP sessions and HLS viewers |
 | `DELETE /api/sessions/{id}` | force-terminate a session |
 | `GET /api/preview?mount=/x` | live WAV audio of a mount (dashboard player) |
 | `GET /api/browse?path=C:\x` | drive / folder / file listing (dashboard picker; no `path` = drives) |
@@ -395,7 +405,7 @@ Auth/           accounts, password hashing, sessions, API keys, signed media lin
 Configuration/  JSON config model, env overrides, validation
 Rtsp/           RTSP parser, server, sessions, SDP
 Rtp/            RTP packetization, RTCP sender reports, port allocator
-Hls/            RFC 8216 playlist generation + segment serving
+Hls/            RFC 8216 playlist generation + segment serving, viewer tracking
 Control/        HTTP/JSON control API
 Media/          G.711 sources (tone generator, file looper)
 wwwroot/        dashboard single-page app + sign-in page (embedded into the binary)

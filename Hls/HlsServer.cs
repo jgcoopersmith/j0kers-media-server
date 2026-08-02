@@ -34,6 +34,9 @@ public sealed class HlsServer : IDisposable
     /// <summary>Lets a signed-in browser reach media directly; cookies are not port-scoped.</summary>
     public Auth.AuthService? Sessions { get; set; }
 
+    /// <summary>Who is watching right now, inferred from request traffic (see HlsViewers).</summary>
+    public HlsViewers? Viewers { get; set; }
+
     public HlsServer(HlsConfig config, string baseDirectory)
     {
         _config = config;
@@ -217,6 +220,11 @@ public sealed class HlsServer : IDisposable
             // playback doesn't stall on the second request
             var token = TokenQuery(ctx);
 
+            // Name the account behind this request where there is one. A
+            // signed link deliberately carries no identity, so those show up
+            // as a share link rather than as somebody.
+            var watcher = Sessions?.Authenticate(ctx).User?.Username;
+
             if (path == "/")
             {
                 WriteText(res, 200, "application/json", ListStreamsJson());
@@ -301,6 +309,9 @@ public sealed class HlsServer : IDisposable
 
             if (parts[1].EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase))
             {
+                // a playlist fetch is someone pressing play — count them
+                // straight away rather than waiting for the first segment
+                Viewers?.Note(ctx, parts[0], watcher, 0);
                 // A playlist written by a segmenter (ffmpeg VOD/live jobs)
                 // wins — it has exact durations and live-window state. The
                 // generated playlist covers plain directories of segments.
@@ -368,6 +379,9 @@ public sealed class HlsServer : IDisposable
             using var fs = new FileStream(segment, FileMode.Open, FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete);
             res.ContentLength64 = fs.Length;
+            // the segment is the actual media — this is what makes the
+            // dashboard's byte counter mean anything
+            Viewers?.Note(ctx, parts[0], watcher, fs.Length);
             fs.CopyTo(res.OutputStream);
         }
         catch (Exception ex)
