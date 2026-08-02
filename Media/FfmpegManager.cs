@@ -310,6 +310,30 @@ public sealed class FfmpegManager : IDisposable
     public bool IsVodReady(string stream) =>
         File.Exists(Path.Combine(_mediaRoot, stream, "index.m3u8"));
 
+    /// <summary>Streams whose conversion is currently running.</summary>
+    public IReadOnlyList<string> ActiveVodStreams
+    {
+        get
+        {
+            lock (_lock)
+                return _vodJobs.Where(kv => { try { return !kv.Value.HasExited; } catch { return false; } })
+                               .Select(kv => kv.Key).ToList();
+        }
+    }
+
+    /// <summary>Kills a running conversion (e.g. before deleting its stream). True if one was running.</summary>
+    public bool CancelVod(string stream)
+    {
+        lock (_lock)
+        {
+            if (!_vodJobs.Remove(stream, out var p)) return false;
+            try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
+            p.Dispose();
+            Log.Info("ffmpeg", $"vod job cancelled: {stream}");
+            return true;
+        }
+    }
+
     /// <summary>Filename → URL-safe lowercase slug (letters/digits/dashes, ≤48 chars).</summary>
     private static string Slugify(string name)
     {

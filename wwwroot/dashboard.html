@@ -503,6 +503,7 @@ async function tick() {
   $("t-pps").textContent = fmtNum(pps);
   drawChart();
 
+  activeTranscodes = status.transcodes || [];
   renderSessions(sessions.sessions);
   refreshMounts();   // cheap, cached-ish
   refreshHls();
@@ -518,8 +519,16 @@ async function tick() {
 }
 let libraryBooted = false;
 
+let activeTranscodes = [];
+
 function renderSessions(list) {
-  if (!list.length) { $("sessions").innerHTML = '<div class="empty">No active sessions — open <span class="mono">rtsp://' + location.hostname + ':' + rtspPort + '/test</span> in VLC or ffplay.</div>'; return; }
+  if (!list.length) {
+    const note = activeTranscodes.length
+      ? '<div class="empty">No RTSP sessions · ⏳ ' + activeTranscodes.length + ' transcode' + (activeTranscodes.length > 1 ? 's' : '') + ' running (see HLS Streams)</div>'
+      : '<div class="empty">No active sessions — open <span class="mono">rtsp://' + location.hostname + ':' + rtspPort + '/test</span> in VLC or ffplay.</div>';
+    $("sessions").innerHTML = note;
+    return;
+  }
   let h = '<table><tr><th>Session</th><th>Mount</th><th>State</th><th>Client</th><th>Packets</th><th>Bytes</th><th></th></tr>';
   for (const s of list) {
     h += '<tr><td class="mono">' + esc(s.id) + '</td>'
@@ -682,8 +691,10 @@ async function refreshHls() {
       // the watch page plays in any browser (phones included); the raw
       // m3u8 is linked from that page for VLC users
       const watchUrl = "http://" + location.hostname + ":" + hlsPort + "/watch/" + encodeURIComponent(s.name);
+      const transcoding = activeTranscodes.includes(s.name)
+        ? '<span title="Transcode in progress — playable now, growing as it converts">⏳</span> ' : "";
       h += '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
-        + '<div style="flex:1;min-width:0"><a class="mono" href="' + esc(watchUrl) + '" target="_blank" rel="noopener" title="Open the watch page">' + esc(s.name) + '</a></div>'
+        + '<div style="flex:1;min-width:0">' + transcoding + '<a class="mono" href="' + esc(watchUrl) + '" target="_blank" rel="noopener" title="Open the watch page">' + esc(s.name) + '</a></div>'
         + '<button data-act="hls-play" data-arg="' + esc(url) + '">▶ Play</button>'
         + '<button data-act="hls-stop" data-arg="' + esc(url) + '">■ Stop</button>'
         + '<button data-act="copy" data-arg="' + esc(watchUrl) + '" title="Copy a link that plays in any browser">Copy</button>'

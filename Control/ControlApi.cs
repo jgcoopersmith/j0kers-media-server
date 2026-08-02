@@ -191,6 +191,7 @@ public sealed class ControlApi : IDisposable
                             videoCodec = _ffmpeg?.VideoEncoder,
                             audioCodec = _ffmpeg?.AudioEncoder,
                         },
+                        transcodes = _ffmpeg?.ActiveVodStreams ?? (IReadOnlyList<string>)Array.Empty<string>(),
                     });
                     return;
 
@@ -705,15 +706,32 @@ public sealed class ControlApi : IDisposable
             return;
         }
 
-        try
+        // a still-running conversion holds the files open — stop it first
+        if (_ffmpeg?.CancelVod(name) == true)
+            Thread.Sleep(300); // give the killed process a moment to release handles
+
+        for (var attempt = 0; ; attempt++)
         {
-            Directory.Delete(dir, recursive: true);
-            Log.Info("control", $"HLS stream removed via dashboard: {name}");
-            WriteJson(res, 200, new { removed = name });
-        }
-        catch (Exception ex)
-        {
-            WriteJson(res, 500, new { error = "could not delete: " + ex.Message });
+            try
+            {
+                Directory.Delete(dir, recursive: true);
+                Log.Info("control", $"HLS stream removed via dashboard: {name}");
+                WriteJson(res, 200, new { removed = name });
+                return;
+            }
+            catch (IOException) when (attempt < 5)
+            {
+                Thread.Sleep(300);
+            }
+            catch (UnauthorizedAccessException) when (attempt < 5)
+            {
+                Thread.Sleep(300);
+            }
+            catch (Exception ex)
+            {
+                WriteJson(res, 500, new { error = "could not delete — files still in use: " + ex.Message });
+                return;
+            }
         }
     }
 
