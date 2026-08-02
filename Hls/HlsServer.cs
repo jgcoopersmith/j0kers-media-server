@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Text;
 using J0kersMediaServer.Config;
@@ -155,20 +156,15 @@ public sealed class HlsServer : IDisposable
                 var onDisk = Path.Combine(streamDir, parts[1]);
                 if (File.Exists(onDisk) && !parts[1].Contains(".."))
                 {
-                    var text = ReadSharedText(onDisk);
-                    // A vod-* transcode that is still running has no ENDLIST,
-                    // which makes players treat it as LIVE: no seek bar,
-                    // playback starts at the live edge, speed is ignored.
-                    // Serve those as finite VOD snapshots instead — the
-                    // dashboard reloads on 'ended' if the transcode grew.
-                    if (parts[0].StartsWith("vod-", StringComparison.OrdinalIgnoreCase) &&
-                        !text.Contains("#EXT-X-ENDLIST"))
-                    {
-                        text = text.Replace("#EXT-X-PLAYLIST-TYPE:EVENT", "#EXT-X-PLAYLIST-TYPE:VOD");
-                        if (!text.EndsWith('\n')) text += "\n";
-                        text += "#EXT-X-ENDLIST\n";
-                    }
-                    WriteText(res, 200, "application/vnd.apple.mpegurl", text);
+                    // Serve ffmpeg's own playlist verbatim. A still-running
+                    // VOD job writes an EXT-X-PLAYLIST-TYPE:EVENT playlist
+                    // (no ENDLIST): players keep reloading and extend the
+                    // seek bar as segments are added, then stop when ffmpeg
+                    // finishes and writes ENDLIST. An earlier version
+                    // rewrote EVENT→VOD+ENDLIST here, which told every player
+                    // the movie was already complete — truncating it to
+                    // however much had transcoded. Do NOT do that.
+                    WriteText(res, 200, "application/vnd.apple.mpegurl", ReadSharedText(onDisk));
                     return;
                 }
                 if (parts[1] is "index.m3u8" or "playlist.m3u8")
@@ -253,10 +249,12 @@ public sealed class HlsServer : IDisposable
             var duration = (double)_config.TargetDurationSeconds;
             var sidecar = seg + ".duration";
             if (File.Exists(sidecar) &&
-                double.TryParse(File.ReadAllText(sidecar).Trim(), out var d) && d > 0)
+                double.TryParse(File.ReadAllText(sidecar).Trim(),
+                    NumberStyles.Float, CultureInfo.InvariantCulture, out var d) && d > 0)
                 duration = d;
 
-            sb.Append($"#EXTINF:{duration:0.000},\n");
+            // RFC 8216 §4.3.2.1: EXTINF is a decimal-point number — never locale-formatted
+            sb.Append(CultureInfo.InvariantCulture, $"#EXTINF:{duration:0.000},\n");
             sb.Append(Uri.EscapeDataString(Path.GetFileName(seg))).Append('\n');
         }
 

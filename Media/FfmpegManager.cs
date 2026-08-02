@@ -93,13 +93,16 @@ public sealed class FfmpegManager : IDisposable
     {
         try
         {
-            using var p = Process.Start(new ProcessStartInfo(FfmpegPath, "-hide_banner -encoders")
+            var psi = new ProcessStartInfo(FfmpegPath)
             {
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
-            });
+            };
+            psi.ArgumentList.Add("-hide_banner");
+            psi.ArgumentList.Add("-encoders");
+            using var p = Process.Start(psi);
             if (p is null) return;
             var inList = false;
             while (p.StandardOutput.ReadLine() is { } line)
@@ -141,18 +144,104 @@ public sealed class FfmpegManager : IDisposable
     }
 
     /// <summary>x264/x265 take preset+crf; other encoders get sane defaults of their own.</summary>
-    private string VideoQualityArgs() => VideoEncoder switch
+    private string[] VideoQualityArgs() => VideoEncoder switch
     {
-        "libx264" or "libx265" => $"-preset {_config.Preset} -crf {_config.Crf} ",
-        "libvpx-vp9" => $"-crf {_config.Crf} -b:v 0 ",
-        "libaom-av1" or "libsvtav1" or "librav1e" => $"-crf {_config.Crf} ",
-        _ => "",
+        "libx264" or "libx265" => new[] { "-preset", _config.Preset, "-crf", Inv(_config.Crf) },
+        "libvpx-vp9" => new[] { "-crf", Inv(_config.Crf), "-b:v", "0" },
+        "libaom-av1" or "libsvtav1" or "librav1e" => new[] { "-crf", Inv(_config.Crf) },
+        _ => Array.Empty<string>(),
     };
 
-    /// <summary>MPEG-TS only carries the classic codecs; anything newer needs fMP4 segments (RFC 8216 §3).</summary>
-    private bool NeedsFmp4() =>
-        VideoEncoder is "libvpx-vp9" or "libvpx" or "libaom-av1" or "libsvtav1" or "librav1e" or "libx265"
-        || AudioEncoder is "libopus" or "libvorbis" or "flac" or "alac";
+    private static string Inv(int value) => value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>Encoders/codecs MPEG-TS cannot carry — these need fMP4 segments (RFC 8216 §3.1).</summary>
+    private static readonly HashSet<string> Fmp4Only = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // encoder names
+        "libvpx-vp9", "libvpx", "libaom-av1", "libsvtav1", "librav1e", "libx265",
+        "libopus", "libvorbis", "flac", "alac",
+        // decoder/codec names (used when remuxing with -c copy)
+        "vp9", "vp8", "av1", "hevc", "opus", "vorbis",
+    };
+
+    /// <summary>
+    /// Whether the segment container must be fMP4. In copy mode the
+    /// configured encoders are irrelevant — the SOURCE codecs decide, so
+    /// they are probed; guessing from config produced impossible command
+    /// lines (e.g. remuxing MPEG-2 into fMP4).
+    /// </summary>
+    private bool NeedsFmp4(string? sourceFile)
+    {
+        var copyVideo = VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase);
+        var copyAudio = AudioEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase);
+        if (!copyVideo && !copyAudio)
+            return Fmp4Only.Contains(VideoEncoder) || Fmp4Only.Contains(AudioEncoder);
+
+        // remuxing: ask the source what it actually contains
+        if (sourceFile is not null)
+        {
+            var (v, a) = ProbeCodecs(sourceFile);
+            var effectiveV = copyVideo ? v : VideoEncoder;
+            var effectiveA = copyAudio ? a : AudioEncoder;
+            return Fmp4Only.Contains(effectiveV ?? "") || Fmp4Only.Contains(effectiveA ?? "");
+        }
+        // live URL with no cheap probe: MPEG-TS is what tuners and IPTV deliver
+        return false;
+    }
+
+    /// <summary>First video and audio codec names of a media file, via ffprobe.</summary>
+    private (string? video, string? audio) ProbeCodecs(string file)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo(FfprobePath)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            foreach (var a in new[] { "-v", "error", "-show_entries", "stream=codec_type,codec_name",
+                                      "-of", "csv=p=0", file })
+                psi.ArgumentList.Add(a);
+            using var p = Process.Start(psi);
+            if (p is null) return (null, null);
+            var output = p.StandardOutput.ReadToEnd();
+            p.WaitForExit(15_000);
+            string? video = null, audio = null;
+            foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var parts = line.Trim().Split(',');
+                if (parts.Length < 2) continue;
+                // csv order follows the -show_entries list: codec_name,codec_type
+                var name = parts[0];
+                var type = parts[1];
+                if (type == "video" && video is null) video = name;
+                else if (type == "audio" && audio is null) audio = name;
+            }
+            return (video, audio);
+        }
+        catch
+        {
+            return (null, null);
+        }
+    }
+
+    /// <summary>ffprobe lives beside ffmpeg; falls back to PATH.</summary>
+    public string FfprobePath
+    {
+        get
+        {
+            var dir = Path.GetDirectoryName(FfmpegPath);
+            var name = OperatingSystem.IsWindows() ? "ffprobe.exe" : "ffprobe";
+            if (!string.IsNullOrEmpty(dir))
+            {
+                var beside = Path.Combine(dir, name);
+                if (File.Exists(beside)) return beside;
+            }
+            return "ffprobe";
+        }
+    }
 
     private void Detect()
     {
@@ -160,13 +249,15 @@ public sealed class FfmpegManager : IDisposable
         {
             try
             {
-                using var p = Process.Start(new ProcessStartInfo(candidate, "-version")
+                var probe = new ProcessStartInfo(candidate)
                 {
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
                     CreateNoWindow = true,
-                });
+                };
+                probe.ArgumentList.Add("-version");
+                using var p = Process.Start(probe);
                 if (p is null) continue;
                 var first = p.StandardOutput.ReadLine() ?? "";
                 p.WaitForExit(3000);
@@ -218,6 +309,11 @@ public sealed class FfmpegManager : IDisposable
         var info = new FileInfo(file);
         if (!info.Exists) throw new FileNotFoundException("no such file", file);
 
+        // scaling is impossible when the video is remuxed, so a requested
+        // height must not fork the cache (it produced N identical copies
+        // labelled with resolutions they didn't have)
+        if (VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase)) height = 0;
+
         // cache key: same file+size+mtime+height+codecs → same output dir, converted once
         var key = Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(
             $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}|{height}|{VideoEncoder}|{AudioEncoder}")))[..8].ToLowerInvariant();
@@ -242,22 +338,32 @@ public sealed class FfmpegManager : IDisposable
             Directory.CreateDirectory(dir);
             // remember the source so subtitles can be found for this stream
             try { File.WriteAllText(Path.Combine(dir, "source.txt"), info.FullName); } catch { }
-            var video = VideoEncoder == "copy"
-                ? "-c:v copy "
-                : $"{(height > 0 ? $"-vf scale=-2:{height} " : "")}-c:v {VideoEncoder} {VideoQualityArgs()}-pix_fmt yuv420p ";
-            var audio = AudioEncoder == "copy"
-                ? "-c:a copy "
-                : $"-c:a {AudioEncoder} -b:a 160k -ac 2 ";
-            var segExt = NeedsFmp4() ? "m4s" : "ts";
-            // keep the init filename relative so the EXT-X-MAP URI stays
-            // fetchable; the job's working directory (below) puts the file
-            // in the stream folder
-            var segType = NeedsFmp4() ? "-hls_segment_type fmp4 -hls_fmp4_init_filename init.mp4 " : "";
-            var args =
-                $"-hide_banner -loglevel error -y -i \"{info.FullName}\" " +
-                video + audio +
-                $"-f hls -hls_time 6 -hls_list_size 0 -hls_playlist_type event {segType}" +
-                $"-hls_segment_filename \"{Path.Combine(dir, $"seg_%05d.{segExt}")}\" \"{playlist}\"";
+            // built as a list: a file name containing a quote must never be
+            // able to become extra ffmpeg arguments
+            var args = new List<string> { "-hide_banner", "-loglevel", "error", "-y", "-i", info.FullName };
+            if (VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase))
+            {
+                args.AddRange(new[] { "-c:v", "copy" });
+            }
+            else
+            {
+                if (height > 0) args.AddRange(new[] { "-vf", $"scale=-2:{height}" });
+                args.AddRange(new[] { "-c:v", VideoEncoder });
+                args.AddRange(VideoQualityArgs());
+                args.AddRange(new[] { "-pix_fmt", "yuv420p" });
+            }
+            args.AddRange(AudioEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase)
+                ? new[] { "-c:a", "copy" }
+                : new[] { "-c:a", AudioEncoder, "-b:a", "160k", "-ac", "2" });
+
+            var fmp4 = NeedsFmp4(info.FullName);
+            var segExt = fmp4 ? "m4s" : "ts";
+            args.AddRange(new[] { "-f", "hls", "-hls_time", "6", "-hls_list_size", "0",
+                                  "-hls_playlist_type", "event" });
+            // keep the init filename relative so the EXT-X-MAP URI stays fetchable
+            if (fmp4) args.AddRange(new[] { "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4" });
+            args.AddRange(new[] { "-hls_segment_filename", Path.Combine(dir, $"seg_%05d.{segExt}"), playlist });
+
             var job = Spawn(args, $"vod {info.Name}", dir);
             _vodJobs[stream] = job;
             job.Exited += (_, _) =>
@@ -329,8 +435,7 @@ public sealed class FfmpegManager : IDisposable
         lock (_lock)
         {
             if (!_vodJobs.Remove(stream, out var p)) return false;
-            try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
-            p.Dispose();
+            KillAndRelease(p);
             Log.Info("ffmpeg", $"vod job cancelled: {stream}");
             return true;
         }
@@ -383,32 +488,50 @@ public sealed class FfmpegManager : IDisposable
 
         Directory.CreateDirectory(thumbDir);
         var isVideo = ext is not (".jpg" or ".jpeg" or ".png" or ".gif" or ".webp" or ".bmp" or ".avif");
-        // videos: seek before decode so a frame grab is cheap even on large files
-        var seek = isVideo ? "-ss 3 " : "";
-        var args = $"-hide_banner -loglevel error -y {seek}-i \"{info.FullName}\" " +
-                   $"-frames:v 1 -vf \"scale=320:-2\" -q:v 5 \"{thumb}\"";
+
+        List<string> ThumbArgs(bool seek)
+        {
+            var a = new List<string> { "-hide_banner", "-loglevel", "error", "-y" };
+            // videos: seek before decode so a frame grab is cheap even on large files
+            if (seek) a.AddRange(new[] { "-ss", "3" });
+            a.AddRange(new[] { "-i", info.FullName, "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "5", thumb });
+            return a;
+        }
+
         try
         {
-            using var p = Process.Start(new ProcessStartInfo(FfmpegPath, args)
-            {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardError = true,
-            });
-            if (p is null) return null;
-            if (!p.WaitForExit(10_000)) { try { p.Kill(true); } catch { } return null; }
+            if (RunFfmpeg(ThumbArgs(isVideo)) && File.Exists(thumb)) return thumb;
             // a very short video can have nothing at 3 s — retry from the start
-            if ((p.ExitCode != 0 || !File.Exists(thumb)) && isVideo)
-            {
-                using var p2 = Process.Start(new ProcessStartInfo(FfmpegPath,
-                    args.Replace("-ss 3 ", "")) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true });
-                p2?.WaitForExit(10_000);
-            }
+            if (isVideo && RunFfmpeg(ThumbArgs(false)) && File.Exists(thumb)) return thumb;
             return File.Exists(thumb) ? thumb : null;
         }
         catch
         {
             return null;
+        }
+    }
+
+    /// <summary>Runs ffmpeg to completion with a timeout; true on exit code 0.</summary>
+    private bool RunFfmpeg(IEnumerable<string> args, int timeoutMs = 30_000)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo(FfmpegPath)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true,
+            };
+            foreach (var a in args) psi.ArgumentList.Add(a);
+            using var p = Process.Start(psi);
+            if (p is null) return false;
+            p.StandardError.ReadToEnd();
+            if (!p.WaitForExit(timeoutMs)) { try { p.Kill(true); } catch { } return false; }
+            return p.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -486,39 +609,61 @@ public sealed class FfmpegManager : IDisposable
         var dir = Path.Combine(_mediaRoot, stream);
         Directory.CreateDirectory(dir);
 
-        var input = url.StartsWith("rtsp://", StringComparison.OrdinalIgnoreCase)
-            ? $"-rtsp_transport tcp -i \"{url}\""
-            : $"-i \"{url}\"";
-        var zerolatency = VideoEncoder is "libx264" or "libx265" ? "-tune zerolatency " : "";
-        var codecs = _config.LiveVideoMode.Equals("copy", StringComparison.OrdinalIgnoreCase)
-            ? "-c copy"
-            : (VideoEncoder == "copy" ? "-c:v copy " : $"-c:v {VideoEncoder} {VideoQualityArgs()}{zerolatency}-pix_fmt yuv420p ")
-              + (AudioEncoder == "copy" ? "-c:a copy" : $"-c:a {AudioEncoder} -b:a 160k -ac 2");
-        var liveSegExt = NeedsFmp4() ? "m4s" : "ts";
-        var liveSegType = NeedsFmp4() ? "-hls_segment_type fmp4 -hls_fmp4_init_filename init.mp4 " : "";
-        var args =
-            $"-hide_banner -loglevel error -y {input} {codecs} " +
-            $"-f hls -hls_time {_config.LiveSegmentSeconds} -hls_list_size {_config.LiveWindowSegments} " +
-            $"-hls_flags delete_segments+independent_segments {liveSegType}" +
-            $"-hls_segment_filename \"{Path.Combine(dir, $"seg_%05d.{liveSegExt}")}\" \"{Path.Combine(dir, "index.m3u8")}\"";
+        var args = new List<string> { "-hide_banner", "-loglevel", "error", "-y" };
+        if (url.StartsWith("rtsp://", StringComparison.OrdinalIgnoreCase))
+            args.AddRange(new[] { "-rtsp_transport", "tcp" });
+        args.AddRange(new[] { "-i", url });
+
+        var remuxAll = _config.LiveVideoMode.Equals("copy", StringComparison.OrdinalIgnoreCase);
+        if (remuxAll)
+        {
+            args.AddRange(new[] { "-c", "copy" });
+        }
+        else
+        {
+            if (VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase))
+            {
+                args.AddRange(new[] { "-c:v", "copy" });
+            }
+            else
+            {
+                args.AddRange(new[] { "-c:v", VideoEncoder });
+                args.AddRange(VideoQualityArgs());
+                if (VideoEncoder is "libx264" or "libx265") args.AddRange(new[] { "-tune", "zerolatency" });
+                args.AddRange(new[] { "-pix_fmt", "yuv420p" });
+            }
+            args.AddRange(AudioEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase)
+                ? new[] { "-c:a", "copy" }
+                : new[] { "-c:a", AudioEncoder, "-b:a", "160k", "-ac", "2" });
+        }
+
+        // remuxed live sources (tuners, IPTV) are MPEG-TS friendly; only a
+        // real transcode to a modern codec needs fMP4
+        var fmp4 = !remuxAll && NeedsFmp4(null);
+        var liveSegExt = fmp4 ? "m4s" : "ts";
+        args.AddRange(new[] { "-f", "hls", "-hls_time", Inv(_config.LiveSegmentSeconds),
+                              "-hls_list_size", Inv(_config.LiveWindowSegments),
+                              "-hls_flags", "delete_segments+independent_segments" });
+        if (fmp4) args.AddRange(new[] { "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4" });
+        args.AddRange(new[] { "-hls_segment_filename", Path.Combine(dir, $"seg_%05d.{liveSegExt}"),
+                              Path.Combine(dir, "index.m3u8") });
+
         _liveJobs[stream] = Spawn(args, $"channel {name}", dir);
     }
 
     // ---- plumbing -------------------------------------------------------
 
-    private Process Spawn(string args, string label, string? workingDir = null)
+    private Process Spawn(IEnumerable<string> args, string label, string? workingDir = null)
     {
-        var p = new Process
+        var psi = new ProcessStartInfo(FfmpegPath)
         {
-            StartInfo = new ProcessStartInfo(FfmpegPath, args)
-            {
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                WorkingDirectory = workingDir ?? "",
-            },
-            EnableRaisingEvents = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = workingDir ?? "",
         };
+        foreach (var a in args) psi.ArgumentList.Add(a);
+        var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
         var errTail = new Queue<string>(8);
         p.ErrorDataReceived += (_, e) =>
         {
@@ -531,13 +676,21 @@ public sealed class FfmpegManager : IDisposable
         };
         p.Exited += (_, _) =>
         {
-            if (_disposed) return;
-            string tail;
-            lock (errTail) tail = string.Join(" | ", errTail);
-            if (p.ExitCode == 0)
-                Log.Info("ffmpeg", $"{label}: finished");
-            else
-                Log.Warn("ffmpeg", $"{label}: exited with code {p.ExitCode}{(tail.Length > 0 ? " — " + tail : "")}");
+            // This runs on a thread-pool thread: an escaping exception would
+            // terminate the whole server. Kill()+Dispose() elsewhere can make
+            // ExitCode throw, so guard everything.
+            try
+            {
+                if (_disposed) return;
+                string tail;
+                lock (errTail) tail = string.Join(" | ", errTail);
+                var code = p.ExitCode;
+                if (code == 0)
+                    Log.Info("ffmpeg", $"{label}: finished");
+                else
+                    Log.Warn("ffmpeg", $"{label}: exited with code {code}{(tail.Length > 0 ? " — " + tail : "")}");
+            }
+            catch { /* process already reaped/disposed — nothing to report */ }
         };
         p.Start();
         p.BeginErrorReadLine();
@@ -548,8 +701,18 @@ public sealed class FfmpegManager : IDisposable
     private static void StopJob(Dictionary<string, Process> jobs, string key)
     {
         if (!jobs.Remove(key, out var p)) return;
+        KillAndRelease(p);
+    }
+
+    /// <summary>
+    /// Kills a job and releases it. Disposing immediately after Kill() races
+    /// the Exited callback, so give it a moment to be raised first.
+    /// </summary>
+    private static void KillAndRelease(Process p)
+    {
         try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
-        p.Dispose();
+        try { p.WaitForExit(2000); } catch { }
+        try { p.Dispose(); } catch { }
     }
 
     private void LoadChannels()

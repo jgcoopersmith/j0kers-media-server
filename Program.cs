@@ -155,6 +155,19 @@ ControlApi? control = null;
 J0kersMediaServer.Media.FfmpegManager? ffmpeg = null;
 var shutdown = new TaskCompletionSource();
 
+// Never expose the control API unauthenticated beyond loopback.
+if (config.Control.Enabled)
+{
+    var minted = config.EnsureControlToken();
+    if (minted is not null)
+    {
+        Log.Warn("main", "control API is bound beyond localhost — generated an access token:");
+        Log.Warn("main", $"    {minted}");
+        Log.Warn("main", $"    open the dashboard with:  http://localhost:{config.Control.Port}/?token={minted}");
+        Log.Warn("main", "    (saved to settings.json; set control.authToken yourself to choose your own)");
+    }
+}
+
 var mediaRoot = Path.GetFullPath(Path.IsPathRooted(config.Hls.MediaRoot)
     ? config.Hls.MediaRoot
     : Path.Combine(baseDirectory, config.Hls.MediaRoot));

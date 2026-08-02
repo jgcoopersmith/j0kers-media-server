@@ -437,6 +437,16 @@ const hist = [];                              // {t: Date, pps: number}
 let lastPackets = null, lastTime = null;
 let hlsPort = null, rtspPort = null;
 let token = sessionStorage.getItem("j0kers-token") || "";
+// bootstrap from a ?token=… link (the console prints one when the server
+// auto-generates a token for a networked bind), then scrub it from the URL
+(function () {
+  const m = location.search.match(/[?&]token=([^&]+)/);
+  if (m) {
+    token = decodeURIComponent(m[1]);
+    sessionStorage.setItem("j0kers-token", token);
+    history.replaceState(null, "", location.pathname);
+  }
+})();
 
 const $ = id => document.getElementById(id);
 /* join a browse path and entry name with the OS's separator (the server

@@ -93,6 +93,7 @@ public sealed class ServerConfig
         [JsonPropertyName("rtspPort")] public int? RtspPort { get; set; }
         [JsonPropertyName("hlsPort")] public int? HlsPort { get; set; }
         [JsonPropertyName("controlPort")] public int? ControlPort { get; set; }
+        [JsonPropertyName("authToken")] public string? AuthToken { get; set; }
     }
 
     private SettingsOverrides _persistedSettings = new();
@@ -125,6 +126,7 @@ public sealed class ServerConfig
         if (s.RtspPort is not null) _persistedSettings.RtspPort = s.RtspPort;
         if (s.HlsPort is not null) _persistedSettings.HlsPort = s.HlsPort;
         if (s.ControlPort is not null) _persistedSettings.ControlPort = s.ControlPort;
+        if (s.AuthToken is not null) _persistedSettings.AuthToken = s.AuthToken;
         File.WriteAllText(SettingsFile, JsonSerializer.Serialize(_persistedSettings, JsonOpts));
     }
 
@@ -141,6 +143,23 @@ public sealed class ServerConfig
         if (s.RtspPort is int rp) Rtsp.Port = rp;
         if (s.HlsPort is int hp) Hls.Port = hp;
         if (s.ControlPort is int cp) Control.Port = cp;
+        if (!string.IsNullOrWhiteSpace(s.AuthToken)) Control.AuthToken = s.AuthToken;
+    }
+
+    /// <summary>
+    /// When the control API is exposed beyond loopback with no token, mint a
+    /// random one and persist it — so a media server on the LAN is never
+    /// silently unauthenticated. Returns the token if one was generated.
+    /// </summary>
+    public string? EnsureControlToken()
+    {
+        var loopback = Control.BindAddress is "127.0.0.1" or "localhost" or "::1";
+        if (loopback || Control.AuthToken.Length > 0) return null;
+        var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16))
+            .ToLowerInvariant();
+        Control.AuthToken = token;
+        try { UpdateSettings(new SettingsOverrides { AuthToken = token }); } catch { }
+        return token;
     }
 
     private sealed class MountSidecar

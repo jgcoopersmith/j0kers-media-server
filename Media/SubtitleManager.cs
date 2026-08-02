@@ -92,51 +92,60 @@ public sealed class SubtitleManager
     /// WebVTT in the stream's subs directory and records it. Returns the
     /// new track, or null when the file can't be converted.
     /// </summary>
+    private static readonly object AttachLock = new();
+
     public Track? AttachFile(string subtitleFile, string subsDir, string? label = null)
     {
         if (!_ffmpeg.Available || !File.Exists(subtitleFile)) return null;
         Directory.CreateDirectory(subsDir);
 
-        var existing = LoadUserTracks(subsDir);
-        var id = "usr" + existing.Count;
-        var outPath = Path.Combine(subsDir, id + ".vtt");
-
-        var args = $"-v error -y {CharsetArg(subtitleFile)}-i \"{subtitleFile}\" -c:s webvtt \"{outPath}\"";
-        if (!(RunFfmpeg(args) && File.Exists(outPath)))
+        // serialize the read-modify-write of user.json: two concurrent
+        // attaches used to pick the same id and clobber each other
+        lock (AttachLock)
         {
-            Log.Warn("subs", $"could not convert {Path.GetFileName(subtitleFile)} to WebVTT");
-            return null;
-        }
+            var existing = LoadUserTracks(subsDir);
+            // never reuse an id whose file is already on disk, even if
+            // user.json was unreadable a moment ago
+            var n = existing.Count;
+            while (File.Exists(Path.Combine(subsDir, $"usr{n}.vtt"))) n++;
+            var id = "usr" + n;
+            var outPath = Path.Combine(subsDir, id + ".vtt");
 
-        var stem = Path.GetFileNameWithoutExtension(subtitleFile);
-        var lang = stem.Split('.', '_', '-').LastOrDefault(s => s.Length is 2 or 3) ?? "";
-        var track = new UserTrack
-        {
-            Id = id,
-            Label = string.IsNullOrWhiteSpace(label) ? stem : label!,
-            Language = ShortLanguage(lang),
-        };
-        existing.Add(track);
-        File.WriteAllText(UserFile(subsDir),
-            JsonSerializer.Serialize(existing, new JsonSerializerOptions { WriteIndented = true }));
-        Log.Info("subs", $"attached subtitle {Path.GetFileName(subtitleFile)} as {id}");
-        return new Track(track.Id, track.Label + " (added)", track.Language, "user", true, "vtt");
-    }
+            var args = new List<string> { "-v", "error", "-y" };
+            var charset = CharsetArg(subtitleFile);
+            if (charset is not null) args.AddRange(new[] { "-sub_charenc", charset });
+            args.AddRange(new[] { "-i", subtitleFile, "-c:s", "webvtt", outPath });
 
-    private string FfprobePath
-    {
-        get
-        {
-            var dir = Path.GetDirectoryName(_ffmpeg.FfmpegPath);
-            var name = OperatingSystem.IsWindows() ? "ffprobe.exe" : "ffprobe";
-            if (!string.IsNullOrEmpty(dir))
+            if (!(RunFfmpeg(args) && File.Exists(outPath)))
             {
-                var beside = Path.Combine(dir, name);
-                if (File.Exists(beside)) return beside;
+                Log.Warn("subs", $"could not convert {Path.GetFileName(subtitleFile)} to WebVTT");
+                return null;
             }
-            return "ffprobe"; // PATH
+
+            var stem = Path.GetFileNameWithoutExtension(subtitleFile);
+            var lang = stem.Split('.', '_', '-').LastOrDefault(s => s.Length is 2 or 3) ?? "";
+            var track = new UserTrack
+            {
+                Id = id,
+                Label = string.IsNullOrWhiteSpace(label) ? stem : label!,
+                Language = ShortLanguage(lang),
+            };
+            existing.Add(track);
+            try
+            {
+                File.WriteAllText(UserFile(subsDir),
+                    JsonSerializer.Serialize(existing, new JsonSerializerOptions { WriteIndented = true }));
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("subs", $"attached but could not record {id}: {ex.Message}");
+            }
+            Log.Info("subs", $"attached subtitle {Path.GetFileName(subtitleFile)} as {id}");
+            return new Track(track.Id, track.Label + " (added)", track.Language, "user", true, "vtt");
         }
     }
+
+    private string FfprobePath => _ffmpeg.FfprobePath;
 
     /// <summary>All subtitle tracks available for a media file.</summary>
     public IReadOnlyList<Track> List(string mediaFile)
@@ -153,15 +162,21 @@ public sealed class SubtitleManager
         var results = new List<Track>();
         try
         {
-            var args = $"-v error -select_streams s -show_entries stream=index,codec_name:stream_tags=language,title " +
-                       $"-of json \"{mediaFile}\"";
-            using var p = Process.Start(new ProcessStartInfo(FfprobePath, args)
+            var psi = new ProcessStartInfo(FfprobePath)
             {
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
-            });
+            };
+            foreach (var a in new[]
+                     {
+                         "-v", "error", "-select_streams", "s",
+                         "-show_entries", "stream=index,codec_name:stream_tags=language,title",
+                         "-of", "json", mediaFile,
+                     })
+                psi.ArgumentList.Add(a);
+            using var p = Process.Start(psi);
             if (p is null) return results;
             var json = p.StandardOutput.ReadToEnd();
             p.WaitForExit(15_000);
@@ -198,21 +213,37 @@ public sealed class SubtitleManager
         return results;
     }
 
+    /// <summary>
+    /// Sidecar subtitle files belonging to a media file, in a stable order.
+    /// The name must match exactly or be followed by a separator, otherwise
+    /// "Episode 1.mkv" would also claim "Episode 10.en.srt".
+    /// </summary>
+    private static IEnumerable<string> SidecarFiles(string mediaFile)
+    {
+        var dir = Path.GetDirectoryName(Path.GetFullPath(mediaFile));
+        if (dir is null || !Directory.Exists(dir)) return Enumerable.Empty<string>();
+        var baseName = Path.GetFileNameWithoutExtension(mediaFile);
+
+        return Directory.EnumerateFiles(dir)
+            .Where(f => SidecarExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()))
+            .Where(f =>
+            {
+                var stem = Path.GetFileNameWithoutExtension(f);
+                if (!stem.StartsWith(baseName, StringComparison.OrdinalIgnoreCase)) return false;
+                if (stem.Length == baseName.Length) return true;
+                return stem[baseName.Length] is '.' or '_' or '-' or ' ';
+            })
+            .OrderBy(f => f, StringComparer.OrdinalIgnoreCase);
+    }
+
     private static IEnumerable<Track> Sidecars(string mediaFile)
     {
         var results = new List<Track>();
         try
         {
-            var dir = Path.GetDirectoryName(Path.GetFullPath(mediaFile));
-            if (dir is null || !Directory.Exists(dir)) return results;
             var baseName = Path.GetFileNameWithoutExtension(mediaFile);
-
             var index = 0;
-            foreach (var file in Directory.EnumerateFiles(dir)
-                         .Where(f => SidecarExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()))
-                         .Where(f => Path.GetFileNameWithoutExtension(f)
-                             .StartsWith(baseName, StringComparison.OrdinalIgnoreCase))
-                         .OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+            foreach (var file in SidecarFiles(mediaFile))
             {
                 // "movie.en.srt" / "movie.English.forced.srt" → the bit after the base name
                 var stem = Path.GetFileNameWithoutExtension(file);
@@ -242,31 +273,44 @@ public sealed class SubtitleManager
         if (File.Exists(outPath)) return outPath;
         Directory.CreateDirectory(cacheDir);
 
-        string args;
+        // convert to a temp file and move into place, so two concurrent
+        // requests can't serve (and permanently cache) a half-written VTT
+        var temp = Path.Combine(cacheDir, $"{safeId}.{Environment.CurrentManagedThreadId}.tmp.vtt");
+        var args = new List<string> { "-v", "error", "-y" };
+
         if (safeId.StartsWith("emb", StringComparison.OrdinalIgnoreCase))
         {
             if (!int.TryParse(safeId[3..], out var ordinal)) return null;
             var track = List(mediaFile).FirstOrDefault(t => t.Id == safeId);
             if (track is { Supported: false }) return null;
-            args = $"-v error -y -i \"{mediaFile}\" -map 0:s:{ordinal} -c:s webvtt \"{outPath}\"";
+            args.AddRange(new[] { "-i", mediaFile, "-map", $"0:s:{ordinal}", "-c:s", "webvtt", temp });
         }
         else if (safeId.StartsWith("ext", StringComparison.OrdinalIgnoreCase))
         {
             if (!int.TryParse(safeId[3..], out var index)) return null;
-            var dir = Path.GetDirectoryName(Path.GetFullPath(mediaFile));
-            var baseName = Path.GetFileNameWithoutExtension(mediaFile);
-            var sidecar = Directory.EnumerateFiles(dir!)
-                .Where(f => SidecarExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()))
-                .Where(f => Path.GetFileNameWithoutExtension(f)
-                    .StartsWith(baseName, StringComparison.OrdinalIgnoreCase))
-                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
-                .Skip(index).FirstOrDefault();
+            var sidecar = SidecarFiles(mediaFile).Skip(index).FirstOrDefault();
             if (sidecar is null) return null;
-            args = $"-v error -y {CharsetArg(sidecar)}-i \"{sidecar}\" -c:s webvtt \"{outPath}\"";
+            var charset = CharsetArg(sidecar);
+            if (charset is not null) args.AddRange(new[] { "-sub_charenc", charset });
+            args.AddRange(new[] { "-i", sidecar, "-c:s", "webvtt", temp });
         }
         else return null;
 
-        if (RunFfmpeg(args) && File.Exists(outPath)) return outPath;
+        if (RunFfmpeg(args) && File.Exists(temp))
+        {
+            try
+            {
+                File.Move(temp, outPath, overwrite: true);
+                return outPath;
+            }
+            catch
+            {
+                // another request won the race and already published it
+                try { File.Delete(temp); } catch { }
+                if (File.Exists(outPath)) return outPath;
+            }
+        }
+        try { File.Delete(temp); } catch { }
 
         Log.Warn("subs", $"could not convert track {safeId} of {Path.GetFileName(mediaFile)}");
         return null;
@@ -278,39 +322,42 @@ public sealed class SubtitleManager
     /// containing the offending bytes — so the encoding has to be detected
     /// up front and declared with -sub_charenc.
     /// </summary>
-    private static string CharsetArg(string file)
+    private static string? CharsetArg(string file)
     {
         try
         {
             var bytes = File.ReadAllBytes(file);
-            if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) return "";   // UTF-8 BOM
-            if (bytes.Length >= 2 && ((bytes[0] == 0xFF && bytes[1] == 0xFE) || (bytes[0] == 0xFE && bytes[1] == 0xFF))) return ""; // UTF-16
+            if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) return null;   // UTF-8 BOM
+            if (bytes.Length >= 2 && ((bytes[0] == 0xFF && bytes[1] == 0xFE) || (bytes[0] == 0xFE && bytes[1] == 0xFF))) return null; // UTF-16
             new UTF8Encoding(false, throwOnInvalidBytes: true).GetString(bytes);
-            return ""; // valid UTF-8
+            return null; // valid UTF-8
         }
         catch (DecoderFallbackException)
         {
-            return "-sub_charenc CP1252 ";
+            return "CP1252";
         }
         catch
         {
-            return "";
+            return null;
         }
     }
 
-    private bool RunFfmpeg(string args)
+    private bool RunFfmpeg(IEnumerable<string> args)
     {
         try
         {
-            using var p = Process.Start(new ProcessStartInfo(_ffmpeg.FfmpegPath, args)
+            var psi = new ProcessStartInfo(_ffmpeg.FfmpegPath)
             {
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
-            });
+            };
+            foreach (var a in args) psi.ArgumentList.Add(a);
+            using var p = Process.Start(psi);
             if (p is null) return false;
             p.StandardError.ReadToEnd();
-            return p.WaitForExit(60_000) && p.ExitCode == 0;
+            if (!p.WaitForExit(60_000)) { try { p.Kill(true); } catch { } return false; }
+            return p.ExitCode == 0;
         }
         catch
         {
@@ -321,16 +368,25 @@ public sealed class SubtitleManager
     private static string ShortLanguage(string lang) =>
         lang.Length == 0 ? "" : LanguageCodes.TryGetValue(lang, out var s) ? s : lang.ToLowerInvariant();
 
+    /// <summary>
+    /// Display names for the common languages. A lookup table rather than
+    /// CultureInfo because the build runs with InvariantGlobalization, where
+    /// constructing a specific culture throws.
+    /// </summary>
+    private static readonly Dictionary<string, string> LanguageNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["en"] = "English", ["es"] = "Spanish", ["fr"] = "French", ["de"] = "German",
+        ["it"] = "Italian", ["pt"] = "Portuguese", ["ru"] = "Russian", ["ja"] = "Japanese",
+        ["ko"] = "Korean", ["zh"] = "Chinese", ["nl"] = "Dutch", ["sv"] = "Swedish",
+        ["no"] = "Norwegian", ["da"] = "Danish", ["fi"] = "Finnish", ["pl"] = "Polish",
+        ["tr"] = "Turkish", ["ar"] = "Arabic", ["he"] = "Hebrew", ["hi"] = "Hindi",
+        ["cs"] = "Czech", ["el"] = "Greek", ["hu"] = "Hungarian", ["ro"] = "Romanian",
+        ["uk"] = "Ukrainian", ["vi"] = "Vietnamese", ["th"] = "Thai", ["id"] = "Indonesian",
+    };
+
     private static string LanguageName(string lang)
     {
-        try
-        {
-            var code = ShortLanguage(lang);
-            return new System.Globalization.CultureInfo(code).EnglishName;
-        }
-        catch
-        {
-            return lang.ToUpperInvariant();
-        }
+        var code = ShortLanguage(lang);
+        return LanguageNames.TryGetValue(code, out var name) ? name : lang.ToUpperInvariant();
     }
 }

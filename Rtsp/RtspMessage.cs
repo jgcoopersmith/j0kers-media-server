@@ -54,7 +54,9 @@ public sealed class RtspResponse
         StatusCode = statusCode;
         ReasonPhrase = ReasonFor(statusCode);
         Headers["CSeq"] = cseq.ToString();
-        Headers["Date"] = DateTime.UtcNow.ToString("ddd, dd MMM yyyy HH:mm:ss 'GMT'");
+        // RFC 1123 date — must be English/invariant regardless of system locale
+        Headers["Date"] = DateTime.UtcNow.ToString("ddd, dd MMM yyyy HH:mm:ss 'GMT'",
+            System.Globalization.CultureInfo.InvariantCulture);
     }
 
     public RtspResponse With(string header, string value)

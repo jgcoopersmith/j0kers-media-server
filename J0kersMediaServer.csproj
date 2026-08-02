@@ -9,6 +9,9 @@
     <AssemblyName>j0kers-media-server</AssemblyName>
     <Version>0.1.0</Version>
     <ApplicationIcon>assets\j0kers.ico</ApplicationIcon>
+    <!-- Protocol text (HLS EXTINF, RTSP dates) must never be locale-formatted:
+         a de-DE machine would otherwise emit "#EXTINF:6,000," and break playback. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
   <ItemGroup>

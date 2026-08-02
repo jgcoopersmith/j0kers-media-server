@@ -105,6 +105,25 @@ public sealed class ControlApi : IDisposable
     private static readonly Lazy<byte[]> Dashboard = new(() => LoadResource("dashboard.html"));
     private static readonly Lazy<byte[]> HlsJs = new(() => LoadResource("hls.min.js"));
 
+    /// <summary>
+    /// True when a state-changing request originates from a different site.
+    /// Uses Sec-Fetch-Site (sent by every modern browser) and, as a fallback,
+    /// an Origin whose host doesn't match ours. curl/VLC/etc. send neither
+    /// and are treated as first-party (they can't be a CSRF vector).
+    /// </summary>
+    private static bool IsCrossSite(HttpListenerContext ctx)
+    {
+        var fetchSite = ctx.Request.Headers["Sec-Fetch-Site"];
+        if (fetchSite is not null)
+            return fetchSite is not ("same-origin" or "same-site" or "none");
+
+        var origin = ctx.Request.Headers["Origin"];
+        if (!string.IsNullOrEmpty(origin) && Uri.TryCreate(origin, UriKind.Absolute, out var o))
+            return !string.Equals(o.Host, ctx.Request.Url?.Host, StringComparison.OrdinalIgnoreCase);
+
+        return false;
+    }
+
     private void Handle(HttpListenerContext ctx)
     {
         var res = ctx.Response;
@@ -157,6 +176,16 @@ public sealed class ControlApi : IDisposable
             var path = ctx.Request.Url?.AbsolutePath ?? "/";
             var method = ctx.Request.HttpMethod;
 
+            // CSRF: a state-changing request from another website must be
+            // refused even on loopback with no token, or any page the user
+            // visits could POST to us. Browsers stamp cross-site requests;
+            // non-browser clients (curl/VLC) send neither header and pass.
+            if (method is "POST" or "DELETE" or "PUT" && IsCrossSite(ctx))
+            {
+                WriteJson(res, 403, new { error = "cross-site request refused" });
+                return;
+            }
+
             // the dashboard signals page close with a beacon; any dashboard
             // heartbeat within the grace period cancels the shutdown (page
             // refreshes and multi-tab setups reconnect within a second)
@@ -206,8 +235,15 @@ public sealed class ControlApi : IDisposable
                     return;
 
                 case ("GET", "/api/config"):
-                    var redacted = JsonSerializer.Deserialize<JsonElement>(_serverConfig.ToJson());
-                    WriteJson(res, 200, new { config = redacted, note = "control.authToken redacted" }, redactToken: true);
+                    // redact by replacing the value before serialization, not
+                    // by string-replacing the output (which missed tokens
+                    // containing +, ", or non-ASCII once JSON-escaped)
+                    var savedToken = _serverConfig.Control.AuthToken;
+                    _serverConfig.Control.AuthToken = savedToken.Length > 0 ? "***" : "";
+                    JsonElement redacted;
+                    try { redacted = JsonSerializer.Deserialize<JsonElement>(_serverConfig.ToJson()); }
+                    finally { _serverConfig.Control.AuthToken = savedToken; }
+                    WriteJson(res, 200, new { config = redacted, note = "control.authToken redacted" });
                     return;
 
                 case ("GET", "/api/mounts"):
@@ -768,7 +804,11 @@ public sealed class ControlApi : IDisposable
                 WriteJson(res, 400, new { error = "body must be { \"path\": \"...\", \"name\": \"optional\" }" });
                 return;
             }
-            var full = Path.GetFullPath(req.path);
+            if (!TryLocalPath(req.path, out var full))
+            {
+                WriteJson(res, 400, new { error = "network paths are not allowed" });
+                return;
+            }
             var isFolder = Directory.Exists(full);
             if (!isFolder && !System.IO.File.Exists(full))
             {
@@ -833,7 +873,19 @@ public sealed class ControlApi : IDisposable
                 WriteJson(res, 404, new { error = "unknown stream" });
                 return;
             }
-            var file = Path.GetFullPath(req.file);
+            if (!TryLocalPath(req.file, out var file))
+            {
+                WriteJson(res, 400, new { error = "network paths are not allowed" });
+                return;
+            }
+            // only accept real subtitle files, so this can't be used to read
+            // arbitrary text files off disk as "subtitles"
+            var subExt = Path.GetExtension(file).ToLowerInvariant();
+            if (subExt is not (".srt" or ".vtt" or ".ass" or ".ssa" or ".sub" or ".smi" or ".sbv" or ".ttml" or ".dfxp"))
+            {
+                WriteJson(res, 400, new { error = "not a subtitle file (.srt, .ass, .vtt, .sub, .ssa, .smi)" });
+                return;
+            }
             if (!System.IO.File.Exists(file))
             {
                 WriteJson(res, 404, new { error = "subtitle file not found" });
@@ -871,7 +923,11 @@ public sealed class ControlApi : IDisposable
                 WriteJson(res, 400, new { error = "body must be { \"folder\": \"...\" }" });
                 return;
             }
-            var folder = Path.GetFullPath(req.folder);
+            if (!TryLocalPath(req.folder, out var folder))
+            {
+                WriteJson(res, 400, new { error = "network paths are not allowed" });
+                return;
+            }
             if (!Directory.Exists(folder))
             {
                 WriteJson(res, 404, new { error = "folder not found" });
@@ -902,7 +958,12 @@ public sealed class ControlApi : IDisposable
         var path = ctx.Request.QueryString["path"] ?? "";
         try
         {
-            var thumb = _ffmpeg?.GetThumbnail(Path.GetFullPath(path));
+            if (!TryLocalPath(path, out var full))
+            {
+                WriteJson(res, 400, new { error = "network paths are not allowed" });
+                return;
+            }
+            var thumb = _ffmpeg?.GetThumbnail(full);
             if (thumb is null)
             {
                 WriteJson(res, 404, new { error = "no thumbnail" });
@@ -937,7 +998,11 @@ public sealed class ControlApi : IDisposable
                 WriteJson(res, 400, new { error = "body must be { \"name\": \"...\", \"folder\": \"...\" }" });
                 return;
             }
-            var folder = Path.GetFullPath(req.folder);
+            if (!TryLocalPath(req.folder, out var folder))
+            {
+                WriteJson(res, 400, new { error = "network paths are not allowed" });
+                return;
+            }
             if (!Directory.Exists(folder))
             {
                 WriteJson(res, 404, new { error = "folder not found" });
@@ -981,7 +1046,12 @@ public sealed class ControlApi : IDisposable
                 WriteJson(res, 400, new { error = "height must be 0 (source), 360, 480, 720, or 1080" });
                 return;
             }
-            var (stream, ready) = _ffmpeg.StartVod(req.file, height);
+            if (!TryLocalPath(req.file, out var file))
+            {
+                WriteJson(res, 400, new { error = "network paths are not allowed" });
+                return;
+            }
+            var (stream, ready) = _ffmpeg.StartVod(file, height);
             WriteJson(res, 200, new { stream, ready, playlist = $"/{stream}/index.m3u8" });
         }
         catch (FileNotFoundException)
@@ -1041,7 +1111,11 @@ public sealed class ControlApi : IDisposable
         var path = ctx.Request.QueryString["path"] ?? "";
         try
         {
-            var full = Path.GetFullPath(path);
+            if (!TryLocalPath(path, out var full))
+            {
+                WriteJson(res, 400, new { error = "network paths are not allowed" });
+                return;
+            }
             if (!System.IO.File.Exists(full) || !ImageTypes.TryGetValue(Path.GetExtension(full), out var mime))
             {
                 WriteJson(res, 404, new { error = "not an image" });
@@ -1115,7 +1189,12 @@ public sealed class ControlApi : IDisposable
                     WriteJson(res, 400, new { error = "file source requires a file path" });
                     return;
                 }
-                var full = Path.IsPathRooted(mount.File) ? mount.File : Path.Combine(_baseDirectory, mount.File);
+                var rawFile = Path.IsPathRooted(mount.File) ? mount.File : Path.Combine(_baseDirectory, mount.File);
+                if (!TryLocalPath(rawFile, out var full))
+                {
+                    WriteJson(res, 400, new { error = "network paths are not allowed" });
+                    return;
+                }
                 if (!System.IO.File.Exists(full))
                 {
                     WriteJson(res, 400, new { error = "file not found: " + full });
@@ -1191,7 +1270,11 @@ public sealed class ControlApi : IDisposable
 
         try
         {
-            var full = Path.GetFullPath(path);
+            if (!TryLocalPath(path, out var full))
+            {
+                WriteJson(res, 400, new { error = "network paths are not allowed" });
+                return;
+            }
             if (!Directory.Exists(full))
             {
                 WriteJson(res, 404, new { error = "directory not found", path = full });
@@ -1231,11 +1314,36 @@ public sealed class ControlApi : IDisposable
         }
     }
 
-    private void WriteJson(HttpListenerResponse res, int status, object body, bool redactToken = false)
+    /// <summary>
+    /// Canonicalizes a path and rejects network paths. UNC targets
+    /// (\\host\share, //host/share) make the server open an outbound SMB
+    /// connection to an attacker-chosen host, leaking its NTLM credentials —
+    /// so those are refused on every path-taking endpoint regardless of who
+    /// is calling. Returns false (with full=null) when the path is unsafe.
+    /// </summary>
+    private static bool TryLocalPath(string? path, out string full)
+    {
+        full = "";
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        // reject UNC before canonicalizing (GetFullPath preserves the \\ prefix)
+        var p = path.Replace('/', '\\');
+        if (p.StartsWith(@"\\", StringComparison.Ordinal)) return false;
+        try
+        {
+            var resolved = Path.GetFullPath(path);
+            if (resolved.StartsWith(@"\\", StringComparison.Ordinal)) return false; // e.g. \\?\UNC, mapped
+            full = resolved;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void WriteJson(HttpListenerResponse res, int status, object body)
     {
         var json = JsonSerializer.Serialize(body, new JsonSerializerOptions { WriteIndented = true });
-        if (redactToken && _config.AuthToken.Length > 0)
-            json = json.Replace(_config.AuthToken, "***");
         var bytes = Encoding.UTF8.GetBytes(json);
         res.StatusCode = status;
         res.ContentType = "application/json";
