@@ -81,6 +81,32 @@ public sealed class HlsServer : IDisposable
             }
 
             var parts = path.Trim('/').Split('/');
+
+            // the watch page needs hls.js on this origin
+            if (parts.Length == 1 && parts[0] == "hls.min.js")
+            {
+                res.StatusCode = 200;
+                res.ContentType = "text/javascript";
+                res.Headers["Cache-Control"] = "max-age=86400";
+                res.ContentLength64 = HlsJsAsset.Value.Length;
+                res.OutputStream.Write(HlsJsAsset.Value);
+                return;
+            }
+
+            // /watch/<stream>: a self-contained player page that works in any
+            // browser (Android Chrome can't play a bare .m3u8 link natively)
+            if (parts.Length == 2 && parts[0] == "watch")
+            {
+                var wd = SafeStreamDirectory(parts[1]);
+                if (wd is null || !Directory.Exists(wd))
+                {
+                    WriteText(res, 404, "text/plain", "unknown stream");
+                    return;
+                }
+                WriteText(res, 200, "text/html; charset=utf-8", WatchPage(parts[1]));
+                return;
+            }
+
             if (parts.Length != 2)
             {
                 WriteText(res, 404, "text/plain", "not found");
@@ -247,6 +273,57 @@ public sealed class HlsServer : IDisposable
                 Thread.Sleep(50);
             }
         }
+    }
+
+    private static readonly Lazy<byte[]> HlsJsAsset = new(() =>
+    {
+        using var s = typeof(HlsServer).Assembly.GetManifestResourceStream("hls.min.js")!;
+        using var ms = new MemoryStream();
+        s.CopyTo(ms);
+        return ms.ToArray();
+    });
+
+    /// <summary>Minimal universal player page for one stream.</summary>
+    private static string WatchPage(string stream)
+    {
+        var name = System.Net.WebUtility.HtmlEncode(stream);
+        var src = "/" + Uri.EscapeDataString(stream) + "/index.m3u8";
+        return $$"""
+            <!doctype html>
+            <html lang="en">
+            <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>{{name}} — j0kers</title>
+            <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🃏</text></svg>">
+            <style>
+              body { margin: 0; background: #0d0d0d; color: #c3c2b7; font-family: system-ui, sans-serif; }
+              video { display: block; width: 100vw; max-height: 88vh; background: #000; }
+              .bar { padding: 10px 14px; font-size: 13px; }
+              a { color: #3987e5; }
+            </style>
+            <script src="/hls.min.js"></script>
+            </head>
+            <body>
+            <video id="v" controls playsinline></video>
+            <div class="bar">🃏 {{name}} · <a href="{{src}}">raw playlist</a> (for VLC etc.)</div>
+            <script>
+              const v = document.getElementById("v");
+              const src = "{{src}}";
+              if (window.Hls && Hls.isSupported()) {
+                const h = new Hls();
+                h.loadSource(src);
+                h.attachMedia(v);
+              } else if (v.canPlayType("application/vnd.apple.mpegurl")) {
+                v.src = src;
+              } else {
+                document.querySelector(".bar").textContent = "This browser cannot play HLS — open the raw playlist in VLC.";
+              }
+              v.play().catch(() => {}); // autoplay may need a tap; controls are visible
+            </script>
+            </body>
+            </html>
+            """;
     }
 
     private static void WriteText(HttpListenerResponse res, int status, string contentType, string body)

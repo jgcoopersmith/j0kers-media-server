@@ -224,6 +224,7 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `GET /api/thumb?path=` | cached JPEG thumbnail for a video or picture (ffmpeg) |
 | `GET/POST/DELETE /api/favorites` | list / pin / unpin quick-button media (persisted to `favorites.json`) |
 | `GET /api/codecs` | active transcode codecs + every encoder in the ffmpeg build |
+| `GET http://<host>:<hlsPort>/watch/<stream>` | universal player page for a stream (works on phones; links the raw m3u8 for VLC) |
 | `GET /api/image?path=` | serve a picture for the library viewer |
 | `POST /api/server/start` / `stop` | start / stop the streaming services |
 | `GET/POST /api/settings` | read / save hostname + ports (persisted to `settings.json`) |
