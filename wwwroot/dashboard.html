@@ -205,6 +205,15 @@
   .go { color: var(--good); border-color: color-mix(in srgb, var(--good) 45%, transparent); }
   .chk { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink); margin-top: 12px; cursor: pointer; }
   .chk input { width: 15px; height: 15px; flex: none; }
+  /* reveal toggle sitting inside a password field */
+  .pw { position: relative; }
+  .pw .am-in { padding-right: 36px; }
+  .pw-eye {
+    position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
+    border: none; background: none; padding: 2px 5px; font-size: 14px; line-height: 1;
+    opacity: .6; filter: grayscale(1);
+  }
+  .pw-eye:hover, .pw-eye.on { opacity: 1; filter: none; }
   .secret {
     font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all;
     background: var(--surface-2); border: 1px solid color-mix(in srgb, var(--good) 45%, transparent);
@@ -469,10 +478,16 @@
     <label>Username</label>
     <input id="login-user" class="am-in" autocomplete="username" autocapitalize="off" spellcheck="false">
     <label>Password</label>
-    <input id="login-pass" class="am-in" type="password" autocomplete="current-password">
+    <div class="pw">
+      <input id="login-pass" class="am-in" type="password" autocomplete="current-password">
+      <button type="button" class="pw-eye" data-pw="login-pass" aria-label="Show password" title="Show password">👁</button>
+    </div>
     <div id="login-confirm-row" style="display:none">
       <label>Confirm password</label>
-      <input id="login-pass2" class="am-in" type="password" autocomplete="new-password">
+      <div class="pw">
+        <input id="login-pass2" class="am-in" type="password" autocomplete="new-password">
+        <button type="button" class="pw-eye" data-pw="login-pass2" aria-label="Show password" title="Show password">👁</button>
+      </div>
     </div>
     <div id="login-code-row" style="display:none">
       <label>Setup code</label>
@@ -691,6 +706,7 @@ function showLogin() {
     "⚠ This page is served over plain HTTP, so your password crosses the network unencrypted. "
     + "On an untrusted network, reach it over a VPN or an HTTPS reverse proxy.";
   $("login-msg").textContent = "";
+  hidePasswords();
   $("login-overlay").style.display = "flex";
   setTimeout(() => $(($("login-user").value ? "login-pass" : "login-user")).focus(), 30);
 }
@@ -2355,6 +2371,31 @@ document.addEventListener("click", e => {
     case "key-revoke":  revokeKey(arg, el.dataset.user || null); break;
   }
 });
+
+/* 👁 reveals what's typed in a password field — useful when picking the
+   admin password, where a typo you can't see costs you a reset. */
+document.addEventListener("click", e => {
+  const eye = e.target.closest(".pw-eye");
+  if (!eye) return;
+  const input = $(eye.dataset.pw);
+  const show = input.type === "password";
+  input.type = show ? "text" : "password";
+  eye.textContent = show ? "🙈" : "👁";
+  eye.classList.toggle("on", show);
+  eye.title = eye.ariaLabel = show ? "Hide password" : "Show password";
+  input.focus();
+});
+
+/* Back to dots — so a revealed password isn't left on screen when the
+   dialog is reopened later. */
+function hidePasswords() {
+  for (const eye of document.querySelectorAll(".pw-eye")) {
+    $(eye.dataset.pw).type = "password";
+    eye.textContent = "👁";
+    eye.classList.remove("on");
+    eye.title = eye.ariaLabel = "Show password";
+  }
+}
 
 // Enter submits the sign-in form from any of its fields
 for (const id of ["login-user", "login-pass", "login-pass2", "login-code"])
