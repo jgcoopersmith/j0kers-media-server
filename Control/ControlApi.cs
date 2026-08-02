@@ -27,6 +27,7 @@ public sealed partial class ControlApi : IDisposable
 {
     private readonly ControlConfig _config;
     private readonly Auth.AuthService _auth;
+    private readonly Auth.MediaLink _mediaLinks;
     private readonly ServerConfig _serverConfig;
     private readonly Services.ServiceController _services;
     private readonly string _baseDirectory;
@@ -46,10 +47,12 @@ public sealed partial class ControlApi : IDisposable
     private readonly Media.FavoritesStore _favorites;
 
     public ControlApi(ServerConfig serverConfig, Services.ServiceController services, string baseDirectory,
-        Auth.AuthService auth, Media.FfmpegManager? ffmpeg = null, Action? requestShutdown = null)
+        Auth.AuthService auth, Auth.MediaLink mediaLinks,
+        Media.FfmpegManager? ffmpeg = null, Action? requestShutdown = null)
     {
         _config = serverConfig.Control;
         _auth = auth;
+        _mediaLinks = mediaLinks;
         _serverConfig = serverConfig;
         _services = services;
         _baseDirectory = baseDirectory;
@@ -407,6 +410,31 @@ public sealed partial class ControlApi : IDisposable
                         }),
                     });
                     return;
+            }
+
+            // A media token for the caller's own playback. The dashboard
+            // takes one all-streams token at startup and appends it to every
+            // HLS URL it builds; ?stream= narrows it to a single stream for
+            // a link you mean to hand to VLC, a TV, or someone else.
+            if (method == "GET" && path == "/api/media/token")
+            {
+                var stream = ctx.Request.QueryString["stream"];
+                var scope = string.IsNullOrWhiteSpace(stream) ? Auth.MediaLink.AllStreams : stream.Trim();
+                var hours = _serverConfig.Hls.LinkLifetimeHours;
+                var minted = _mediaLinks.Sign(scope, TimeSpan.FromHours(hours));
+                // also split out, because JSON escapes the '&' in `token`
+                // and a shell script shouldn't have to un-escape it
+                var pieces = minted.Split('&');
+                WriteJson(res, 200, new
+                {
+                    token = minted,
+                    exp = pieces[0]["exp=".Length..],
+                    sig = pieces[1]["sig=".Length..],
+                    scope,
+                    expiresUtc = DateTime.UtcNow.AddHours(hours),
+                    port = _serverConfig.Hls.Port,
+                });
+                return;
             }
 
             if (method == "GET" && path == "/api/preview")

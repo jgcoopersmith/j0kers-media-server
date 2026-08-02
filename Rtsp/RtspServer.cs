@@ -144,7 +144,14 @@ public sealed class RtspServer : IDisposable
     {
         try
         {
-            return request.Method.ToUpperInvariant() switch
+            // OPTIONS stays open so a client can discover the server (and
+            // learn it needs credentials) before being challenged; every
+            // method that reveals or delivers media does not.
+            var method = request.Method.ToUpperInvariant();
+            if (method != "OPTIONS" && RequiresCredentials(request) is RtspResponse challenge)
+                return challenge;
+
+            return method switch
             {
                 "OPTIONS" => HandleOptions(request),
                 "DESCRIBE" => HandleDescribe(request),
@@ -162,6 +169,35 @@ public sealed class RtspServer : IDisposable
             Log.Error("rtsp", $"{request.Method} {request.Uri} failed: {ex.Message}");
             return new RtspResponse(500, request.CSeq);
         }
+    }
+
+    /// <summary>Account lookup for RTSP credentials; null leaves RTSP open.</summary>
+    public Auth.AuthService? Accounts { get; set; }
+
+    /// <summary>
+    /// Returns a 401 challenge when this request needs credentials and
+    /// hasn't got valid ones, or null to let it through.
+    ///
+    /// This is HTTP Basic (RFC 7826 §19.1 defers to the HTTP schemes), not
+    /// Digest — deliberately. Digest requires the server to hold
+    /// MD5(user:realm:password), which means keeping a second, weak copy of
+    /// every password next to the PBKDF2 hashes and undoing the point of
+    /// hashing them. Basic hands over the password, so it verifies against
+    /// the real hash. It also puts the password on the wire, which on a LAN
+    /// already carrying unencrypted HTTP and RTP is the same exposure the
+    /// rest of the server has. A key works here too, as the username with
+    /// any password, for clients you'd rather not give an account password.
+    /// </summary>
+    private RtspResponse? RequiresCredentials(RtspRequest request)
+    {
+        if (Accounts is null || !_config.Rtsp.RequireAuth || !Accounts.Enforcing) return null;
+
+        var header = request.Headers.TryGetValue("Authorization", out var value) ? value : null;
+        if (Accounts.VerifyRtspCredentials(header)) return null;
+
+        Log.Warn("rtsp", $"{request.Method} {request.Uri} refused: no valid credentials");
+        return new RtspResponse(401, request.CSeq)
+            .With("WWW-Authenticate", $"Basic realm=\"{_config.Rtsp.Realm}\"");
     }
 
     private RtspResponse HandleOptions(RtspRequest request) =>

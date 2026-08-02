@@ -191,6 +191,10 @@ catch (Exception ex)
 }
 var auth = new J0kersMediaServer.Auth.AuthService(userStore, config.Control.AuthToken);
 
+// Media URLs are authorized by signature, not by session: players can't
+// carry a cookie or a header.
+var mediaLinks = new J0kersMediaServer.Auth.MediaLink(baseDirectory);
+
 if (config.Control.Enabled && !auth.Enforcing)
 {
     var exposed = config.Control.BindAddress is not ("127.0.0.1" or "localhost" or "::1");
@@ -211,11 +215,13 @@ try
     {
         Subtitles = new J0kersMediaServer.Media.SubtitleManager(ffmpeg),
         Ffmpeg = ffmpeg,
+        Links = mediaLinks,
+        Sessions = auth,
     };
     services.StartServices();
     if (config.Control.Enabled)
     {
-        control = new ControlApi(config, services, baseDirectory, auth, ffmpeg,
+        control = new ControlApi(config, services, baseDirectory, auth, mediaLinks, ffmpeg,
             requestShutdown: () => shutdown.TrySetResult());
         services.OnHlsActivity = control.NoteActivity; // streaming keeps the server up
         control.Start();

@@ -130,7 +130,7 @@ public sealed class AuthService
     /// forms exist because &lt;audio&gt;/&lt;video&gt; elements cannot set
     /// headers; they are for keys only — a password never travels in a URL.
     /// </summary>
-    private static string? BearerValue(HttpListenerContext ctx)
+    private string? BearerValue(HttpListenerContext ctx)
     {
         var auth = ctx.Request.Headers["Authorization"];
         if (!string.IsNullOrEmpty(auth) && auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
@@ -141,8 +141,28 @@ public sealed class AuthService
         var header = ctx.Request.Headers["X-Api-Key"];
         if (!string.IsNullOrWhiteSpace(header)) return header.Trim();
 
+        // The query-string fallback exists for clients that cannot set a
+        // header. The dashboard no longer needs it — media has its own
+        // signed links and everything else is same-origin, so the cookie
+        // travels by itself — but scripts and players may still rely on it.
+        // A URL is a leaky place for a credential (history, logs, Referer),
+        // so it is warned about once per key and never accepted for
+        // anything but a key.
         var query = ctx.Request.QueryString["key"] ?? ctx.Request.QueryString["token"];
-        return string.IsNullOrWhiteSpace(query) ? null : query.Trim();
+        if (string.IsNullOrWhiteSpace(query)) return null;
+        WarnAboutKeyInUrl(ctx, query);
+        return query.Trim();
+    }
+
+    private readonly ConcurrentDictionary<string, byte> _urlKeyWarnings = new(StringComparer.Ordinal);
+
+    /// <summary>Says it once per credential, so a polling script doesn't fill the log.</summary>
+    private void WarnAboutKeyInUrl(HttpListenerContext ctx, string presented)
+    {
+        var id = Digest(presented);
+        if (!_urlKeyWarnings.TryAdd(id, 0)) return;
+        Log.Warn("auth", $"a credential arrived in the URL from {ClientKey(ctx)} " +
+                         "(?key=/?token=) — headers keep it out of logs and history");
     }
 
     private static string? ReadSessionCookie(HttpListenerContext ctx)
@@ -239,6 +259,34 @@ public sealed class AuthService
         };
         PruneSessions();
         return token;
+    }
+
+    /// <summary>
+    /// Checks an RTSP <c>Authorization: Basic</c> header. Accepts an account
+    /// username and password, or a key as the username (so a camera or a
+    /// set-top box can be given something revocable instead of a password).
+    /// </summary>
+    public bool VerifyRtspCredentials(string? header)
+    {
+        if (string.IsNullOrEmpty(header)) return false;
+        if (!header.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase)) return false;
+
+        string decoded;
+        try { decoded = Encoding.UTF8.GetString(Convert.FromBase64String(header["Basic ".Length..].Trim())); }
+        catch { return false; }
+
+        var split = decoded.IndexOf(':');
+        if (split < 0) return false;
+        var username = decoded[..split];
+        var password = decoded[(split + 1)..];
+
+        if (username.StartsWith(UserStore.KeyPrefix, StringComparison.Ordinal))
+            return _users.VerifyKey(username) is not null;
+        if (password.StartsWith(UserStore.KeyPrefix, StringComparison.Ordinal)
+            && _users.VerifyKey(password) is not null)
+            return true;
+
+        return _users.VerifyPassword(username, password) is not null;
     }
 
     public void Logout(HttpListenerContext ctx)

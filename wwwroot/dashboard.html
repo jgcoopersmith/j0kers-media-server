@@ -551,6 +551,26 @@ const POLL_MS = 2000, HISTORY = 60;          // 60 samples × 2 s = 2 min
 const hist = [];                              // {t: Date, pps: number}
 let lastPackets = null, lastTime = null;
 let hlsPort = null, rtspPort = null;
+/* Signed-URL token for the media port. Players can't send a cookie or a
+   header, so every HLS URL this page builds carries one instead. Refreshed
+   well before it expires so a long film never stalls on a dead link. */
+let mediaToken = "";
+async function refreshMediaToken() {
+  try {
+    const t = await api("/api/media/token");
+    mediaToken = t.token || "";
+    // re-mint at the two-thirds mark rather than waiting for expiry
+    const ms = Math.max(60000, (new Date(t.expiresUtc) - Date.now()) * 2 / 3);
+    setTimeout(refreshMediaToken, Math.min(ms, 2147483647));
+  } catch { mediaToken = ""; }
+}
+/* Every media URL goes through here, so there is exactly one place the
+   token can be forgotten. */
+function mediaUrl(pathAndQuery) {
+  const base = "http://" + location.hostname + ":" + hlsPort + pathAndQuery;
+  if (!mediaToken) return base;
+  return base + (base.includes("?") ? "&" : "?") + mediaToken;
+}
 /* The bearer credential: a device key from "remember this device", or a
    legacy control.authToken. Keys live in localStorage so a phone stays
    signed in across restarts; passwords are never stored anywhere — they
@@ -1077,22 +1097,22 @@ document.addEventListener("input", e => {
 
 async function refreshHls() {
   try {
-    const r = await fetch("http://" + location.hostname + ":" + hlsPort + "/");
+    const r = await fetch(mediaUrl("/"));
     const data = await r.json();
     $("t-hls").textContent = data.streams.length;
     $("t-hls-d").textContent = "on port " + hlsPort;
     if (!data.streams.length) { $("hls").innerHTML = '<div class="empty">No HLS streams. Drop segment files in a subfolder of the media root.</div>'; return; }
     let h = "";
     for (const s of data.streams) {
-      const url = "http://" + location.hostname + ":" + hlsPort + s.playlist;
+      const url = mediaUrl(s.playlist);
       // the watch page plays in any browser (phones included); the raw
       // m3u8 is linked from that page for VLC users
-      const watchUrl = "http://" + location.hostname + ":" + hlsPort + "/watch/" + encodeURIComponent(s.name);
+      const watchUrl = mediaUrl("/watch/" + encodeURIComponent(s.name));
       const transcoding = activeTranscodes.includes(s.name)
         ? '<span title="Transcode in progress — playable now, growing as it converts">⏳</span> ' : "";
       // small poster frame taken from the stream's own media; click to play.
       // Falls back to an icon if a frame can't be grabbed.
-      const posterUrl = "http://" + location.hostname + ":" + hlsPort + "/" + encodeURIComponent(s.name) + "/thumb.jpg";
+      const posterUrl = mediaUrl("/" + encodeURIComponent(s.name) + "/thumb.jpg");
       const thumb = '<img class="hls-thumb" src="' + esc(posterUrl) + '" alt=""'
         + ' data-act="hls-play" data-arg="' + esc(url) + '" title="' + esc(s.source || s.name) + '"'
         + ' onerror="this.replaceWith(Object.assign(document.createElement(\'span\'),'
@@ -1197,7 +1217,7 @@ $("pc-subadd").addEventListener("click", async () => {
   const data = await r.json().catch(() => ({}));
   if (!r.ok) { alert(data.error || "could not attach that file"); return; }
   // reload the list and switch to the new track
-  const url = "http://" + location.hostname + ":" + hlsPort + "/" + encodeURIComponent(currentStreamName) + "/index.m3u8";
+  const url = mediaUrl("/" + encodeURIComponent(currentStreamName) + "/index.m3u8");
   await loadSubtitles(url);
   $("pc-subs").value = data.added;
   applySubtitleChoice();
@@ -1550,10 +1570,10 @@ async function removeLibraryRoot(folder) {
 }
 
 /* ---- library browsing: grouped sections with thumbnails ---- */
+/* Same-origin, so the session cookie rides along on its own — putting a
+   long-lived key in an <img> URL would only leak it into history and logs. */
 function thumbUrl(path) {
-  let u = "/api/thumb?path=" + encodeURIComponent(path);
-  if (token) u += "&token=" + encodeURIComponent(token);
-  return u;
+  return "/api/thumb?path=" + encodeURIComponent(path);
 }
 
 async function loadLibrary(path) {
@@ -1805,9 +1825,7 @@ async function removePlaylist(name) {
 }
 
 function viewImage(path) {
-  let url = "/api/image?path=" + encodeURIComponent(path);
-  if (token) url += "&token=" + encodeURIComponent(token);
-  $("lightbox-img").src = url;
+  $("lightbox-img").src = "/api/image?path=" + encodeURIComponent(path);
   $("lightbox").style.display = "flex";
 }
 
@@ -1850,7 +1868,7 @@ async function playMedia(path, startAt) {
     const data = await r.json();
     if (!r.ok) { alert(data.error || "playback failed"); return; }
 
-    const url = "http://" + location.hostname + ":" + hlsPort + data.playlist;
+    const url = mediaUrl(data.playlist);
     $("hlsmsg") && ($("hlsmsg").textContent = "preparing " + name + "…");
     // wait for the transcoder to produce the playlist (usually 1–3 s)
     for (let i = 0; i < 40; i++) {
@@ -1914,7 +1932,7 @@ async function refreshChannels(force) {
   }
   let h = "";
   for (const c of data.channels) {
-    const url = "http://" + location.hostname + ":" + hlsPort + "/" + c.stream + "/index.m3u8";
+    const url = mediaUrl("/" + c.stream + "/index.m3u8");
     const live = c.status === "running";
     h += '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
       + '<span class="state ' + (live ? "playing" : "ready") + '"><span class="dot"></span></span>'
@@ -2281,14 +2299,16 @@ for (const id of ["acct-overlay", "users-overlay"])
    control.shutdownOnClose). The server waits 5 s before acting, so page
    refreshes and other open dashboard tabs cancel it by polling. */
 window.addEventListener("pagehide", () => {
-  let url = "/api/server/closing";
-  if (token) url += "?token=" + encodeURIComponent(token);
-  navigator.sendBeacon(url);
+  navigator.sendBeacon("/api/server/closing");
 });
 
 /* Establish who we are before the first poll, so the page never briefly
    renders administration controls to someone who isn't an administrator. */
-refreshAuth().then(ok => { if (ok) tick(); });
+refreshAuth().then(async ok => {
+  if (!ok) return;
+  await refreshMediaToken();   // before the first render, so no media URL goes out unsigned
+  tick();
+});
 setInterval(tick, POLL_MS);
 </script>
 </body>

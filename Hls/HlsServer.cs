@@ -28,6 +28,12 @@ public sealed class HlsServer : IDisposable
     private HttpListener? _listener;
     private readonly CancellationTokenSource _cts = new();
 
+    /// <summary>Signed-URL verifier; null leaves this port open as it was before accounts existed.</summary>
+    public Auth.MediaLink? Links { get; set; }
+
+    /// <summary>Lets a signed-in browser reach media directly; cookies are not port-scoped.</summary>
+    public Auth.AuthService? Sessions { get; set; }
+
     public HlsServer(HlsConfig config, string baseDirectory)
     {
         _config = config;
@@ -57,6 +63,108 @@ public sealed class HlsServer : IDisposable
         }
     }
 
+    /// <summary>
+    /// Media is authorized by a signed URL, or by a control-port session for
+    /// someone browsing here directly — cookies are scoped by host, not by
+    /// port, so a signed-in browser is already carrying one. With no signer
+    /// wired up (a server with no accounts) this port stays open exactly as
+    /// it was before.
+    /// </summary>
+    private bool Authorized(HttpListenerContext ctx, string scope)
+    {
+        // follows account existence live: claiming the server mid-session
+        // starts enforcing here too, without a restart
+        if (Links is null || Sessions is null || !Sessions.Enforcing) return true;
+
+        var q = ctx.Request.QueryString;
+        if (Links.Verify(scope, q["exp"], q["sig"])) return true;
+
+        return Sessions is not null
+            && Sessions.Authenticate(ctx).Level != Auth.AccessLevel.None;
+    }
+
+    /// <summary>The caller's token as a query suffix ("?exp=…&amp;sig=…"), or "" when they used a cookie.</summary>
+    private static string TokenQuery(HttpListenerContext ctx)
+    {
+        var q = ctx.Request.QueryString;
+        var exp = q["exp"];
+        var sig = q["sig"];
+        return exp is null || sig is null
+            ? ""
+            : $"?exp={Uri.EscapeDataString(exp)}&sig={Uri.EscapeDataString(sig)}";
+    }
+
+    /// <summary>
+    /// Appends the caller's token to every URI line of a playlist. A player
+    /// resolves segment URIs against the playlist's own URL but does *not*
+    /// inherit its query string, so without this the playlist would load and
+    /// then every segment would 401.
+    /// </summary>
+    private static string AppendTokenToUris(string playlist, string token)
+    {
+        if (token.Length == 0) return playlist;
+        var sb = new StringBuilder(playlist.Length + 64);
+        foreach (var line in playlist.Split('\n'))
+        {
+            var trimmed = line.TrimEnd('\r');
+            // comments and tags pass through; everything else is a URI.
+            // (EXT-X-MAP / EXT-X-MEDIA carry URIs in attributes — handled below.)
+            if (trimmed.Length == 0 || trimmed[0] == '#')
+                sb.Append(AppendTokenToUriAttribute(trimmed, token)).Append('\n');
+            else
+                sb.Append(trimmed).Append(trimmed.Contains('?') ? '&' : '?')
+                  .Append(token.AsSpan(1)).Append('\n');
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Same treatment for URI="…" attributes (fMP4 init segments, subtitle renditions).</summary>
+    private static string AppendTokenToUriAttribute(string line, string token)
+    {
+        const string marker = "URI=\"";
+        var at = line.IndexOf(marker, StringComparison.Ordinal);
+        if (at < 0) return line;
+        var start = at + marker.Length;
+        var end = line.IndexOf('"', start);
+        if (end < 0) return line;
+        var uri = line[start..end];
+        if (uri.Length == 0) return line;
+        var joined = uri + (uri.Contains('?') ? "&" : "?") + token[1..];
+        return line[..start] + joined + line[end..];
+    }
+
+    /// <summary>
+    /// Reflects the requesting origin when it is this same machine, so the
+    /// dashboard on the control port can read playlists cross-port, without
+    /// handing every website on the internet the same access. A configured
+    /// value other than the default still wins.
+    /// </summary>
+    private void ApplyCors(HttpListenerContext ctx)
+    {
+        var configured = _config.CorsAllowOrigin;
+        if (configured.Length > 0 && configured != "*")
+        {
+            ctx.Response.Headers["Access-Control-Allow-Origin"] = configured;
+            return;
+        }
+
+        var origin = ctx.Request.Headers["Origin"];
+        if (string.IsNullOrEmpty(origin))
+        {
+            // no Origin at all: a player, not a page — nothing to gate
+            if (configured == "*") ctx.Response.Headers["Access-Control-Allow-Origin"] = "*";
+            return;
+        }
+        if (Uri.TryCreate(origin, UriKind.Absolute, out var o)
+            && string.Equals(o.Host, ctx.Request.Url?.Host, StringComparison.OrdinalIgnoreCase))
+        {
+            ctx.Response.Headers["Access-Control-Allow-Origin"] = origin;
+            ctx.Response.Headers["Vary"] = "Origin";
+            return;
+        }
+        if (configured == "*") ctx.Response.Headers["Access-Control-Allow-Origin"] = "*";
+    }
+
     private void Handle(HttpListenerContext ctx)
     {
         var res = ctx.Response;
@@ -70,21 +178,17 @@ public sealed class HlsServer : IDisposable
             }
 
             OnActivity?.Invoke(); // watching keeps the server alive
-            res.Headers["Access-Control-Allow-Origin"] = _config.CorsAllowOrigin;
+            ApplyCors(ctx);
             res.Headers["Cache-Control"] = "no-cache";
 
             var path = ctx.Request.Url?.AbsolutePath ?? "/";
             Log.Debug("hls", $"{ctx.Request.RemoteEndPoint} GET {path}");
 
-            if (path == "/")
-            {
-                WriteText(res, 200, "application/json", ListStreamsJson());
-                return;
-            }
-
             var parts = path.Trim('/').Split('/');
 
-            // the watch page needs hls.js on this origin
+            // the watch page needs hls.js on this origin; a third-party
+            // library file with nothing in it to protect stays open, or the
+            // player page can't bootstrap
             if (parts.Length == 1 && parts[0] == "hls.min.js")
             {
                 res.StatusCode = 200;
@@ -92,6 +196,30 @@ public sealed class HlsServer : IDisposable
                 res.Headers["Cache-Control"] = "max-age=86400";
                 res.ContentLength64 = HlsJsAsset.Value.Length;
                 res.OutputStream.Write(HlsJsAsset.Value);
+                return;
+            }
+
+            // The stream this request is for decides which token authorizes
+            // it; the index is only reachable with an all-streams token.
+            var scope = parts.Length >= 2 && parts[0] == "watch" ? parts[1]
+                : parts.Length >= 1 && parts[0].Length > 0 ? parts[0]
+                : Auth.MediaLink.AllStreams;
+            if (!Authorized(ctx, scope))
+            {
+                Log.Warn("hls", $"unauthorized {ctx.Request.RemoteEndPoint} GET {path}");
+                WriteText(res, 401, "text/plain",
+                    "unauthorized — open this stream from the dashboard, or use a share link");
+                return;
+            }
+
+            // the token the caller arrived with, carried through to every URL
+            // this response hands back (segments, subtitles, the poster) so
+            // playback doesn't stall on the second request
+            var token = TokenQuery(ctx);
+
+            if (path == "/")
+            {
+                WriteText(res, 200, "application/json", ListStreamsJson());
                 return;
             }
 
@@ -105,7 +233,7 @@ public sealed class HlsServer : IDisposable
                     WriteText(res, 404, "text/plain", "unknown stream");
                     return;
                 }
-                WriteText(res, 200, "text/html; charset=utf-8", WatchPage(parts[1]));
+                WriteText(res, 200, "text/html; charset=utf-8", WatchPage(parts[1], token));
                 return;
             }
 
@@ -148,7 +276,7 @@ public sealed class HlsServer : IDisposable
             // /<stream>/subs.json — the track list for this stream
             if (parts[1] == "subs.json")
             {
-                WriteText(res, 200, "application/json", SubtitleListJson(streamDir));
+                WriteText(res, 200, "application/json", SubtitleListJson(streamDir, token));
                 return;
             }
 
@@ -205,12 +333,13 @@ public sealed class HlsServer : IDisposable
                         text += "#EXT-X-ENDLIST\n";
                     }
 
-                    WriteText(res, 200, "application/vnd.apple.mpegurl", text);
+                    WriteText(res, 200, "application/vnd.apple.mpegurl", AppendTokenToUris(text, token));
                     return;
                 }
                 if (parts[1] is "index.m3u8" or "playlist.m3u8")
                 {
-                    WriteText(res, 200, "application/vnd.apple.mpegurl", BuildPlaylist(streamDir));
+                    WriteText(res, 200, "application/vnd.apple.mpegurl",
+                        AppendTokenToUris(BuildPlaylist(streamDir), token));
                     return;
                 }
                 WriteText(res, 404, "text/plain", "not found");
@@ -363,7 +492,7 @@ public sealed class HlsServer : IDisposable
     /// <summary>Raised on every request so a pending shutdown can be cancelled.</summary>
     public Action? OnActivity { get; set; }
 
-    private string SubtitleListJson(string streamDir)
+    private string SubtitleListJson(string streamDir, string token = "")
     {
         var tracks = new List<Media.SubtitleManager.Track>();
         if (Subtitles is not null)
@@ -381,7 +510,7 @@ public sealed class HlsServer : IDisposable
                 language = t.Language,
                 kind = t.Kind,
                 supported = t.Supported,
-                url = $"/{Path.GetFileName(streamDir)}/subs/{t.Id}.vtt",
+                url = $"/{Path.GetFileName(streamDir)}/subs/{t.Id}.vtt{token}",
             }),
         });
     }
@@ -406,7 +535,7 @@ public sealed class HlsServer : IDisposable
     });
 
     /// <summary>Minimal universal player page for one stream.</summary>
-    private static string WatchPage(string stream)
+    private static string WatchPage(string stream, string token = "")
     {
         // readable label for the page; the stream id itself is unchanged
         var pretty = System.Net.WebUtility.HtmlEncode(Media.StreamTitle.Prettify(stream));
@@ -415,7 +544,10 @@ public sealed class HlsServer : IDisposable
         // <script>, so an HTML-encoded name would arrive as literal "&amp;" and
         // its subs.json fetch would 404. JSON-encode it instead.
         var nameJs = System.Text.Json.JsonSerializer.Serialize(stream);
-        var src = "/" + Uri.EscapeDataString(stream) + "/index.m3u8";
+        // a share link's token has to travel on to the playlist and the
+        // subtitle list, or the page loads and then nothing plays
+        var src = "/" + Uri.EscapeDataString(stream) + "/index.m3u8" + token;
+        var tokenJs = System.Text.Json.JsonSerializer.Serialize(token);
         return $$"""
             <!doctype html>
             <html lang="en">
@@ -460,7 +592,7 @@ public sealed class HlsServer : IDisposable
                 document.querySelector(".bar").textContent = "This browser cannot play HLS — open the raw playlist in VLC.";
               }
               // subtitles: same-origin tracks, exposed through the native CC menu
-              fetch("/" + encodeURIComponent(stream) + "/subs.json")
+              fetch("/" + encodeURIComponent(stream) + "/subs.json" + {{tokenJs}})
                 .then(r => r.ok ? r.json() : null)
                 .then(d => {
                   for (const t of (d && d.tracks) || []) {

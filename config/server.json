@@ -13,7 +13,8 @@
     "sessionTimeoutSeconds": 60,      // advertised in the Session header (RFC 7826 §18.49)
     "allowInterleavedTcp": true,      // RTP/AVP/TCP interleaved transport (RFC 7826 §14)
     "maxSessions": 64,
-    "realm": "j0kers"
+    "realm": "j0kers",
+    "requireAuth": true               // once an account exists: rtsp://user:pass@host:8554/mount
   },
 
   "rtp": {
@@ -31,7 +32,8 @@
     "mediaRoot": "media",             // each subdirectory = one stream
     "targetDurationSeconds": 6,       // EXT-X-TARGETDURATION (RFC 8216 §4.3.3.1)
     "liveWindowSegments": 0,          // 0 = VOD playlists; N>0 = sliding live window
-    "corsAllowOrigin": "*"
+    "corsAllowOrigin": "",            // "" = this machine's own pages only; "*" = any website
+    "linkLifetimeHours": 12           // how long a signed media link stays playable
   },
 
   "control": {

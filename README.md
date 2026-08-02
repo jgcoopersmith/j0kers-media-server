@@ -264,6 +264,7 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `POST /api/auth/setup` | create the first administrator account (first run only) |
 | `POST /api/auth/login` / `logout` | password → session cookie / drop the session |
 | `POST /api/auth/session` | key → session cookie (how a remembered device skips the form) |
+| `GET /api/media/token[?stream=x]` | signed-link token for the media port (all streams, or one) |
 | `POST /api/auth/password` | change your own password |
 | `GET/POST/DELETE /api/auth/keys` | list / mint / revoke your own keys |
 | `GET/POST/PUT/DELETE /api/users` | list / create / edit / remove accounts (admin) |
@@ -329,6 +330,52 @@ curl "http://localhost:9090/api/thumb?path=…&key=jmk_…"
 Revoking a key, disabling an account, or changing a password takes effect
 on the very next request.
 
+### Media: signed links, not sessions
+
+A player is not a browser. VLC, a Chromecast, a smart TV and a bare
+`<video>` element can fetch a URL and nothing else — no header, no login
+form, often no cookie. So the HLS port authorizes by **signed URL**:
+
+```
+/movie/index.m3u8?exp=1785754138&sig=2i5ceBW1XUTa8Rvw1CG6fVoqmkx9jmLYz2eAFAeHWGw
+```
+
+`sig` is HMAC-SHA256 over the scope and the expiry, keyed by a per-install
+secret in `signing.key`. `GET /api/media/token` mints one — no `stream=`
+for an all-streams token (what the dashboard uses and refreshes on its
+own), or `?stream=x` for a single-stream link to hand to a player. The
+generated playlist carries the token through to every segment URI, because
+players don't inherit a playlist's query string. Tokens expire (12 h by
+default, `hls.linkLifetimeHours`), carry no identity, and grant playback
+only — a leaked one costs an afternoon of access to one stream, not the
+server.
+
+A signed-in browser can also just browse to the media port directly:
+cookies are scoped by host, not by port, so the control-port session works
+there too.
+
+RTSP asks for credentials the way every RTSP client already understands:
+
+```bash
+ffplay "rtsp://jay:mypassword@localhost:8554/test"
+```
+
+`OPTIONS` stays open so a client can discover the server and learn it needs
+credentials; everything that reveals or delivers media does not. A key
+works in place of the username, for a camera or set-top box you'd rather
+not hand an account password. Set `rtsp.requireAuth: false` to leave RTSP
+open.
+
+> **Why Basic and not Digest.** Digest needs the server to hold
+> `MD5(user:realm:password)` — a second, weak copy of every password sitting
+> next to the PBKDF2 hashes, undoing the point of hashing them. Basic hands
+> over the password, so it verifies against the real hash. It does put the
+> password on the wire, which on a LAN already carrying unencrypted HTTP
+> and RTP is the exposure the rest of the server already has.
+
+Both media ports stay open until an account exists, so nothing breaks on a
+server you haven't claimed.
+
 State-changing requests carry two CSRF defenses: `Sec-Fetch-Site`/`Origin`
 rejection for anything cross-site, plus a required `X-J0kers-CSRF` header
 whenever the caller is authenticated by cookie — which a cross-origin page
@@ -344,7 +391,7 @@ so existing scripts keep running.
 ## Layout
 
 ```
-Auth/           accounts, password hashing, sessions, API keys
+Auth/           accounts, password hashing, sessions, API keys, signed media links
 Configuration/  JSON config model, env overrides, validation
 Rtsp/           RTSP parser, server, sessions, SDP
 Rtp/            RTP packetization, RTCP sender reports, port allocator

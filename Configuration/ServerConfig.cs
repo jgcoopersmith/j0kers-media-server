@@ -316,6 +316,13 @@ public sealed class RtspConfig
     [JsonPropertyName("allowInterleavedTcp")] public bool AllowInterleavedTcp { get; set; } = true;
     [JsonPropertyName("maxSessions")] public int MaxSessions { get; set; } = 64;
     [JsonPropertyName("realm")] public string Realm { get; set; } = "j0kers";
+
+    /// <summary>
+    /// Require an account on RTSP once one exists — play with
+    /// <c>rtsp://user:password@host:8554/mount</c>, which VLC, ffplay and
+    /// every other client understand. Set false to leave RTSP open.
+    /// </summary>
+    [JsonPropertyName("requireAuth")] public bool RequireAuth { get; set; } = true;
 }
 
 public sealed class RtpConfig
@@ -338,7 +345,20 @@ public sealed class HlsConfig
     [JsonPropertyName("targetDurationSeconds")] public int TargetDurationSeconds { get; set; } = 6;
     /// <summary>Sliding-window size for live playlists; 0 = VOD (full playlist + EXT-X-ENDLIST).</summary>
     [JsonPropertyName("liveWindowSegments")] public int LiveWindowSegments { get; set; } = 0;
-    [JsonPropertyName("corsAllowOrigin")] public string CorsAllowOrigin { get; set; } = "*";
+    /// <summary>
+    /// Origin allowed to read playlists cross-origin. The default reflects
+    /// this machine's own pages (the dashboard sits on another port, which
+    /// is a separate origin) and refuses everyone else. Set "*" to go back
+    /// to letting any website read them.
+    /// </summary>
+    [JsonPropertyName("corsAllowOrigin")] public string CorsAllowOrigin { get; set; } = "";
+
+    /// <summary>
+    /// How long a signed media link stays valid. Long enough to watch a
+    /// film without the URL dying mid-playback; short enough that a leaked
+    /// link isn't permanent.
+    /// </summary>
+    [JsonPropertyName("linkLifetimeHours")] public int LinkLifetimeHours { get; set; } = 12;
 }
 
 public sealed class ControlConfig

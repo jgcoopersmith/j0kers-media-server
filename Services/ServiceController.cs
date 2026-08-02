@@ -27,6 +27,10 @@ public sealed class ServiceController : IDisposable
     /// <summary>Attached to each HLS server so streams can render poster frames.</summary>
     public Media.FfmpegManager? Ffmpeg { get; set; }
 
+    /// <summary>Signed-URL verifier and session lookup, handed to each media server it starts.</summary>
+    public Auth.MediaLink? Links { get; set; }
+    public Auth.AuthService? Sessions { get; set; }
+
     private Action? _onHlsActivity;
 
     /// <summary>Invoked on each HLS request; also applied to a running server.</summary>
@@ -53,7 +57,7 @@ public sealed class ServiceController : IDisposable
             if (Running) return;
             if (_config.Rtsp.Enabled)
             {
-                Rtsp = new RtspServer(_config, _baseDirectory);
+                Rtsp = new RtspServer(_config, _baseDirectory) { Accounts = Sessions };
                 Rtsp.Start();
             }
             if (_config.Hls.Enabled)
@@ -63,6 +67,8 @@ public sealed class ServiceController : IDisposable
                     Subtitles = Subtitles,
                     Ffmpeg = Ffmpeg,
                     OnActivity = _onHlsActivity,
+                    Links = Links,
+                    Sessions = Sessions,
                 };
                 Hls.Start();
             }
