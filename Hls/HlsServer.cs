@@ -37,6 +37,9 @@ public sealed class HlsServer : IDisposable
     /// <summary>Who is watching right now, inferred from request traffic (see HlsViewers).</summary>
     public HlsViewers? Viewers { get; set; }
 
+    /// <summary>Server-wide byte counter behind the dashboard's throughput figure.</summary>
+    public Services.Throughput? Served { get; set; }
+
     public HlsServer(HlsConfig config, string baseDirectory)
     {
         _config = config;
@@ -382,6 +385,7 @@ public sealed class HlsServer : IDisposable
             // the segment is the actual media — this is what makes the
             // dashboard's byte counter mean anything
             Viewers?.Note(ctx, parts[0], watcher, fs.Length);
+            Served?.Add(fs.Length);
             fs.CopyTo(res.OutputStream);
         }
         catch (Exception ex)

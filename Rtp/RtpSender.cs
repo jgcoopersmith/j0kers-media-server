@@ -37,6 +37,9 @@ public sealed class RtpSender : IDisposable
     private Task? _pumpTask;
     private readonly object _stateLock = new();
 
+    /// <summary>Server-wide byte counter this sender contributes to; null when not wired up.</summary>
+    public Services.Throughput? Served { get; set; }
+
     public bool Playing { get; private set; }
     public int LocalRtpPort { get; }
     public int LocalRtcpPort { get; }
@@ -171,6 +174,10 @@ public sealed class RtpSender : IDisposable
                 _timestamp += MediaSourceFactory.FrameSamples;
                 _packetsSent++;
                 _octetsSent += (uint)frame.Length;
+                // feeds the dashboard's server-wide throughput figure; the
+                // per-session counters above are RTCP's, and reset with the
+                // session
+                Served?.Add(packet.Length);
 
                 if (_config.RtcpEnabled &&
                     Environment.TickCount64 - lastRtcp >= _config.RtcpIntervalSeconds * 1000)

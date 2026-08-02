@@ -85,16 +85,6 @@
   .card h2 { font-size: 13px; margin: 0 0 10px; font-weight: 600; color: var(--ink-2); text-transform: uppercase; letter-spacing: .7px; }
   .card h2 .note { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--muted); margin-left: 8px; }
 
-  #chartbox { position: relative; }
-  #chart { width: 100%; height: 75px; display: block; }
-  #tooltip {
-    position: absolute; pointer-events: none; display: none;
-    background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
-    padding: 5px 9px; font-size: 12px; color: var(--ink); white-space: nowrap;
-    transform: translate(-50%, -130%);
-  }
-  #tooltip .t { color: var(--muted); }
-
   table { width: 100%; border-collapse: collapse; }
   th { text-align: left; color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; font-weight: 500; padding: 4px 10px 8px 0; border-bottom: 1px solid var(--grid); }
   td { padding: 8px 10px 8px 0; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; color: var(--ink-2); }
@@ -124,8 +114,6 @@
   #hlsvideo { width: 100%; border-radius: 10px; background: #000; max-height: 320px; }
   #hlsmsg { color: var(--muted); font-size: 12px; margin-top: 6px; }
 
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-  @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
 
   details summary { cursor: pointer; color: var(--ink-2); font-size: 13px; user-select: none; }
   pre {
@@ -318,24 +306,14 @@
 
   <div class="tiles">
     <div class="tile"><div class="k">Active sessions</div><div class="v" id="t-sessions">–</div><div class="d" id="t-sessions-d">of – max</div></div>
-    <div class="tile"><div class="k">RTP throughput</div><div class="v" id="t-pps">–</div><div class="d">packets / second</div></div>
+    <div class="tile"><div class="k">Throughput</div><div class="v" id="t-pps">–</div><div class="d" id="t-pps-d">across all streams</div></div>
     <div class="tile"><div class="k">Uptime</div><div class="v" id="t-uptime">–</div><div class="d" id="t-uptime-d">&nbsp;</div></div>
     <div class="tile"><div class="k">HLS streams</div><div class="v" id="t-hls">–</div><div class="d" id="t-hls-d">on port –</div></div>
   </div>
 
-  <div class="grid2">
-    <div class="card">
-      <h2>RTP packets / second<span class="note">last 2 minutes</span></h2>
-      <div id="chartbox">
-        <svg id="chart" preserveAspectRatio="none"></svg>
-        <div id="tooltip"></div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Sessions</h2>
-      <div id="sessions"></div>
-    </div>
+  <div class="card">
+    <h2>Sessions</h2>
+    <div id="sessions"></div>
   </div>
 
   <div class="card">
@@ -549,9 +527,9 @@
 
 <script>
 "use strict";
-const POLL_MS = 2000, HISTORY = 60;          // 60 samples × 2 s = 2 min
-const hist = [];                              // {t: Date, pps: number}
-let lastPackets = null, lastTime = null;
+const POLL_MS = 2000;
+// previous reading of the server's cumulative byte counter, for the rate
+let lastBytes = null, lastTime = null;
 let hlsPort = null, rtspPort = null;
 /* Signed-URL token for the media port. Players can't send a cookie or a
    header, so every HLS URL this page builds carries one instead. Refreshed
@@ -879,7 +857,9 @@ function fmtUptime(s) {
   if (s < 86400) return Math.floor(s / 3600) + "h " + Math.floor(s % 3600 / 60) + "m";
   return Math.floor(s / 86400) + "d " + Math.floor(s % 86400 / 3600) + "h";
 }
-const fmtNum = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n);
+const fmtRate = bps => bps >= 1048576 ? (bps / 1048576).toFixed(1) + " MB/s"
+  : bps >= 1024 ? Math.round(bps / 1024) + " KB/s"
+  : Math.round(bps) + " B/s";
 
 async function tick() {
   let status, sessions;
@@ -912,18 +892,17 @@ async function tick() {
   $("t-uptime").textContent = fmtUptime(status.uptimeSeconds);
   $("t-uptime-d").textContent = status.server;
 
-  // throughput from packet-count deltas (RTSP only — HLS is plain file
-  // fetches, and its volume shows as bytes per viewer in the table)
-  const total = sessions.sessions.reduce((a, s) => a + ((s.rtp && s.rtp.packetsSent) || 0), 0);
+  // Everything the server is pushing out right now — RTP and HLS together —
+  // from the server's own monotonic byte counter, so a viewer leaving can't
+  // make the rate go backwards.
+  const served = status.bytesServed || 0;
   const now = performance.now();
-  let pps = 0;
-  if (lastPackets !== null && total >= lastPackets && now > lastTime)
-    pps = Math.round((total - lastPackets) / ((now - lastTime) / 1000));
-  lastPackets = total; lastTime = now;
-  hist.push({ t: new Date(), pps });
-  if (hist.length > HISTORY) hist.shift();
-  $("t-pps").textContent = fmtNum(pps);
-  drawChart();
+  if (lastBytes !== null && served >= lastBytes && now > lastTime) {
+    const rate = (served - lastBytes) / ((now - lastTime) / 1000);
+    $("t-pps").textContent = fmtRate(rate);
+    $("t-pps-d").textContent = fmtBytes(served) + " total";
+  }
+  lastBytes = served; lastTime = now;
 
   activeTranscodes = status.transcodes || [];
   renderSessions(sessions.sessions);
@@ -2227,62 +2206,6 @@ async function copyText(btn, text) {
   btn.classList.add("copied");
   btn.textContent = "Copied";
   setTimeout(() => { btn.classList.remove("copied"); btn.textContent = "Copy"; }, 1200);
-}
-
-/* ---- chart: single-series line + area, hairline grid, hover crosshair ---- */
-function drawChart() {
-  const svg = $("chart");
-  const W = svg.clientWidth || 800, H = 75, PAD = { l: 40, r: 8, t: 6, b: 14 };
-  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
-  const css = getComputedStyle(document.documentElement);
-  const col = n => css.getPropertyValue(n).trim();
-
-  const max = Math.max(60, ...hist.map(p => p.pps));
-  const x = i => PAD.l + (W - PAD.l - PAD.r) * (i / (HISTORY - 1));
-  const y = v => PAD.t + (H - PAD.t - PAD.b) * (1 - v / max);
-  const start = HISTORY - hist.length;
-
-  let grid = "", labels = "";
-  for (const f of [0, 0.5, 1]) {
-    const v = Math.round(max * f), yy = y(v);
-    grid += '<line x1="' + PAD.l + '" y1="' + yy + '" x2="' + (W - PAD.r) + '" y2="' + yy + '" stroke="' + col("--grid") + '" stroke-width="1"/>';
-    labels += '<text x="' + (PAD.l - 6) + '" y="' + (yy + 4) + '" text-anchor="end" font-size="10" fill="' + col("--muted") + '" style="font-variant-numeric:tabular-nums">' + fmtNum(v) + '</text>';
-  }
-
-  let line = "", area = "";
-  hist.forEach((p, i) => {
-    const px = x(start + i), py = y(p.pps);
-    line += (i ? " L" : "M") + px.toFixed(1) + " " + py.toFixed(1);
-  });
-  if (hist.length > 1) {
-    area = line + " L" + x(HISTORY - 1).toFixed(1) + " " + y(0) + " L" + x(start).toFixed(1) + " " + y(0) + " Z";
-  }
-
-  svg.innerHTML =
-    grid + labels +
-    '<line x1="' + PAD.l + '" y1="' + y(0) + '" x2="' + (W - PAD.r) + '" y2="' + y(0) + '" stroke="' + col("--baseline") + '" stroke-width="1"/>' +
-    (area ? '<path d="' + area + '" fill="' + col("--series-1") + '" opacity="0.12"/>' : "") +
-    (hist.length > 1 ? '<path d="' + line + '" fill="none" stroke="' + col("--series-1") + '" stroke-width="2" stroke-linejoin="round"/>' : "") +
-    '<g id="cross" style="display:none"><line id="crossline" y1="' + PAD.t + '" y2="' + y(0) + '" stroke="' + col("--muted") + '" stroke-width="1" stroke-dasharray="3 3"/>' +
-    '<circle id="crossdot" r="4" fill="' + col("--series-1") + '" stroke="' + col("--surface") + '" stroke-width="2"/></g>';
-
-  svg.onmousemove = ev => {
-    if (hist.length < 2) return;
-    const rect = svg.getBoundingClientRect();
-    const mx = (ev.clientX - rect.left) * (W / rect.width);
-    let i = Math.round((mx - PAD.l) / ((W - PAD.l - PAD.r) / (HISTORY - 1))) - start;
-    i = Math.max(0, Math.min(hist.length - 1, i));
-    const p = hist[i], px = x(start + i), py = y(p.pps);
-    const g = $("cross"); g.style.display = "";
-    const cl = $("crossline"); cl.setAttribute("x1", px); cl.setAttribute("x2", px);
-    const cd = $("crossdot"); cd.setAttribute("cx", px); cd.setAttribute("cy", py);
-    const tip = $("tooltip");
-    tip.style.display = "block";
-    tip.style.left = (px / W * rect.width) + "px";
-    tip.style.top = (py / H * rect.height) + "px";
-    tip.innerHTML = "<b>" + fmtNum(p.pps) + "</b> pkt/s <span class='t'>· " + p.t.toLocaleTimeString() + "</span>";
-  };
-  svg.onmouseleave = () => { const g = $("cross"); if (g) g.style.display = "none"; $("tooltip").style.display = "none"; };
 }
 
 /* Delegated clicks for all rendered rows. Arguments travel as data-arg

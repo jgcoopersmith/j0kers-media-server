@@ -174,6 +174,9 @@ public sealed class RtspServer : IDisposable
     /// <summary>Account lookup for RTSP credentials; null leaves RTSP open.</summary>
     public Auth.AuthService? Accounts { get; set; }
 
+    /// <summary>Server-wide byte counter, handed to each session's sender.</summary>
+    public Services.Throughput? Served { get; set; }
+
     /// <summary>
     /// Returns a 401 challenge when this request needs credentials and
     /// hasn't got valid ones, or null to let it through.
@@ -288,6 +291,7 @@ public sealed class RtspServer : IDisposable
         };
         // incoming RTCP from the client counts as liveness (UDP writes never fail)
         sender.OnReceiverActivity = session.Touch;
+        sender.Served = Served;
 
         if (!_sessions.TryAdd(session))
         {

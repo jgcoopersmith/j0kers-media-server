@@ -370,6 +370,9 @@ public sealed partial class ControlApi : IDisposable
                             videoCodec = _ffmpeg?.VideoEncoder,
                             audioCodec = _ffmpeg?.AudioEncoder,
                         },
+                        // monotonic: the dashboard differences consecutive
+                        // readings into a live rate
+                        bytesServed = _services.Served.TotalBytes,
                         transcodes = _ffmpeg?.ActiveVodStreams ?? (IReadOnlyList<string>)Array.Empty<string>(),
                     });
                     return;

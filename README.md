@@ -33,7 +33,7 @@ or in VLC: *Media → Open Network Stream* → `rtsp://localhost:8554/test`.
 
 The **dashboard** opens automatically in your browser at
 [http://localhost:9090/](http://localhost:9090/) — live session table with
-terminate buttons, RTP throughput chart, mounts with copyable `rtsp://`
+terminate buttons, server throughput, mounts with copyable `rtsp://`
 URIs, HLS stream list, and the effective config. (Set
 `control.openDashboardOnStart` to `false` for headless use.)
 
@@ -63,8 +63,9 @@ from the same client for the same stream are one viewing, live until they
 stop for 90 seconds (long enough that a player which has buffered ahead
 and gone quiet doesn't vanish mid-film; it shows as *buffered* rather than
 *playing*). There's no connection to cut, so those rows have no Terminate
-button — revoke the account or key instead. The RTP throughput chart counts
-RTSP packets only; HLS volume shows as bytes per viewer in the table.
+button — revoke the account or key instead. The **Throughput** tile is the
+whole server's output rate, RTP and HLS together, taken from a monotonic
+byte counter so a viewer leaving can't push the rate negative.
 
 The header has a **⏻ Start/Stop** button that stops or starts the streaming
 services (RTSP + HLS) while the dashboard stays up, a **👥 Users** dialog for

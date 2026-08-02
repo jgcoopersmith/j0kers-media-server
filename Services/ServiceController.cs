@@ -38,6 +38,13 @@ public sealed class ServiceController : IDisposable
     /// </summary>
     public HlsViewers Viewers { get; } = new();
 
+    /// <summary>
+    /// Every byte of media the server has sent, across RTP and HLS. Owned
+    /// here so it survives a services restart — a counter that resets when
+    /// the power button is used would show a huge negative rate.
+    /// </summary>
+    public Throughput Served { get; } = new();
+
     private Action? _onHlsActivity;
 
     /// <summary>Invoked on each HLS request; also applied to a running server.</summary>
@@ -64,7 +71,7 @@ public sealed class ServiceController : IDisposable
             if (Running) return;
             if (_config.Rtsp.Enabled)
             {
-                Rtsp = new RtspServer(_config, _baseDirectory) { Accounts = Sessions };
+                Rtsp = new RtspServer(_config, _baseDirectory) { Accounts = Sessions, Served = Served };
                 Rtsp.Start();
             }
             if (_config.Hls.Enabled)
@@ -77,6 +84,7 @@ public sealed class ServiceController : IDisposable
                     Links = Links,
                     Sessions = Sessions,
                     Viewers = Viewers,
+                    Served = Served,
                 };
                 Hls.Start();
             }
