@@ -302,6 +302,9 @@ public sealed class HlsServer : IDisposable
             streams = dirs.Select(d => new
             {
                 name = Path.GetFileName(d),
+                // readable label for display only — the name above is still
+                // the identity used in every URL
+                title = Media.StreamTitle.Prettify(Path.GetFileName(d)),
                 playlist = $"/{Path.GetFileName(d)}/index.m3u8",
                 // the media this stream was made from, so the dashboard can
                 // show its thumbnail (null for hand-made segment folders)
@@ -387,6 +390,8 @@ public sealed class HlsServer : IDisposable
     /// <summary>Minimal universal player page for one stream.</summary>
     private static string WatchPage(string stream)
     {
+        // readable label for the page; the stream id itself is unchanged
+        var pretty = System.Net.WebUtility.HtmlEncode(Media.StreamTitle.Prettify(stream));
         var name = System.Net.WebUtility.HtmlEncode(stream);   // for HTML text
         // for the <script> string literal: HTML entities aren't decoded inside
         // <script>, so an HTML-encoded name would arrive as literal "&amp;" and
@@ -399,7 +404,7 @@ public sealed class HlsServer : IDisposable
             <head>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>{{name}} — j0kers</title>
+            <title>{{pretty}} — j0kers</title>
             <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🃏</text></svg>">
             <style>
               body { margin: 0; background: #0d0d0d; color: #c3c2b7; font-family: system-ui, sans-serif; }
@@ -411,7 +416,8 @@ public sealed class HlsServer : IDisposable
             </head>
             <body>
             <video id="v" controls playsinline></video>
-            <div class="bar">🃏 {{name}} · <a href="{{src}}">raw playlist</a> (for VLC etc.)</div>
+            <div class="bar">🃏 {{pretty}} · <a href="{{src}}">raw playlist</a> (for VLC etc.)
+              <div style="color:#6f6e69;font-size:11px;margin-top:2px">{{name}}</div></div>
             <script>
               const v = document.getElementById("v");
               const src = "{{src}}";
