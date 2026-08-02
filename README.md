@@ -250,3 +250,16 @@ config/         sample/default server.json (runtime media/ and clips/ live here 
 ```bash
 dotnet build
 ```
+
+## Publish (standalone exe)
+
+```bash
+dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o publish
+```
+
+Produces `publish\j0kers-media-server.exe` (single file, needs the .NET 10
+runtime). Point a shortcut at it with the config path as the argument, e.g.
+`j0kers-media-server.exe "D:\...\config\server.json"` — sidecar data
+(mounts, channels, playlists, library, favorites, media cache) lives next
+to the config file, so a published exe and `dotnet run` share the same
+state. On Linux/macOS use `-r linux-x64` / `-r osx-arm64`.

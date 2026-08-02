@@ -1,5 +1,6 @@
 bin/
 obj/
+publish/
 *.user
 .vs/
 # runtime media/clip directories (anchored under config/ so the Media/
