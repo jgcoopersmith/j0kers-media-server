@@ -220,8 +220,10 @@ public sealed class FfmpegManager : IDisposable
 
         // cache key: same file+size+mtime+height+codecs → same output dir, converted once
         var key = Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(
-            $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}|{height}|{VideoEncoder}|{AudioEncoder}")))[..12].ToLowerInvariant();
-        var stream = "vod-" + key;
+            $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}|{height}|{VideoEncoder}|{AudioEncoder}")))[..8].ToLowerInvariant();
+        // readable link: filename slug + optional quality + short hash for uniqueness
+        var slug = Slugify(Path.GetFileNameWithoutExtension(info.Name));
+        var stream = $"vod-{slug}{(height > 0 ? $"-{height}p" : "")}-{key}";
         var dir = Path.Combine(_mediaRoot, stream);
         var playlist = Path.Combine(dir, "index.m3u8");
 
@@ -307,6 +309,20 @@ public sealed class FfmpegManager : IDisposable
 
     public bool IsVodReady(string stream) =>
         File.Exists(Path.Combine(_mediaRoot, stream, "index.m3u8"));
+
+    /// <summary>Filename → URL-safe lowercase slug (letters/digits/dashes, ≤48 chars).</summary>
+    private static string Slugify(string name)
+    {
+        var sb = new StringBuilder(name.Length);
+        foreach (var ch in name)
+        {
+            if (char.IsLetterOrDigit(ch)) sb.Append(char.ToLowerInvariant(ch));
+            else if (sb.Length > 0 && sb[^1] != '-') sb.Append('-');
+        }
+        var slug = sb.ToString().Trim('-');
+        if (slug.Length > 48) slug = slug[..48].TrimEnd('-');
+        return slug.Length > 0 ? slug : "media";
+    }
 
     // ---- thumbnails -----------------------------------------------------
 
