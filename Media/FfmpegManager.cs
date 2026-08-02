@@ -511,6 +511,73 @@ public sealed class FfmpegManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// A cached thumbnail for an HLS stream, taken from the stream's own
+    /// media rather than its source file — so it works for streams made
+    /// before source tracking existed, hand-dropped segment folders, and
+    /// live channels alike. Returns null if a frame can't be grabbed.
+    /// </summary>
+    public string? GetStreamThumbnail(string streamDir)
+    {
+        if (!Available || !Directory.Exists(streamDir)) return null;
+        var thumb = Path.Combine(streamDir, "thumb.jpg");
+        if (File.Exists(thumb)) return thumb;
+
+        // Take the frame from the MIDDLE of the stream: the opening frames of
+        // a movie are almost always black or a studio card, which makes a
+        // useless poster. fMP4 segments can't be decoded on their own (they
+        // need init.mp4), so those go through the playlist instead.
+        var playlist = Path.Combine(streamDir, "index.m3u8");
+        var isFmp4 = File.Exists(Path.Combine(streamDir, "init.mp4"));
+
+        var attempts = new List<(string input, string? seek)>();
+        if (!isFmp4)
+        {
+            var segs = Directory.EnumerateFiles(streamDir, "*.ts")
+                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase).ToList();
+            if (segs.Count > 0)
+            {
+                var mid = segs[segs.Count / 2];
+                attempts.Add((mid, "2"));   // a couple of seconds into a middle segment
+                attempts.Add((mid, null));  // that segment's first frame
+                attempts.Add((segs[0], null));
+            }
+        }
+        if (File.Exists(playlist))
+        {
+            attempts.Add((playlist, "60"));
+            attempts.Add((playlist, "5"));
+            attempts.Add((playlist, null));
+        }
+        if (attempts.Count == 0) return null;
+
+        var temp = Path.Combine(streamDir, $"thumb.{Environment.CurrentManagedThreadId}.tmp.jpg");
+        foreach (var (input, seek) in attempts)
+        {
+            var args = new List<string> { "-hide_banner", "-loglevel", "error", "-y" };
+            if (seek is not null) args.AddRange(new[] { "-ss", seek });
+            args.AddRange(new[] { "-i", input, "-frames:v", "1", "-vf", "scale=224:-2", "-q:v", "6", temp });
+
+            if (!(RunFfmpeg(args, 20_000) && File.Exists(temp))) { try { File.Delete(temp); } catch { } continue; }
+            // a fully black frame means we landed on a fade or leader — a real
+            // frame compresses to far more than a flat colour does
+            if (new FileInfo(temp).Length < 1200) { try { File.Delete(temp); } catch { } continue; }
+
+            try
+            {
+                File.Move(temp, thumb, overwrite: true);
+                return thumb;
+            }
+            catch
+            {
+                try { File.Delete(temp); } catch { }
+                return File.Exists(thumb) ? thumb : null;
+            }
+        }
+        try { File.Delete(temp); } catch { }
+        return null;
+    }
+
     /// <summary>Runs ffmpeg to completion with a timeout; true on exit code 0.</summary>
     private bool RunFfmpeg(IEnumerable<string> args, int timeoutMs = 30_000)
     {

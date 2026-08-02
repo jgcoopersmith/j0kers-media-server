@@ -177,6 +177,7 @@ try
     services = new J0kersMediaServer.Services.ServiceController(config, baseDirectory)
     {
         Subtitles = new J0kersMediaServer.Media.SubtitleManager(ffmpeg),
+        Ffmpeg = ffmpeg,
     };
     services.StartServices();
     if (config.Control.Enabled)

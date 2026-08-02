@@ -152,6 +152,25 @@ public sealed class HlsServer : IDisposable
                 return;
             }
 
+            // /<stream>/thumb.jpg — poster frame for the dashboard list
+            if (parts[1] == "thumb.jpg")
+            {
+                var poster = Ffmpeg?.GetStreamThumbnail(streamDir);
+                if (poster is null)
+                {
+                    WriteText(res, 404, "text/plain", "no thumbnail");
+                    return;
+                }
+                res.StatusCode = 200;
+                res.ContentType = "image/jpeg";
+                res.Headers["Cache-Control"] = "max-age=3600";
+                using var pfs = new FileStream(poster, FileMode.Open, FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete);
+                res.ContentLength64 = pfs.Length;
+                pfs.CopyTo(res.OutputStream);
+                return;
+            }
+
             if (parts[1].EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase))
             {
                 // A playlist written by a segmenter (ffmpeg VOD/live jobs)
@@ -227,6 +246,9 @@ public sealed class HlsServer : IDisposable
     {
         var segments = Directory.GetFiles(streamDir)
             .Where(f => SegmentExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()))
+            // init.mp4 is an initialization segment, not media — listing it
+            // (it also sorts first) produced an unplayable playlist
+            .Where(f => !Path.GetFileName(f).Equals("init.mp4", StringComparison.OrdinalIgnoreCase))
             .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
@@ -271,13 +293,20 @@ public sealed class HlsServer : IDisposable
     private string ListStreamsJson()
     {
         // dot-directories are internal (.thumbs thumbnail cache), not streams
-        var streams = Directory.Exists(_mediaRoot)
-            ? Directory.GetDirectories(_mediaRoot).Select(Path.GetFileName)
-                .Where(n => n is not null && !n.StartsWith('.'))
-            : Enumerable.Empty<string?>();
+        var dirs = Directory.Exists(_mediaRoot)
+            ? Directory.GetDirectories(_mediaRoot)
+                .Where(d => !Path.GetFileName(d).StartsWith('.'))
+            : Enumerable.Empty<string>();
         return System.Text.Json.JsonSerializer.Serialize(new
         {
-            streams = streams.Select(n => new { name = n, playlist = $"/{n}/index.m3u8" }),
+            streams = dirs.Select(d => new
+            {
+                name = Path.GetFileName(d),
+                playlist = $"/{Path.GetFileName(d)}/index.m3u8",
+                // the media this stream was made from, so the dashboard can
+                // show its thumbnail (null for hand-made segment folders)
+                source = Media.SubtitleManager.SourceFile(d),
+            }),
         });
     }
 
@@ -306,6 +335,9 @@ public sealed class HlsServer : IDisposable
 
     /// <summary>Set by Program so streams can expose their subtitles.</summary>
     public Media.SubtitleManager? Subtitles { get; set; }
+
+    /// <summary>Set by Program so streams can render their own poster frame.</summary>
+    public Media.FfmpegManager? Ffmpeg { get; set; }
 
     /// <summary>Raised on every request so a pending shutdown can be cancelled.</summary>
     public Action? OnActivity { get; set; }

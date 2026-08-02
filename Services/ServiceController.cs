@@ -24,6 +24,9 @@ public sealed class ServiceController : IDisposable
     /// <summary>Attached to each HLS server so streams can serve subtitles.</summary>
     public Media.SubtitleManager? Subtitles { get; set; }
 
+    /// <summary>Attached to each HLS server so streams can render poster frames.</summary>
+    public Media.FfmpegManager? Ffmpeg { get; set; }
+
     private Action? _onHlsActivity;
 
     /// <summary>Invoked on each HLS request; also applied to a running server.</summary>
@@ -58,6 +61,7 @@ public sealed class ServiceController : IDisposable
                 Hls = new HlsServer(_config.Hls, _baseDirectory)
                 {
                     Subtitles = Subtitles,
+                    Ffmpeg = Ffmpeg,
                     OnActivity = _onHlsActivity,
                 };
                 Hls.Start();
