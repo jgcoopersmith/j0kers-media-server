@@ -141,6 +141,10 @@ public sealed class HlsServer : IDisposable
                 return;
             }
 
+            // touch the directory so the VOD cache eviction treats a stream
+            // being watched right now as recently-used, not stale
+            try { Directory.SetLastWriteTimeUtc(streamDir, DateTime.UtcNow); } catch { }
+
             // /<stream>/subs.json — the track list for this stream
             if (parts[1] == "subs.json")
             {

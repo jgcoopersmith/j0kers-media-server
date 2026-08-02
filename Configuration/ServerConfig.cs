@@ -59,7 +59,20 @@ public sealed class ServerConfig
     private readonly HashSet<string> _removedMountPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _mountLock = new();
 
-    public bool IsDynamicMount(string path) => _dynamicMountPaths.Contains(path);
+    public bool IsDynamicMount(string path)
+    {
+        lock (_mountLock) return _dynamicMountPaths.Contains(path);
+    }
+
+    /// <summary>
+    /// A thread-safe copy of the mounts. Readers (RTSP SETUP/DESCRIBE, the
+    /// dashboard) must never enumerate the live list while another request
+    /// adds or removes a mount under the lock.
+    /// </summary>
+    public IReadOnlyList<MountConfig> MountsSnapshot()
+    {
+        lock (_mountLock) return Mounts.ToArray();
+    }
 
     public static ServerConfig Load(string? path)
     {

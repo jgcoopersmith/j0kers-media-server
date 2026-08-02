@@ -60,14 +60,17 @@ public sealed class RtspServer : IDisposable
 
     private async Task HandleConnectionAsync(TcpClient client, CancellationToken ct)
     {
-        var remote = (IPEndPoint)client.Client.RemoteEndPoint!;
-        Log.Debug("rtsp", $"connection from {remote}");
         var sessionsOnConnection = new List<string>();
-        var writeLock = new SemaphoreSlim(1, 1);
+        using var writeLock = new SemaphoreSlim(1, 1);
+        EndPoint? remote = null;
 
         try
         {
             using var _ = client;
+            // read the endpoint AFTER 'using' so a client that RSTs before we
+            // get here still disposes the socket instead of leaking it
+            remote = client.Client.RemoteEndPoint;
+            Log.Debug("rtsp", $"connection from {remote}");
             var stream = client.GetStream();
 
             // Serializes RTSP responses and interleaved RTP frames onto the one TCP stream.
@@ -109,7 +112,7 @@ public sealed class RtspServer : IDisposable
                 if (_config.Logging.LogRtspMessages)
                     Log.Debug("rtsp", $"{remote} → {request.Method} {request.Uri}");
 
-                var response = Dispatch(request, remote, WriteInterleavedAsync, sessionsOnConnection);
+                var response = Dispatch(request, (IPEndPoint)remote!, WriteInterleavedAsync, sessionsOnConnection);
                 await WriteAsync(response.Serialize());
 
                 if (_config.Logging.LogRtspMessages)
@@ -228,6 +231,8 @@ public sealed class RtspServer : IDisposable
             Sender = sender,
             ClientAddress = remote.Address.ToString(),
         };
+        // incoming RTCP from the client counts as liveness (UDP writes never fail)
+        sender.OnReceiverActivity = session.Touch;
 
         if (!_sessions.TryAdd(session))
         {
@@ -324,7 +329,7 @@ public sealed class RtspServer : IDisposable
             return ($"annc:{play}", () => new UlawFileSource(clip));
         }
 
-        foreach (var mount in _config.Mounts)
+        foreach (var mount in _config.MountsSnapshot())
         {
             if (path.Equals(mount.Path, StringComparison.OrdinalIgnoreCase) ||
                 path.StartsWith(mount.Path + "/", StringComparison.OrdinalIgnoreCase))

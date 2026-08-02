@@ -157,6 +157,10 @@ public static class RtspParser
 
         if (int.TryParse(request.Header("Content-Length"), out var len) && len > 0)
         {
+            // cap the body so a single connection can't demand a huge
+            // allocation (a lone "Content-Length: 2000000000" was an easy OOM)
+            if (len > 1024 * 1024)
+                throw new InvalidDataException($"RTSP body length {len} exceeds 1 MiB.");
             var body = new byte[len];
             await stream.ReadExactlyAsync(body, ct);
             request.Body = body;

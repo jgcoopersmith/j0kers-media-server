@@ -36,6 +36,7 @@ public sealed class ControlApi : IDisposable
     private readonly Media.SubtitleManager? _subtitles;
     private readonly Action? _requestShutdown;
     private Timer? _closeShutdownTimer;
+    private readonly object _shutdownLock = new();
 
     private RtspServer? RtspServer => _services.Rtsp;
     private readonly Media.PlaylistStore _playlists;
@@ -67,10 +68,13 @@ public sealed class ControlApi : IDisposable
     /// </summary>
     public void NoteActivity()
     {
-        if (_closeShutdownTimer is null) return;
-        Log.Info("control", "activity detected — shutdown cancelled");
-        _closeShutdownTimer.Dispose();
-        _closeShutdownTimer = null;
+        lock (_shutdownLock)
+        {
+            if (_closeShutdownTimer is null) return;
+            Log.Info("control", "activity detected — shutdown cancelled");
+            _closeShutdownTimer.Dispose();
+            _closeShutdownTimer = null;
+        }
     }
 
     public void Start()
@@ -193,13 +197,16 @@ public sealed class ControlApi : IDisposable
             {
                 if (_config.ShutdownOnClose && _requestShutdown is not null)
                 {
-                    Log.Info("control", "dashboard closed — shutting down in 5 s unless it reconnects");
-                    _closeShutdownTimer?.Dispose();
-                    _closeShutdownTimer = new Timer(_ =>
+                    lock (_shutdownLock)
                     {
-                        Log.Info("control", "no dashboard reconnected — shutting down");
-                        _requestShutdown();
-                    }, null, 5000, Timeout.Infinite);
+                        Log.Info("control", "dashboard closed — shutting down in 5 s unless it reconnects");
+                        _closeShutdownTimer?.Dispose();
+                        _closeShutdownTimer = new Timer(_ =>
+                        {
+                            Log.Info("control", "no dashboard reconnected — shutting down");
+                            _requestShutdown();
+                        }, null, 5000, Timeout.Infinite);
+                    }
                 }
                 WriteJson(res, 200, new { scheduled = _config.ShutdownOnClose });
                 return;
@@ -249,7 +256,7 @@ public sealed class ControlApi : IDisposable
                 case ("GET", "/api/mounts"):
                     WriteJson(res, 200, new
                     {
-                        mounts = _serverConfig.Mounts.Select(m => new
+                        mounts = _serverConfig.MountsSnapshot().Select(m => new
                         {
                             path = m.Path,
                             source = m.Source,
@@ -521,13 +528,15 @@ public sealed class ControlApi : IDisposable
             if (method == "DELETE" && path.StartsWith("/api/sessions/", StringComparison.Ordinal))
             {
                 var id = path["/api/sessions/".Length..];
-                var session = RtspServer?.Sessions.Get(id);
+                // capture once — a concurrent /api/server/stop can null Rtsp
+                var rtsp = RtspServer;
+                var session = rtsp?.Sessions.Get(id);
                 if (session is null)
                 {
                     WriteJson(res, 404, new { error = "session not found" });
                     return;
                 }
-                RtspServer!.Sessions.Remove(id);
+                rtsp!.Sessions.Remove(id);
                 Log.Info("control", $"session {id} terminated via control API");
                 WriteJson(res, 200, new { terminated = id });
                 return;
@@ -556,7 +565,7 @@ public sealed class ControlApi : IDisposable
     {
         var res = ctx.Response;
         var mountPath = ctx.Request.QueryString["mount"];
-        var mount = _serverConfig.Mounts.FirstOrDefault(m =>
+        var mount = _serverConfig.MountsSnapshot().FirstOrDefault(m =>
             string.Equals(m.Path, mountPath, StringComparison.OrdinalIgnoreCase));
         if (mount is null)
         {

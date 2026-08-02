@@ -78,6 +78,18 @@ public sealed class RtpSender : IDisposable
     public ushort NextSequence => _sequence;
     public uint CurrentTimestamp => _timestamp;
 
+    /// <summary>True for UDP transport (as opposed to TCP-interleaved).</summary>
+    public bool IsUdp => _rtpSocket is not null;
+
+    /// <summary>
+    /// Raised when the client sends anything on the RTCP socket (receiver
+    /// reports). Lets the session sweeper treat a UDP client as alive only
+    /// while it's actually there — a vanished UDP peer stops sending RTCP,
+    /// so its session (and RTP port pair) can be reclaimed. UDP writes never
+    /// throw, so this is the only liveness signal available.
+    /// </summary>
+    public Action? OnReceiverActivity { get; set; }
+
     public void Play()
     {
         lock (_stateLock)
@@ -86,24 +98,43 @@ public sealed class RtpSender : IDisposable
             Playing = true;
             _cts = new CancellationTokenSource();
             _pumpTask = Task.Run(() => PumpAsync(_cts.Token));
+            if (_rtcpSocket is not null)
+                _ = Task.Run(() => ReceiveRtcpAsync(_cts.Token));
+        }
+    }
+
+    private async Task ReceiveRtcpAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await _rtcpSocket!.ReceiveAsync(ct);
+                OnReceiverActivity?.Invoke();
+            }
+            catch (OperationCanceledException) { break; }
+            catch (Exception) { break; } // socket closed
         }
     }
 
     public void Pause()
     {
         Task? pump;
+        CancellationTokenSource? cts;
         lock (_stateLock)
         {
             if (!Playing) return;
             Playing = false;
-            _cts?.Cancel();
+            cts = _cts;
             _cts = null;
             pump = _pumpTask;
             _pumpTask = null;
         }
+        cts?.Cancel();
         // Wait for the old pump to wind down so a subsequent Play() can't
         // race it (stray packet with a duplicate sequence number).
         try { pump?.Wait(TimeSpan.FromMilliseconds(500)); } catch { }
+        cts?.Dispose();
     }
 
     private async Task PumpAsync(CancellationToken ct)

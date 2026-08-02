@@ -59,10 +59,13 @@ public sealed class SessionManager : IDisposable
         var cutoff = DateTime.UtcNow.AddSeconds(-_timeoutSeconds);
         foreach (var (id, session) in _sessions)
         {
-            // An actively-pumping stream counts as liveness even without
-            // RTSP keepalives; the pump clears Playing when the transport
-            // dies, at which point the idle timeout takes over.
-            if (session.Sender.Playing)
+            // A TCP-interleaved stream is alive as long as its connection is
+            // open (the pump clears Playing when a write fails), so streaming
+            // counts as liveness for it. A UDP stream cannot detect a vanished
+            // client through writes, so it relies on the idle timeout, which
+            // is refreshed by RTSP keepalives and by incoming RTCP — a client
+            // that disappears stops both and is reaped, freeing its ports.
+            if (session.Sender.Playing && !session.Sender.IsUdp)
             {
                 session.Touch();
                 continue;
