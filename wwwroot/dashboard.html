@@ -86,7 +86,7 @@
   .card h2 .note { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--muted); margin-left: 8px; }
 
   #chartbox { position: relative; }
-  #chart { width: 100%; height: 150px; display: block; }
+  #chart { width: 100%; height: 75px; display: block; }
   #tooltip {
     position: absolute; pointer-events: none; display: none;
     background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
@@ -266,17 +266,19 @@
     <div class="tile"><div class="k">HLS streams</div><div class="v" id="t-hls">–</div><div class="d" id="t-hls-d">on port –</div></div>
   </div>
 
-  <div class="card">
-    <h2>RTP packets / second<span class="note">last 2 minutes, all sessions</span></h2>
-    <div id="chartbox">
-      <svg id="chart" preserveAspectRatio="none"></svg>
-      <div id="tooltip"></div>
+  <div class="grid2">
+    <div class="card">
+      <h2>RTP packets / second<span class="note">last 2 minutes</span></h2>
+      <div id="chartbox">
+        <svg id="chart" preserveAspectRatio="none"></svg>
+        <div id="tooltip"></div>
+      </div>
     </div>
-  </div>
 
-  <div class="card">
-    <h2>Sessions</h2>
-    <div id="sessions"></div>
+    <div class="card">
+      <h2>Sessions</h2>
+      <div id="sessions"></div>
+    </div>
   </div>
 
   <div class="grid2">
@@ -1622,7 +1624,7 @@ async function copyText(btn, text) {
 /* ---- chart: single-series line + area, hairline grid, hover crosshair ---- */
 function drawChart() {
   const svg = $("chart");
-  const W = svg.clientWidth || 800, H = 150, PAD = { l: 40, r: 8, t: 8, b: 18 };
+  const W = svg.clientWidth || 800, H = 75, PAD = { l: 40, r: 8, t: 6, b: 14 };
   svg.setAttribute("viewBox", "0 0 " + W + " " + H);
   const css = getComputedStyle(document.documentElement);
   const col = n => css.getPropertyValue(n).trim();
