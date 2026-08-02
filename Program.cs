@@ -271,10 +271,13 @@ catch (Exception ex)
 }
 
 /// <summary>
-/// The URL the dashboard is reachable on, derived from the real bind
-/// address. For 0.0.0.0 this is the machine's primary IP — found via a
-/// routing lookup (no packets are sent), so Docker bridges and other
-/// virtual interfaces don't pollute the answer.
+/// URLs the dashboard is reachable on. Bound to 0.0.0.0 the server listens
+/// on every interface, so this lists the addresses of the machine's
+/// currently CONNECTED physical networks (ethernet + wi-fi) — a phone has
+/// to use the one on its own subnet, and picking a single "primary" address
+/// hides the others. Disconnected adapters, self-assigned 169.254.x
+/// addresses, and virtual/VM/VPN/container adapters are left out because
+/// nothing on the real network can reach the server through them.
 /// </summary>
 static string[] DashboardUrls(string bindAddress, int port)
 {
@@ -282,6 +285,37 @@ static string[] DashboardUrls(string bindAddress, int port)
         return new[] { $"http://localhost:{port}/" };
     if (bindAddress != "0.0.0.0")
         return new[] { $"http://{bindAddress}:{port}/" };
+
+    var addresses = new List<string>();
+    try
+    {
+        foreach (var nic in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+        {
+            if (nic.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+            // real network links only
+            if (nic.NetworkInterfaceType is not (System.Net.NetworkInformation.NetworkInterfaceType.Ethernet
+                or System.Net.NetworkInformation.NetworkInterfaceType.GigabitEthernet
+                or System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211)) continue;
+
+            var desc = nic.Description ?? "";
+            var name = nic.Name ?? "";
+            if (IsVirtual(desc) || IsVirtual(name)) continue;
+
+            foreach (var addr in nic.GetIPProperties().UnicastAddresses)
+            {
+                if (addr.Address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) continue;
+                var s = addr.Address.ToString();
+                if (s.StartsWith("169.254.", StringComparison.Ordinal)) continue; // link-local = no DHCP
+                if (!addresses.Contains(s)) addresses.Add(s);
+            }
+        }
+    }
+    catch { /* enumeration is best-effort */ }
+
+    if (addresses.Count == 0) return new[] { $"http://localhost:{port}/" };
+
+    // put the interface carrying the default route first — that's the one
+    // most likely to be the network the user's other devices are on
     try
     {
         using var probe = new System.Net.Sockets.Socket(
@@ -289,13 +323,27 @@ static string[] DashboardUrls(string bindAddress, int port)
             System.Net.Sockets.SocketType.Dgram,
             System.Net.Sockets.ProtocolType.Udp);
         probe.Connect("8.8.8.8", 53); // routing decision only; UDP sends nothing on connect
-        var ip = ((System.Net.IPEndPoint)probe.LocalEndPoint!).Address;
-        return new[] { $"http://{ip}:{port}/" };
+        var primary = ((System.Net.IPEndPoint)probe.LocalEndPoint!).Address.ToString();
+        if (addresses.Remove(primary)) addresses.Insert(0, primary);
     }
-    catch
-    {
-        return new[] { $"http://localhost:{port}/" };
-    }
+    catch { /* keep enumeration order */ }
+
+    return addresses.Select(a => $"http://{a}:{port}/").ToArray();
+
+    static bool IsVirtual(string s) =>
+        s.Contains("virtual", StringComparison.OrdinalIgnoreCase)
+        || s.Contains("vmware", StringComparison.OrdinalIgnoreCase)
+        || s.Contains("hyper-v", StringComparison.OrdinalIgnoreCase)
+        || s.Contains("virtualbox", StringComparison.OrdinalIgnoreCase)
+        || s.Contains("vethernet", StringComparison.OrdinalIgnoreCase)
+        || s.Contains("docker", StringComparison.OrdinalIgnoreCase)
+        || s.Contains("loopback", StringComparison.OrdinalIgnoreCase)
+        || s.Contains("tap-", StringComparison.OrdinalIgnoreCase)
+        || s.Contains("tun", StringComparison.OrdinalIgnoreCase)
+        || s.Contains("vpn", StringComparison.OrdinalIgnoreCase)
+        || s.Contains("nordlynx", StringComparison.OrdinalIgnoreCase)
+        || s.Contains("wireguard", StringComparison.OrdinalIgnoreCase)
+        || s.Contains("wintun", StringComparison.OrdinalIgnoreCase);
 }
 
 static bool TryOpenBrowser(string url)
