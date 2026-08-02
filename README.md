@@ -37,6 +37,20 @@ terminate buttons, RTP throughput chart, mounts with copyable `rtsp://`
 URIs, HLS stream list, and the effective config. (Set
 `control.openDashboardOnStart` to `false` for headless use.)
 
+### Run it in the background (Windows)
+
+```bash
+dotnet run -- -t
+```
+
+`-t` (or `"minimizeToTray": true` in the config) hides the console and puts
+a joker icon in the notification area. Double-click it to open the
+dashboard; right-click for a menu — open dashboard, show/hide the console,
+start/stop the streaming services, exit. Closing the dashboard doesn't stop
+the server in this mode, so it keeps serving your phone and other devices
+until you pick Exit. `--no-tray` overrides the config for one run. On
+macOS/Linux use your init system (systemd/launchd) or `nohup` instead.
+
 The header has a **⏻ Start/Stop** button that stops or starts the streaming
 services (RTSP + HLS) while the dashboard stays up, and a **⚙ Config**
 dialog for the hostname/bind address and the RTSP/HLS/control ports — saved to a `settings.json` sidecar and applied by restarting the

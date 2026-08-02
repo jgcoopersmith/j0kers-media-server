@@ -37,6 +37,14 @@ public sealed class ServerConfig
     [JsonPropertyName("logging")]
     public LoggingConfig Logging { get; set; } = new();
 
+    /// <summary>
+    /// Run in the background with a notification-area (tray) icon and the
+    /// console hidden — double-click the icon for the dashboard, right-click
+    /// for a menu. Windows only; ignored elsewhere.
+    /// </summary>
+    [JsonPropertyName("minimizeToTray")]
+    public bool MinimizeToTray { get; set; }
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         ReadCommentHandling = JsonCommentHandling.Skip,

@@ -76,6 +76,12 @@
     // { "path": "/music", "source": "file", "file": "music.ulaw", "description": "raw 8 kHz G.711 µ-law file, looped" }
   ],
 
+  // Windows: run in the background with a notification-area (tray) icon and
+  // the console hidden. Double-click the icon for the dashboard, right-click
+  // for a menu (open / show console / start-stop services / exit).
+  // Also available as -t on the command line.
+  "minimizeToTray": false,
+
   "logging": {
     "level": "info",                  // trace | debug | info | warn | error
     "logRtspMessages": false

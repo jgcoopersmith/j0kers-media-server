@@ -9,6 +9,7 @@ using J0kersMediaServer.Rtsp;
 // Flags override the config file, settings.json, and env vars.
 string? cfgArg = null, hostArg = null;
 int? rtspPortArg = null, hlsPortArg = null, controlPortArg = null;
+bool? trayArg = null;
 
 static void PrintUsage()
 {
@@ -18,6 +19,8 @@ static void PrintUsage()
     Console.WriteLine("  -r, --rtsp-port <port>   RTSP port (default 8554)");
     Console.WriteLine("  -H, --hls-port <port>    HLS port (default 8080)");
     Console.WriteLine("  -c, --control-port <port> control/dashboard port (default 9090)");
+    Console.WriteLine("  -t, --tray               run in the background with a tray icon (Windows)");
+    Console.WriteLine("      --no-tray            keep the console even if the config asks for tray mode");
     Console.WriteLine("      --help               this help");
     Console.WriteLine("Config path defaults to $J0KERS_CONFIG, ./server.json, or ./config/server.json;");
     Console.WriteLine("missing file = built-in defaults. See config/server.json for all options.");
@@ -61,6 +64,12 @@ for (var i = 0; i < args.Length; i++)
             break;
         case "-c" or "--control-port":
             controlPortArg = NextPort(args[i]);
+            break;
+        case "-t" or "--tray" or "--daemon" or "--background":
+            trayArg = true;
+            break;
+        case "--no-tray":
+            trayArg = false;
             break;
         default:
             if (cfgArg is null && !args[i].StartsWith('-'))
@@ -137,6 +146,8 @@ if (new[] { config.Rtsp.Port, config.Hls.Port, config.Control.Port }.Distinct().
     return 1;
 }
 
+if (trayArg is bool wantTray) config.MinimizeToTray = wantTray;
+
 Log.SetLevel(config.Logging.Level);
 var baseDirectory = File.Exists(configPath)
     ? Path.GetDirectoryName(Path.GetFullPath(configPath))!
@@ -153,7 +164,23 @@ if (config.Mounts.Count == 0)
 J0kersMediaServer.Services.ServiceController? services = null;
 ControlApi? control = null;
 J0kersMediaServer.Media.FfmpegManager? ffmpeg = null;
+J0kersMediaServer.Services.TrayIcon? tray = null;
 var shutdown = new TaskCompletionSource();
+
+if (config.MinimizeToTray && !OperatingSystem.IsWindows())
+{
+    Log.Info("main", "minimizeToTray is Windows-only; run this as a background service " +
+                     "(systemd / launchd) or with nohup instead");
+    config.MinimizeToTray = false;
+}
+
+// Running as a background daemon means no browser tab is "the session" —
+// closing the dashboard must not take the server down with it.
+if (config.MinimizeToTray && config.Control.ShutdownOnClose)
+{
+    config.Control.ShutdownOnClose = false;
+    Log.Debug("main", "tray mode: closing the dashboard no longer shuts the server down");
+}
 
 // The control API's drive-by-RCE risk is closed by the CSRF guard (no
 // website can drive it). A LAN peer reaching it directly is the operator's
@@ -187,9 +214,11 @@ try
         services.OnHlsActivity = control.NoteActivity; // streaming keeps the server up
         control.Start();
 
+        var urls = DashboardUrls(control.BoundHost, config.Control.Port);
+        var dashboardUrl = urls[0];
+
         if (config.Control.OpenDashboardOnStart)
         {
-            var urls = DashboardUrls(control.BoundHost, config.Control.Port);
             var urlList = string.Join(" · ", urls);
             if (control.BoundHost == "0.0.0.0")
                 urlList += " (bound to 0.0.0.0 — reachable on any of this machine's addresses)";
@@ -200,7 +229,7 @@ try
                 // headless box — nothing to open a browser on
                 Log.Info("main", $"dashboard: {urlList}");
             }
-            else if (TryOpenBrowser(urls[0]))
+            else if (TryOpenBrowser(dashboardUrl))
             {
                 Log.Info("main", $"dashboard opened: {urlList} (disable with control.openDashboardOnStart=false)");
             }
@@ -209,12 +238,35 @@ try
                 Log.Info("main", $"no browser opener found on this system; dashboard: {urlList}");
             }
         }
+
+        if (config.MinimizeToTray)
+        {
+            var svc = services; // captured for the menu callbacks
+            tray = new J0kersMediaServer.Services.TrayIcon(
+                tip: $"{config.ServerName} — {dashboardUrl}",
+                openDashboard: () => TryOpenBrowser(dashboardUrl),
+                servicesRunning: () => svc.Running,
+                setServices: run => { if (run) svc.StartServices(); else svc.StopServices(); },
+                requestShutdown: () => shutdown.TrySetResult());
+
+            if (tray.Start(hideConsole: true))
+            {
+                Log.Info("main", $"running in the tray — double-click the joker icon for the dashboard ({dashboardUrl})");
+                tray.Notify("j0kers Media Server", $"Running in the background\n{dashboardUrl}");
+            }
+            else
+            {
+                Log.Warn("main", "could not create the tray icon; keeping the console window");
+                tray.Dispose();
+                tray = null;
+            }
+        }
     }
 }
 catch (Exception ex)
 {
     Console.Error.WriteLine($"Startup failed: {ex.Message}");
-    services?.Dispose(); control?.Dispose(); ffmpeg?.Dispose();
+    tray?.Dispose(); services?.Dispose(); control?.Dispose(); ffmpeg?.Dispose();
     return 1;
 }
 
@@ -295,8 +347,14 @@ Console.CancelKeyPress += (_, e) =>
 };
 AppDomain.CurrentDomain.ProcessExit += (_, _) => shutdown.TrySetResult();
 
-Log.Info("main", "ready — press Ctrl+C to stop");
+Log.Info("main", tray is not null
+    ? "ready — right-click the tray icon to exit"
+    : "ready — press Ctrl+C to stop");
 await shutdown.Task;
+
+// take the icon down first: it also restores a hidden console so the
+// shutdown log is visible
+tray?.Dispose();
 
 Log.Info("main", "shutting down (Ctrl+C again to force)");
 // watchdog: if any teardown blocks, exit anyway instead of hanging the console
