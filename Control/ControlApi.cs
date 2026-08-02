@@ -116,6 +116,7 @@ public sealed partial class ControlApi : IDisposable
     }
 
     private static readonly Lazy<byte[]> Dashboard = new(() => LoadResource("dashboard.html"));
+    private static readonly Lazy<byte[]> LoginPage = new(() => LoadResource("login.html"));
     private static readonly Lazy<byte[]> HlsJs = new(() => LoadResource("hls.min.js"));
 
     /// <summary>
@@ -220,19 +221,32 @@ public sealed partial class ControlApi : IDisposable
                 return;
             }
 
-            // The dashboard page itself is static and served without auth;
-            // every /api call it makes is still token-gated below.
-            var rawPath = ctx.Request.Url?.AbsolutePath ?? "/";
-            if (ctx.Request.HttpMethod == "GET" && rawPath is "/" or "/index.html")
+            var path = ctx.Request.Url?.AbsolutePath ?? "/";
+            var method = ctx.Request.HttpMethod;
+
+            // Who is this? Session cookie, API key, or the legacy
+            // control.authToken — all resolved to one access level.
+            var auth = _auth.Authenticate(ctx);
+
+            // The dashboard is not served to anyone who hasn't signed in —
+            // they get the sign-in page instead (or, on a server with no
+            // accounts yet, the form that creates the first administrator).
+            if (method == "GET" && path is "/" or "/index.html")
             {
+                var page = auth.Level == AccessLevel.None || _auth.SetupRequired
+                    ? LoginPage.Value
+                    : Dashboard.Value;
                 res.StatusCode = 200;
                 res.ContentType = "text/html; charset=utf-8";
-                res.ContentLength64 = Dashboard.Value.Length;
-                res.OutputStream.Write(Dashboard.Value);
+                res.Headers["Cache-Control"] = "no-store";
+                res.ContentLength64 = page.Length;
+                res.OutputStream.Write(page);
                 return;
             }
 
-            if (ctx.Request.HttpMethod == "GET" && rawPath == "/hls.min.js")
+            // the player library is a third-party asset with nothing in it
+            // to protect, and the sign-in page must render before any login
+            if (method == "GET" && path == "/hls.min.js")
             {
                 res.StatusCode = 200;
                 res.ContentType = "text/javascript";
@@ -241,13 +255,6 @@ public sealed partial class ControlApi : IDisposable
                 res.OutputStream.Write(HlsJs.Value);
                 return;
             }
-
-            var path = ctx.Request.Url?.AbsolutePath ?? "/";
-            var method = ctx.Request.HttpMethod;
-
-            // Who is this? Session cookie, API key, or the legacy
-            // control.authToken — all resolved to one access level.
-            var auth = _auth.Authenticate(ctx);
 
             // CSRF: a state-changing request from another website must be
             // refused even on loopback with no token, or any page the user

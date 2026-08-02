@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Sign in · j0kers Media Server</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --page:        #0d0d0d;
+    --surface:     #1a1a19;
+    --surface-2:   #222221;
+    --ink:         #ffffff;
+    --ink-2:       #c3c2b7;
+    --muted:       #898781;
+    --grid:        #2c2c2a;
+    --border:      rgba(255,255,255,0.10);
+    --series-1:    #3987e5;
+    --good:        #0ca30c;
+    --warning:     #fab219;
+    --critical:    #d03b3b;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      color-scheme: light;
+      --page:      #f9f9f7;
+      --surface:   #fcfcfb;
+      --surface-2: #f0efec;
+      --ink:       #0b0b0b;
+      --ink-2:     #52514e;
+      --muted:     #898781;
+      --grid:      #e1e0d9;
+      --border:    rgba(11,11,11,0.10);
+      --series-1:  #2a78d6;
+      --good:      #006300;
+      --critical:  #d03b3b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; padding: 24px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--page); color: var(--ink);
+    font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .card {
+    width: min(400px, 100%);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+    padding: 22px; box-shadow: 0 18px 50px rgba(0,0,0,0.45);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .brand .logo {
+    width: 34px; height: 34px; flex: none; display: grid; place-items: center;
+    font-size: 19px; border-radius: 9px; background: var(--surface-2); border: 1px solid var(--border);
+  }
+  h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .2px; }
+  .sub { color: var(--muted); font-size: 12px; }
+  .intro { color: var(--muted); font-size: 12px; margin: 12px 0 0; line-height: 1.5; }
+  label {
+    display: block; color: var(--muted); font-size: 11.5px;
+    text-transform: uppercase; letter-spacing: .6px; margin: 14px 0 4px;
+  }
+  input[type=text], input[type=password] {
+    width: 100%; font: inherit; font-size: 13px; padding: 8px 11px; border-radius: 9px;
+    border: 1px solid var(--border); background: var(--surface-2); color: var(--ink);
+  }
+  input:focus { outline: none; border-color: var(--series-1); }
+  .pw { position: relative; }
+  .pw input { padding-right: 36px; }
+  .pw-eye {
+    position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
+    border: none; background: none; padding: 2px 5px; font-size: 14px; line-height: 1;
+    cursor: pointer; opacity: .6; filter: grayscale(1);
+  }
+  .pw-eye:hover, .pw-eye.on { opacity: 1; filter: none; }
+  .chk { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink); margin-top: 14px; cursor: pointer; }
+  .chk input { width: 15px; height: 15px; flex: none; }
+  button.go {
+    width: 100%; margin-top: 16px; font: inherit; font-size: 13px; font-weight: 600;
+    padding: 9px 14px; border-radius: 9px; cursor: pointer;
+    border: 1px solid color-mix(in srgb, var(--good) 45%, transparent);
+    background: var(--surface-2); color: var(--good);
+  }
+  button.go:hover { background: color-mix(in srgb, var(--good) 14%, transparent); }
+  button.go:disabled { opacity: .55; cursor: default; }
+  .msg { min-height: 17px; margin-top: 11px; font-size: 12px; color: var(--critical); }
+  .note {
+    margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--grid);
+    color: var(--muted); font-size: 11.5px; line-height: 1.5;
+  }
+  .note.warn { color: var(--warning); }
+</style>
+</head>
+<body>
+<form class="card" id="form" autocomplete="on">
+  <div class="brand">
+    <div class="logo">🃏</div>
+    <div>
+      <h1 id="title">Sign in</h1>
+      <div class="sub">j0kers Media Server</div>
+    </div>
+  </div>
+  <p class="intro" id="intro"></p>
+
+  <label for="user">Username</label>
+  <input id="user" name="username" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" required>
+
+  <label for="pass">Password</label>
+  <div class="pw">
+    <input id="pass" name="password" type="password" autocomplete="current-password" required>
+    <button type="button" class="pw-eye" data-pw="pass" title="Show password" aria-label="Show password">👁</button>
+  </div>
+
+  <div id="confirm-row" hidden>
+    <label for="pass2">Confirm password</label>
+    <div class="pw">
+      <input id="pass2" type="password" autocomplete="new-password">
+      <button type="button" class="pw-eye" data-pw="pass2" title="Show password" aria-label="Show password">👁</button>
+    </div>
+  </div>
+
+  <label class="chk"><input id="remember" type="checkbox" checked>
+    <span>Remember this device</span></label>
+
+  <div class="msg" id="msg"></div>
+  <button class="go" id="go" type="submit">Sign in</button>
+
+  <div class="note" id="note" hidden></div>
+</form>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let setup = false;
+
+/* 👁 reveals what's typed — a password you can't see is a password you
+   can't tell you've mistyped. */
+document.addEventListener("click", e => {
+  const eye = e.target.closest(".pw-eye");
+  if (!eye) return;
+  const input = $(eye.dataset.pw);
+  const show = input.type === "password";
+  input.type = show ? "text" : "password";
+  eye.textContent = show ? "🙈" : "👁";
+  eye.classList.toggle("on", show);
+  eye.title = eye.ariaLabel = show ? "Hide password" : "Show password";
+  input.focus();
+});
+
+/* A device that ticked "remember this device" holds a key here. Cash it in
+   for a session before drawing the form, so a remembered browser never
+   sees this page at all. A key the server no longer honours is dropped. */
+async function tryRememberedKey() {
+  const key = localStorage.getItem("j0kers-key");
+  if (!key) return false;
+  try {
+    const r = await fetch("/api/auth/session", {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + key, "X-J0kers-CSRF": "1" },
+    });
+    if (r.ok) { location.replace("/"); return true; }
+    if (r.status === 401) localStorage.removeItem("j0kers-key");
+  } catch { /* offline — fall through to the form */ }
+  return false;
+}
+
+/* Ask the server whether it has any accounts yet: with none, this page is
+   where the administrator account gets created instead. */
+(async function init() {
+  if (await tryRememberedKey()) return;
+
+  let state = {};
+  try { state = await (await fetch("/api/auth/state")).json(); } catch {}
+  setup = !!state.setupRequired;
+
+  $("title").textContent = setup ? "Set up this server" : "Sign in";
+  $("go").textContent = setup ? "Create administrator" : "Sign in";
+  $("intro").textContent = setup
+    ? "No administrator account exists yet. Create one to protect this server's configuration."
+    : "Sign in to reach the dashboard.";
+  $("confirm-row").hidden = !setup;
+  $("pass").setAttribute("autocomplete", setup ? "new-password" : "current-password");
+  if (setup) $("pass2").required = true;
+
+  // a plain-HTTP bind beyond loopback means the password crosses the wire
+  // in the clear — say so rather than let it pass unnoticed
+  if (state.secure === false) {
+    $("note").hidden = false;
+    $("note").className = "note warn";
+    $("note").textContent = "⚠ This page is served over plain HTTP, so your password crosses the network "
+      + "unencrypted. On a network you don't trust, reach it over a VPN or an HTTPS reverse proxy.";
+  }
+  $("user").focus();
+})();
+
+$("form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const msg = $("msg");
+  msg.textContent = "";
+  const username = $("user").value.trim();
+  const password = $("pass").value;
+  if (!username || !password) { msg.textContent = "username and password are required"; return; }
+  if (setup && password !== $("pass2").value) { msg.textContent = "the two passwords don't match"; return; }
+
+  $("go").disabled = true;
+  try {
+    const r = await fetch(setup ? "/api/auth/setup" : "/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-J0kers-CSRF": "1" },
+      body: JSON.stringify({ username, password, remember: $("remember").checked }),
+    });
+    let data = {};
+    try { data = await r.json(); } catch {}
+    if (!r.ok) { msg.textContent = data.error || "sign-in failed"; return; }
+    // "remember this device" hands back a key; the dashboard reads it from
+    // here on later visits, so this browser never sees this page again
+    if (data.key) localStorage.setItem("j0kers-key", data.key);
+    location.replace("/");
+  } catch (err) {
+    msg.textContent = "could not reach the server: " + err.message;
+  } finally {
+    $("go").disabled = false;
+  }
+});
+</script>
+</body>
+</html>

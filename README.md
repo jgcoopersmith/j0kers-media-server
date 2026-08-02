@@ -235,7 +235,7 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /` | web dashboard (embedded, no extra files needed) |
+| `GET /` | web dashboard when signed in, sign-in page when not (both embedded) |
 | `GET /api/status` | identity, uptime, session counts |
 | `GET /api/config` | effective config (token redacted) |
 | `GET /api/mounts` | configured mounts + announcement URI |
@@ -263,6 +263,7 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `GET /api/auth/state` | is auth on, is setup needed, who am I |
 | `POST /api/auth/setup` | create the first administrator account (first run only) |
 | `POST /api/auth/login` / `logout` | password → session cookie / drop the session |
+| `POST /api/auth/session` | key → session cookie (how a remembered device skips the form) |
 | `POST /api/auth/password` | change your own password |
 | `GET/POST/DELETE /api/auth/keys` | list / mint / revoke your own keys |
 | `GET/POST/PUT/DELETE /api/users` | list / create / edit / remove accounts (admin) |
@@ -287,12 +288,17 @@ folders, pinned favorites, and saved playlists. Asking `/api/play`,
 `/api/thumb`, or `/api/image` for anything else is refused, so an account
 handed to a houseguest can't transcode `C:\Users\you\taxes.pdf`.
 
+Browsing to the dashboard prompts for a username and password first: `GET /`
+serves a sign-in page, and the dashboard itself is never sent to a browser
+that hasn't signed in. Signing out, or a session that expires mid-visit,
+returns there.
+
 ### First run
 
-Until an administrator exists the server behaves exactly as it always
-has — open — and the dashboard says so plainly with a *Create one* banner.
-Click it, pick a username and password, and you're signed in as the
-administrator.
+With no accounts yet, that same page creates the first administrator
+instead — pick a username and password and it signs you straight in. The
+control API stays open until then, so existing scripts keep working right
+up to the moment you claim the server.
 
 ### Two ways to sign in
 
@@ -307,8 +313,9 @@ wrong password. Sessions live in memory only, so a restart signs everyone
 out.
 
 **Keys** are for everything that shouldn't see a login form — a phone, a
-player, a script. Tick *Remember this device* when signing in and the
-dashboard stores one so that browser never asks again; mint more from
+player, a script. Tick *Remember this device* when signing in and the key
+is stored in that browser; on later visits the sign-in page trades it for
+a session and forwards you to the dashboard without asking. Mint more from
 👤 Account (yours) or 👥 Users (anyone's). A key is 256 bits of CSPRNG
 output shown exactly once — only its SHA-256 digest is stored — and is
 presented as a header or, where a media element can't set one, a query
@@ -344,7 +351,7 @@ Rtp/            RTP packetization, RTCP sender reports, port allocator
 Hls/            RFC 8216 playlist generation + segment serving
 Control/        HTTP/JSON control API
 Media/          G.711 sources (tone generator, file looper)
-wwwroot/        dashboard single-page app (embedded into the binary)
+wwwroot/        dashboard single-page app + sign-in page (embedded into the binary)
 config/         sample/default server.json (runtime media/ and clips/ live here too)
 ```
 

@@ -218,17 +218,27 @@ public sealed class AuthService
         _throttles.TryRemove(nameKey, out _);
         _throttles.TryRemove(addrKey, out _);
 
+        Log.Info("auth", $"login: {user.Username} ({user.Role}) from {client}");
+        return new LoginOutcome(true, user, OpenSession(user, ctx), null);
+    }
+
+    /// <summary>
+    /// Starts a session for an already-authenticated user and returns the
+    /// token to put in the cookie. Callers must have proved identity first —
+    /// by password, or by presenting a valid key.
+    /// </summary>
+    public string OpenSession(UserAccount user, HttpListenerContext ctx)
+    {
         var token = UserStore.Base64Url(RandomNumberGenerator.GetBytes(32));
         _sessions[Digest(token)] = new Session
         {
             UserId = user.Id,
             CreatedUtc = DateTime.UtcNow,
             LastSeenUtc = DateTime.UtcNow,
-            ClientHint = client,
+            ClientHint = ClientKey(ctx),
         };
         PruneSessions();
-        Log.Info("auth", $"login: {user.Username} ({user.Role}) from {client}");
-        return new LoginOutcome(true, user, token, null);
+        return token;
     }
 
     public void Logout(HttpListenerContext ctx)

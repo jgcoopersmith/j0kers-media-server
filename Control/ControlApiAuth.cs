@@ -66,6 +66,24 @@ public sealed partial class ControlApi
                 Login(ctx);
                 return true;
 
+            // Trades a key for a session cookie. The gate on GET / can only
+            // read cookies, but a "remembered" device holds its key in
+            // browser storage — which nothing can read until a page has
+            // loaded. The sign-in page cashes the key in here on load so a
+            // remembered browser goes straight through to the dashboard.
+            case ("POST", "/api/auth/session"):
+            {
+                if (auth.Method != "key" || auth.User is null)
+                {
+                    WriteJson(res, 401, new { error = "a valid key is required" });
+                    return true;
+                }
+                var token = _auth.OpenSession(auth.User, ctx);
+                AuthService.SetSessionCookie(ctx, token);
+                WriteJson(res, 200, new { user = DescribeUser(auth.User, auth) });
+                return true;
+            }
+
             case ("POST", "/api/auth/logout"):
                 _auth.Logout(ctx);
                 AuthService.ClearSessionCookie(ctx);

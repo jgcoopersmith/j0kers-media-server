@@ -188,7 +188,6 @@
     background: rgba(0,0,0,0.62); align-items: center; justify-content: center;
     overflow-y: auto; padding: 20px;
   }
-  #login-overlay { z-index: 80; }
   .dlg {
     width: min(440px, calc(100vw - 40px));
     background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
@@ -205,15 +204,6 @@
   .go { color: var(--good); border-color: color-mix(in srgb, var(--good) 45%, transparent); }
   .chk { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink); margin-top: 12px; cursor: pointer; }
   .chk input { width: 15px; height: 15px; flex: none; }
-  /* reveal toggle sitting inside a password field */
-  .pw { position: relative; }
-  .pw .am-in { padding-right: 36px; }
-  .pw-eye {
-    position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
-    border: none; background: none; padding: 2px 5px; font-size: 14px; line-height: 1;
-    opacity: .6; filter: grayscale(1);
-  }
-  .pw-eye:hover, .pw-eye.on { opacity: 1; filter: none; }
   .secret {
     font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all;
     background: var(--surface-2); border: 1px solid color-mix(in srgb, var(--good) 45%, transparent);
@@ -231,12 +221,6 @@
   .badge.off { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 45%, transparent); }
   .keyrow { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-2); padding: 3px 0; }
   .keyrow .meta { color: var(--muted); font-size: 11px; flex: 1; }
-  #authnote {
-    display: none; align-items: center; gap: 10px; margin-bottom: 14px; font-size: 12.5px;
-    color: var(--warning); border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
-    background: color-mix(in srgb, var(--warning) 8%, transparent);
-    border-radius: 10px; padding: 9px 12px;
-  }
   /* a signed-in non-admin never sees an administration control */
   body:not(.is-admin) .admin-only,
   body:not(.is-admin) [data-act$="-remove"],
@@ -329,11 +313,6 @@
     <button class="pill" id="acctbtn" onclick="openAccount()" title="Your account, password, and keys">👤 <span id="acct-pill">…</span></button>
     <span class="pill" id="verpill">v–</span>
   </header>
-
-  <div id="authnote">
-    <span style="flex:1">⚠ This server has no administrator account — anyone who can reach this page can reconfigure it.</span>
-    <button onclick="showLogin()">Create one</button>
-  </div>
 
   <div class="tiles">
     <div class="tile"><div class="k">Active sessions</div><div class="v" id="t-sessions">–</div><div class="d" id="t-sessions-d">of – max</div></div>
@@ -469,35 +448,6 @@
 
 <div id="lightbox" style="display:none;position:fixed;inset:0;z-index:60;background:rgba(0,0,0,0.85);align-items:center;justify-content:center;cursor:zoom-out" onclick="this.style.display='none'">
   <img id="lightbox-img" style="max-width:94vw;max-height:92vh;border-radius:8px" alt="">
-</div>
-
-<div id="login-overlay" class="overlay">
-  <div class="dlg" role="dialog" aria-modal="true">
-    <h3>🃏 <span id="login-title">Sign in</span></h3>
-    <div id="login-intro" class="hint" style="margin-top:0"></div>
-    <label>Username</label>
-    <input id="login-user" class="am-in" autocomplete="username" autocapitalize="off" spellcheck="false">
-    <label>Password</label>
-    <div class="pw">
-      <input id="login-pass" class="am-in" type="password" autocomplete="current-password">
-      <button type="button" class="pw-eye" data-pw="login-pass" aria-label="Show password" title="Show password">👁</button>
-    </div>
-    <div id="login-confirm-row" style="display:none">
-      <label>Confirm password</label>
-      <div class="pw">
-        <input id="login-pass2" class="am-in" type="password" autocomplete="new-password">
-        <button type="button" class="pw-eye" data-pw="login-pass2" aria-label="Show password" title="Show password">👁</button>
-      </div>
-    </div>
-    <label class="chk"><input id="login-remember" type="checkbox" checked>
-      <span>Remember this device — issue a key so this browser stays signed in</span></label>
-    <div id="login-msg" class="msg"></div>
-    <div class="row">
-      <button id="login-cancel" onclick="closeOverlay('login-overlay')" style="display:none">Cancel</button>
-      <button class="go" id="login-go" onclick="submitLogin()">Sign in</button>
-    </div>
-    <div id="login-insecure" class="hint" style="display:none"></div>
-  </div>
 </div>
 
 <div id="acct-overlay" class="overlay">
@@ -675,55 +625,18 @@ async function refreshAuth() {
   document.body.classList.toggle("is-admin", admin);
   $("acct-pill").textContent = me ? (me.username || "local") : "sign in";
   $("acctbtn").style.display = authState.authRequired ? "" : "none";
-  // no admin account yet: the server is wide open, say so plainly
-  $("authnote").style.display = authState.setupRequired ? "flex" : "none";
   if (!authState.authenticated) { showLogin(); return false; }
-  closeOverlay("login-overlay");
   return true;
 }
 
+/* The sign-in form is its own page, served at / to anyone who hasn't
+   signed in — so a session that expires mid-visit goes back there rather
+   than growing a second login form inside the dashboard. */
+let leaving = false;
 function showLogin() {
-  // already up: leave the form (and any error on it) exactly as it is —
-  // the poll loop calls in here every couple of seconds while signed out
-  if ($("login-overlay").style.display === "flex") return;
-  const setup = !authState || authState.setupRequired;
-  $("login-title").textContent = setup ? "Set up this server" : "Sign in";
-  $("login-intro").textContent = setup
-    ? "Create the administrator account. Until you do, anyone who can reach this page can reconfigure the server."
-    : "";
-  $("login-go").textContent = setup ? "Create administrator" : "Sign in";
-  $("login-confirm-row").style.display = setup ? "" : "none";
-  $("login-cancel").style.display = setup && authState && authState.authenticated ? "" : "none";
-  $("login-pass").setAttribute("autocomplete", setup ? "new-password" : "current-password");
-  $("login-insecure").style.display = authState && authState.secure === false ? "" : "none";
-  $("login-insecure").textContent =
-    "⚠ This page is served over plain HTTP, so your password crosses the network unencrypted. "
-    + "On an untrusted network, reach it over a VPN or an HTTPS reverse proxy.";
-  $("login-msg").textContent = "";
-  hidePasswords();
-  $("login-overlay").style.display = "flex";
-  setTimeout(() => $(($("login-user").value ? "login-pass" : "login-user")).focus(), 30);
-}
-
-async function submitLogin() {
-  const msg = $("login-msg");
-  msg.className = "msg";
-  const setup = !authState || authState.setupRequired;
-  const username = $("login-user").value.trim();
-  const password = $("login-pass").value;
-  if (!username || !password) { msg.textContent = "username and password are required"; return; }
-  if (setup && password !== $("login-pass2").value) { msg.textContent = "the two passwords don't match"; return; }
-
-  const body = { username, password, remember: $("login-remember").checked };
-  const [ok, data] = await send("POST", setup ? "/api/auth/setup" : "/api/auth/login", body);
-  if (!ok) { msg.textContent = data.error || "sign-in failed"; return; }
-  // the password is gone from here the moment it's been exchanged
-  $("login-pass").value = $("login-pass2").value = "";
-  if (data.key) { token = data.key; localStorage.setItem("j0kers-key", token); }
-  closeOverlay("login-overlay");
-  await refreshAuth();
-  mountsLoaded = 0; channelsLoaded = 0;
-  tick();
+  if (leaving) return;
+  leaving = true;
+  location.replace("/");
 }
 
 async function signOut() {
@@ -2361,34 +2274,6 @@ document.addEventListener("click", e => {
   }
 });
 
-/* 👁 reveals what's typed in a password field — useful when picking the
-   admin password, where a typo you can't see costs you a reset. */
-document.addEventListener("click", e => {
-  const eye = e.target.closest(".pw-eye");
-  if (!eye) return;
-  const input = $(eye.dataset.pw);
-  const show = input.type === "password";
-  input.type = show ? "text" : "password";
-  eye.textContent = show ? "🙈" : "👁";
-  eye.classList.toggle("on", show);
-  eye.title = eye.ariaLabel = show ? "Hide password" : "Show password";
-  input.focus();
-});
-
-/* Back to dots — so a revealed password isn't left on screen when the
-   dialog is reopened later. */
-function hidePasswords() {
-  for (const eye of document.querySelectorAll(".pw-eye")) {
-    $(eye.dataset.pw).type = "password";
-    eye.textContent = "👁";
-    eye.classList.remove("on");
-    eye.title = eye.ariaLabel = "Show password";
-  }
-}
-
-// Enter submits the sign-in form from any of its fields
-for (const id of ["login-user", "login-pass", "login-pass2"])
-  $(id).addEventListener("keydown", e => { if (e.key === "Enter") submitLogin(); });
 for (const id of ["acct-overlay", "users-overlay"])
   $(id).addEventListener("mousedown", e => { if (e.target.id === id) closeOverlay(id); });
 
