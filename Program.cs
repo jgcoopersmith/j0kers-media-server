@@ -155,17 +155,15 @@ ControlApi? control = null;
 J0kersMediaServer.Media.FfmpegManager? ffmpeg = null;
 var shutdown = new TaskCompletionSource();
 
-// Never expose the control API unauthenticated beyond loopback.
-if (config.Control.Enabled)
+// The control API's drive-by-RCE risk is closed by the CSRF guard (no
+// website can drive it). A LAN peer reaching it directly is the operator's
+// own call, so we don't force a token — just note it once when it's exposed
+// beyond loopback with none set. Set control.authToken to require one.
+if (config.Control.Enabled
+    && config.Control.BindAddress is not ("127.0.0.1" or "localhost" or "::1")
+    && config.Control.AuthToken.Length == 0)
 {
-    var minted = config.EnsureControlToken();
-    if (minted is not null)
-    {
-        Log.Warn("main", "control API is bound beyond localhost — generated an access token:");
-        Log.Warn("main", $"    {minted}");
-        Log.Warn("main", $"    open the dashboard with:  http://localhost:{config.Control.Port}/?token={minted}");
-        Log.Warn("main", "    (saved to settings.json; set control.authToken yourself to choose your own)");
-    }
+    Log.Info("main", "control API is reachable on the network without a token; set control.authToken to require one");
 }
 
 var mediaRoot = Path.GetFullPath(Path.IsPathRooted(config.Hls.MediaRoot)

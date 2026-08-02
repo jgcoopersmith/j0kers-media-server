@@ -159,22 +159,6 @@ public sealed class ServerConfig
         if (!string.IsNullOrWhiteSpace(s.AuthToken)) Control.AuthToken = s.AuthToken;
     }
 
-    /// <summary>
-    /// When the control API is exposed beyond loopback with no token, mint a
-    /// random one and persist it — so a media server on the LAN is never
-    /// silently unauthenticated. Returns the token if one was generated.
-    /// </summary>
-    public string? EnsureControlToken()
-    {
-        var loopback = Control.BindAddress is "127.0.0.1" or "localhost" or "::1";
-        if (loopback || Control.AuthToken.Length > 0) return null;
-        var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16))
-            .ToLowerInvariant();
-        Control.AuthToken = token;
-        try { UpdateSettings(new SettingsOverrides { AuthToken = token }); } catch { }
-        return token;
-    }
-
     private sealed class MountSidecar
     {
         [JsonPropertyName("added")] public List<MountConfig> Added { get; set; } = new();
