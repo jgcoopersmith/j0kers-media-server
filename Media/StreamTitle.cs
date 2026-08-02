@@ -37,6 +37,25 @@ public static class StreamTitle
         "a", "an", "and", "the", "of", "to", "in", "on", "at", "for", "with", "from", "or", "vs",
     };
 
+    private static readonly Regex Separators = new(@"[\s._\[\]()+]+", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Readable label for a media FILE name — same cleanup, but keyed off
+    /// the usual filename separators (spaces, dots, underscores, brackets)
+    /// instead of slug dashes. "The.Legend.of.Drunken.Master.dvd.avi" →
+    /// "The Legend of Drunken Master". Display only; the real file name is
+    /// what every path still uses.
+    /// </summary>
+    public static string PrettifyFile(string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName)) return fileName;
+        var stem = Path.GetFileNameWithoutExtension(fileName);
+        if (string.IsNullOrWhiteSpace(stem)) return fileName;
+        var normalized = Separators.Replace(stem, "-").Trim('-');
+        var pretty = Core(normalized);
+        return string.IsNullOrWhiteSpace(pretty) ? fileName : pretty;
+    }
+
     public static string Prettify(string streamName)
     {
         if (string.IsNullOrWhiteSpace(streamName)) return streamName;
@@ -46,8 +65,15 @@ public static class StreamTitle
         else if (s.StartsWith("ch-", StringComparison.OrdinalIgnoreCase)) s = s[3..];
         s = CacheKey.Replace(s, "");   // drop the cache hash suffix
 
+        var pretty = Core(s);
+        return string.IsNullOrWhiteSpace(pretty) ? streamName : pretty;
+    }
+
+    /// <summary>Shared cleanup over a dash-separated name.</summary>
+    private static string Core(string s)
+    {
         var tokens = s.Split('-', StringSplitOptions.RemoveEmptyEntries);
-        if (tokens.Length == 0) return streamName;
+        if (tokens.Length == 0) return "";
 
         string? year = null, quality = null, part = null;
         var titleTokens = new List<string>();
@@ -76,7 +102,7 @@ public static class StreamTitle
             }
         }
 
-        if (titleTokens.Count == 0) return streamName;
+        if (titleTokens.Count == 0) return "";
 
         var sb = new StringBuilder();
         for (var i = 0; i < titleTokens.Count; i++)

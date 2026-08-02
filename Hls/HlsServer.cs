@@ -179,15 +179,33 @@ public sealed class HlsServer : IDisposable
                 var onDisk = Path.Combine(streamDir, parts[1]);
                 if (File.Exists(onDisk) && !parts[1].Contains(".."))
                 {
-                    // Serve ffmpeg's own playlist verbatim. A still-running
-                    // VOD job writes an EXT-X-PLAYLIST-TYPE:EVENT playlist
-                    // (no ENDLIST): players keep reloading and extend the
-                    // seek bar as segments are added, then stop when ffmpeg
-                    // finishes and writes ENDLIST. An earlier version
-                    // rewrote EVENT→VOD+ENDLIST here, which told every player
-                    // the movie was already complete — truncating it to
-                    // however much had transcoded. Do NOT do that.
-                    WriteText(res, 200, "application/vnd.apple.mpegurl", ReadSharedText(onDisk));
+                    var text = ReadSharedText(onDisk);
+
+                    // A running VOD job writes an EXT-X-PLAYLIST-TYPE:EVENT
+                    // playlist (no ENDLIST) so players keep reloading and
+                    // extend the seek bar as it converts — that must be
+                    // served as-is, or the movie gets truncated to whatever
+                    // had transcoded.
+                    //
+                    // But if no job is running and there's still no ENDLIST,
+                    // the conversion ended without finishing (interrupted,
+                    // crashed, server restarted). The file will never grow
+                    // again, yet players still treat it as live: playback
+                    // joins at the last segment instead of the beginning and
+                    // there's no seek bar. Close it off so it behaves like
+                    // the finite recording it now is.
+                    var transcoding = Ffmpeg?.ActiveVodStreams
+                        .Contains(parts[0], StringComparer.OrdinalIgnoreCase) ?? false;
+                    if (!transcoding
+                        && parts[0].StartsWith("vod-", StringComparison.OrdinalIgnoreCase)
+                        && !text.Contains("#EXT-X-ENDLIST"))
+                    {
+                        text = text.Replace("#EXT-X-PLAYLIST-TYPE:EVENT", "#EXT-X-PLAYLIST-TYPE:VOD");
+                        if (!text.EndsWith('\n')) text += "\n";
+                        text += "#EXT-X-ENDLIST\n";
+                    }
+
+                    WriteText(res, 200, "application/vnd.apple.mpegurl", text);
                     return;
                 }
                 if (parts[1] is "index.m3u8" or "playlist.m3u8")
@@ -422,8 +440,18 @@ public sealed class HlsServer : IDisposable
               const v = document.getElementById("v");
               const src = "{{src}}";
               const stream = {{nameJs}};
+              // recordings start at the beginning; live channels join the edge
+              const live = /^ch-/i.test(stream);
+              if (!live) {
+                v.addEventListener("playing", function once() {
+                  v.removeEventListener("playing", once);
+                  if (v.currentTime > 2) { try { v.currentTime = 0; } catch (e) {} }
+                });
+              }
               if (window.Hls && Hls.isSupported()) {
-                const h = new Hls();
+                // startPosition is what actually pins the initial seek;
+                // startLoad(0) alone still lets hls.js pick its own spot
+                const h = new Hls(live ? {} : { startPosition: 0 });
                 h.loadSource(src);
                 h.attachMedia(v);
               } else if (v.canPlayType("application/vnd.apple.mpegurl")) {

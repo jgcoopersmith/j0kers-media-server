@@ -1307,6 +1307,8 @@ public sealed class ControlApi : IDisposable
                 entries.Add(new
                 {
                     name = f.Name,
+                    // readable label for the library; paths still use `name`
+                    title = Media.StreamTitle.PrettifyFile(f.Name),
                     type = "file",
                     label = "",
                     detail = f.Length >= 1024 * 1024

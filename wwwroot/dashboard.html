@@ -923,10 +923,11 @@ async function playHls(url, startAt) {
     msg.textContent = "";
   }
   if (window.Hls && Hls.isSupported()) {
-    window._hls = new Hls({ autoStartLoad: false });
+    // startPosition is the setting that actually pins where playback begins;
+    // startLoad() alone still lets hls.js choose its own start point
+    window._hls = new Hls(target === null ? {} : { startPosition: target });
     window._hls.loadSource(url);
     window._hls.attachMedia(video);
-    window._hls.startLoad(target === null ? -1 : target); // -1 = live edge
     video.play().catch(() => {});
   } else {
     msg.textContent = "hls.js failed to load — open the URL in VLC instead.";
@@ -1236,7 +1237,8 @@ async function loadLibrary(path) {
     h += '<div class="lib-h">🎵 Music <span class="cnt">' + music.length + '</span></div>';
     for (const e of music) {
       const full = join(e.name);
-      h += libRow("🎵", e.name, e.detail, ffmpegOk ? "lib-play" : "", full, pinButton(full));
+      // show the readable title; the path still comes from e.name
+      h += libRow("🎵", e.title || e.name, e.detail, ffmpegOk ? "lib-play" : "", full, pinButton(full), e.name);
     }
   }
 
@@ -1261,17 +1263,20 @@ function tileGrid(entries, join, act, fallbackIcon) {
       + '<img class="tile-thumb" loading="lazy" src="' + esc(thumbUrl(full)) + '" alt="" '
       + 'onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'">'
       + '<div class="tile-fallback">' + fallbackIcon + '</div>'
-      + '<div class="tile-name">' + esc(e.name) + '</div>'
+      // readable title on the tile; the real file name is the tooltip above
+      + '<div class="tile-name">' + esc(e.title || e.name) + '</div>'
       + '</div>';
   }
   return h + '</div>';
 }
 
-function libRow(icon, name, detail, act, arg, extra) {
+function libRow(icon, name, detail, act, arg, extra, tooltip) {
   const clickable = act
     ? ' data-act="' + act + '" data-arg="' + esc(arg) + '" style="cursor:pointer"'
     : ' style="opacity:.55"';
-  return '<div class="pick-row"' + clickable + '><span class="icon">' + icon + '</span><span class="nm">'
+  // tooltip carries the real file name when the label is a cleaned-up title
+  const tip = tooltip ? ' title="' + esc(tooltip) + '"' : '';
+  return '<div class="pick-row"' + clickable + tip + '><span class="icon">' + icon + '</span><span class="nm">'
     + esc(name) + '</span>' + (extra || "") + '<span class="det">' + esc(detail || "") + '</span></div>';
 }
 
