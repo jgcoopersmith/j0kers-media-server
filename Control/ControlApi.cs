@@ -325,6 +325,15 @@ public sealed class ControlApi : IDisposable
                     rtspPort = _serverConfig.Rtsp.Port,
                     hlsPort = _serverConfig.Hls.Port,
                     controlPort = _serverConfig.Control.Port,
+                    // what "0.0.0.0" actually resolves to right now, so the
+                    // Config dialog can show which addresses are reachable
+                    interfaces = Services.NetworkInfo.Active().Select(i => new
+                    {
+                        name = i.Name,
+                        address = i.Address,
+                        kind = i.Kind,
+                        primary = i.Primary,
+                    }),
                 });
                 return;
             }

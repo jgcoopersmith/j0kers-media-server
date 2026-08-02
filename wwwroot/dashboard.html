@@ -412,6 +412,7 @@
     <h3>⚙ Server configuration</h3>
     <label>Hostname / bind address <span style="text-transform:none">(0.0.0.0 = all interfaces, 127.0.0.1 = this machine only)</span></label>
     <input id="cfg-bind" class="am-in" placeholder="0.0.0.0">
+    <div id="cfg-ifaces" style="margin-top:6px"></div>
     <div style="display:flex;gap:10px">
       <div style="flex:1"><label>RTSP port</label><input id="cfg-rtsp" class="am-in" type="number" min="1" max="65535"></div>
       <div style="flex:1"><label>HLS port</label><input id="cfg-hls" class="am-in" type="number" min="1" max="65535"></div>
@@ -940,6 +941,8 @@ async function togglePower() {
 /* ---- config dialog: hostname (bind address) and ports ---- */
 let cfgLoaded = null; // values as loaded, so Save only sends what changed
 
+let cfgInterfaces = [];
+
 async function openConfig() {
   $("cfg-msg").textContent = "";
   try {
@@ -949,11 +952,54 @@ async function openConfig() {
     $("cfg-rtsp").value = s.rtspPort;
     $("cfg-hls").value = s.hlsPort;
     $("cfg-ctl").value = s.controlPort;
+    cfgInterfaces = s.interfaces || [];
+    renderCfgInterfaces();
   } catch (e) {
     $("cfg-msg").textContent = "could not load settings: " + e.message;
   }
   $("cfg-overlay").style.display = "flex";
 }
+
+/* With 0.0.0.0 the server answers on every connected network — show which
+   ones those are, since a phone has to use the address on its own subnet.
+   Click one to bind to just that interface instead. */
+function renderCfgInterfaces() {
+  const box = $("cfg-ifaces");
+  const bind = $("cfg-bind").value.trim();
+  if (bind !== "0.0.0.0") {
+    box.innerHTML = bind && bind !== "127.0.0.1" && bind !== "localhost"
+      ? '<div style="color:var(--muted);font-size:11.5px">bound to this address only — use 0.0.0.0 for every network</div>'
+      : '<div style="color:var(--muted);font-size:11.5px">local machine only — use 0.0.0.0 to reach it from phones and other PCs</div>';
+    return;
+  }
+  if (!cfgInterfaces.length) {
+    box.innerHTML = '<div style="color:var(--muted);font-size:11.5px">no connected network interfaces found</div>';
+    return;
+  }
+  const port = parseInt($("cfg-ctl").value, 10) || 9090;
+  let h = '<div style="color:var(--muted);font-size:11.5px;margin-bottom:3px">'
+        + 'listening on all interfaces — reachable at:</div>';
+  for (const i of cfgInterfaces) {
+    h += '<div style="display:flex;align-items:center;gap:6px;padding:2px 0;font-size:12px">'
+      + '<span>' + (i.kind === "wi-fi" ? "📶" : "🔌") + '</span>'
+      + '<a class="mono" href="http://' + esc(i.address) + ':' + port + '/" target="_blank" rel="noopener">'
+      + esc(i.address) + ':' + port + '</a>'
+      + '<span style="color:var(--muted)">' + esc(i.name) + (i.primary ? " · default route" : "") + '</span>'
+      + '<span style="flex:1"></span>'
+      + '<button data-cfg-bind="' + esc(i.address) + '" style="font-size:11px;padding:1px 6px">bind only here</button>'
+      + '</div>';
+  }
+  box.innerHTML = h;
+}
+
+// keep the list in step with what's typed in the bind field
+$("cfg-bind").addEventListener("input", renderCfgInterfaces);
+$("cfg-ifaces").addEventListener("click", e => {
+  const btn = e.target.closest("[data-cfg-bind]");
+  if (!btn) return;
+  $("cfg-bind").value = btn.dataset.cfgBind;
+  renderCfgInterfaces();
+});
 
 function closeConfig() { $("cfg-overlay").style.display = "none"; }
 
