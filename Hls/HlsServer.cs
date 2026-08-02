@@ -355,7 +355,11 @@ public sealed class HlsServer : IDisposable
     /// <summary>Minimal universal player page for one stream.</summary>
     private static string WatchPage(string stream)
     {
-        var name = System.Net.WebUtility.HtmlEncode(stream);
+        var name = System.Net.WebUtility.HtmlEncode(stream);   // for HTML text
+        // for the <script> string literal: HTML entities aren't decoded inside
+        // <script>, so an HTML-encoded name would arrive as literal "&amp;" and
+        // its subs.json fetch would 404. JSON-encode it instead.
+        var nameJs = System.Text.Json.JsonSerializer.Serialize(stream);
         var src = "/" + Uri.EscapeDataString(stream) + "/index.m3u8";
         return $$"""
             <!doctype html>
@@ -379,7 +383,7 @@ public sealed class HlsServer : IDisposable
             <script>
               const v = document.getElementById("v");
               const src = "{{src}}";
-              const stream = "{{name}}";
+              const stream = {{nameJs}};
               if (window.Hls && Hls.isSupported()) {
                 const h = new Hls();
                 h.loadSource(src);

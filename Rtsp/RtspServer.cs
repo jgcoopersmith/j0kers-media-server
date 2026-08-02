@@ -167,6 +167,20 @@ public sealed class RtspServer : IDisposable
     private RtspResponse HandleOptions(RtspRequest request) =>
         new RtspResponse(200, request.CSeq).With("Public", PublicMethods);
 
+    /// <summary>
+    /// The base URI a relative control attribute resolves against: scheme +
+    /// authority + path with a trailing slash, and no query string.
+    /// </summary>
+    private static string BaseUriForControl(RtspRequest request)
+    {
+        if (Uri.TryCreate(request.Uri, UriKind.Absolute, out var u))
+        {
+            var path = u.AbsolutePath.TrimEnd('/');
+            return $"{u.Scheme}://{u.Authority}{path}/";
+        }
+        return request.Uri.Split('?')[0].TrimEnd('/') + "/";
+    }
+
     private RtspResponse HandleDescribe(RtspRequest request)
     {
         var mount = ResolveMount(request);
@@ -174,9 +188,14 @@ public sealed class RtspServer : IDisposable
             return new RtspResponse(404, request.CSeq);
 
         var serverAddress = "0.0.0.0"; // per RFC 8866, address in c= is informative for RTSP; ports come from SETUP
-        var sdp = Sdp.Build(_config.ServerName, mount.Value.name, serverAddress, "streamid=0");
+        // Use the ABSOLUTE request URI as the media control attribute. A
+        // relative control ("streamid=0") is resolved against Content-Base,
+        // which drops the query string — so the announcement service's
+        // ?play=<clip> was lost and SETUP 404'd. An absolute control URI
+        // carries the query intact and works for ordinary mounts too.
+        var sdp = Sdp.Build(_config.ServerName, mount.Value.name, serverAddress, request.Uri);
         return new RtspResponse(200, request.CSeq)
-            .With("Content-Base", request.Uri.TrimEnd('/') + "/")
+            .With("Content-Base", BaseUriForControl(request))
             .WithBody("application/sdp", sdp);
     }
 
@@ -191,8 +210,8 @@ public sealed class RtspServer : IDisposable
         if (transportHeader is null)
             return new RtspResponse(400, request.CSeq);
 
-        var transport = TransportSpec.Parse(transportHeader);
-        if (transport is null || (transport.IsTcpInterleaved && !_config.Rtsp.AllowInterleavedTcp))
+        var transport = TransportSpec.Parse(transportHeader, _config.Rtsp.AllowInterleavedTcp);
+        if (transport is null)
             return new RtspResponse(461, request.CSeq); // Unsupported Transport
 
         IMediaSource source;
@@ -260,8 +279,9 @@ public sealed class RtspServer : IDisposable
         session.State = SessionState.Playing;
         Log.Info("rtsp", $"session {session.Id}: PLAY {session.MountPath}");
 
-        // RTP-Info per RFC 7826 §18.45 so the client can sync
-        var rtpInfo = $"url={request.Uri};seq={session.Sender.NextSequence};rtptime={session.Sender.CurrentTimestamp}";
+        // RTP-Info per RFC 7826 §18.45: the seq/rtptime of the FIRST packet,
+        // captured inside Play() before the pump advances them
+        var rtpInfo = $"url={request.Uri};seq={session.Sender.StartSequence};rtptime={session.Sender.StartTimestamp}";
         return new RtspResponse(200, request.CSeq)
             .With("Session", session.Id)
             .With("Range", "npt=0-")

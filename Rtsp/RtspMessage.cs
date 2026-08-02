@@ -198,13 +198,18 @@ public sealed class TransportSpec
     public byte InterleavedRtpChannel { get; private set; }
     public byte InterleavedRtcpChannel { get; private set; } = 1;
 
-    public static TransportSpec? Parse(string header)
+    public static TransportSpec? Parse(string header, bool allowTcp = true)
     {
-        // Clients may offer several transports comma-separated; take the first we support.
+        // Clients offer several transports comma-separated in preference order;
+        // pick the first we actually support. Skipping (not rejecting) a TCP
+        // offer we can't honour lets a UDP alternative in the same header win,
+        // as RFC 7826 §18.54 requires.
         foreach (var offer in SplitOffers(header))
         {
             var spec = ParseSingle(offer);
-            if (spec is not null) return spec;
+            if (spec is null) continue;
+            if (spec.IsTcpInterleaved && !allowTcp) continue;
+            return spec;
         }
         return null;
     }

@@ -278,10 +278,16 @@ public sealed class ServerConfig
                 throw new InvalidOperationException($"Config error: {name}={port} is not a valid TCP port.");
         }
 
+        if (Rtp.PortRangeMin is < 1 or > 65534 || Rtp.PortRangeMax is < 2 or > 65535)
+            throw new InvalidOperationException("Config error: rtp port range must be within 1–65535.");
         if (Rtp.PortRangeMin >= Rtp.PortRangeMax)
             throw new InvalidOperationException("Config error: rtp.portRangeMin must be < rtp.portRangeMax.");
         if (Rtp.PortRangeMin % 2 != 0)
             throw new InvalidOperationException("Config error: rtp.portRangeMin must be even (RTP uses even/odd port pairs, RFC 3550 §11).");
+        if (Rtp.RtcpIntervalSeconds <= 0)
+            throw new InvalidOperationException("Config error: rtp.rtcpIntervalSeconds must be > 0.");
+        if (Hls.TargetDurationSeconds < 1)
+            throw new InvalidOperationException("Config error: hls.targetDurationSeconds must be ≥ 1.");
 
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var m in Mounts)

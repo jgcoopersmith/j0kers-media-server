@@ -553,7 +553,7 @@ function renderSessions(list) {
       + '<td class="mono">' + esc(s.client) + '</td>'
       + '<td>' + fmtNum(s.rtp.packetsSent) + '</td>'
       + '<td>' + fmtNum(s.rtp.octetsSent) + '</td>'
-      + '<td style="text-align:right"><button class="danger" onclick="killSession(\'' + esc(s.id) + '\')">Terminate</button></td></tr>';
+      + '<td style="text-align:right"><button class="danger" data-act="session-kill" data-arg="' + esc(s.id) + '">Terminate</button></td></tr>';
   }
   $("sessions").innerHTML = h + '</table>';
 }
@@ -567,8 +567,10 @@ async function killSession(id) {
 let mountsLoaded = 0;
 async function refreshMounts() {
   if (Date.now() - mountsLoaded < 15000) return;
+  let data;
+  try { data = await api("/api/mounts"); }
+  catch { return; } // don't stamp the cache on failure — retry next tick
   mountsLoaded = Date.now();
-  const data = await api("/api/mounts");
   let h = "";
   for (const m of data.mounts) {
     const uri = "rtsp://" + location.hostname + ":" + rtspPort + m.path;
@@ -755,30 +757,38 @@ async function loadSubtitles(url) {
     if (!t.supported) { unsupported++; continue; }
     const track = document.createElement("track");
     track.kind = "subtitles";
+    track.id = t.id;               // matched on, so duplicate labels don't collide
     track.label = t.label;
     if (t.language) track.srclang = t.language;
     track.src = base + "/subs/" + encodeURIComponent(t.id) + ".vtt";
     video.appendChild(track);
-    sel.appendChild(new Option(t.label, t.id));
+    const opt = new Option(t.label, t.id);
+    opt.dataset.lang = t.language || "";
+    sel.appendChild(opt);
   }
-  if (unsupported)
-    sel.appendChild(new Option(`(${unsupported} image-based track${unsupported > 1 ? "s" : ""} — not shown)`, "", false, false));
+  if (unsupported) {
+    const dead = new Option(`(${unsupported} image-based track${unsupported > 1 ? "s" : ""} — not shown)`, "__none");
+    dead.disabled = true;
+    sel.appendChild(dead);
+  }
 
-  // browsers keep tracks hidden until asked; restore the remembered choice
-  const want = localStorage.getItem("j0kers-subs") || "";
-  if (want && [...sel.options].some(o => o.value === want)) {
-    sel.value = want;
-    applySubtitleChoice();
+  // remember the chosen LANGUAGE (not the positional id) so "English on"
+  // carries across movies without enabling the wrong track
+  const wantLang = localStorage.getItem("j0kers-sub-lang") || "";
+  if (wantLang) {
+    const match = [...sel.options].find(o => o.dataset && o.dataset.lang === wantLang);
+    if (match) { sel.value = match.value; applySubtitleChoice(false); }
   }
 }
 
-function applySubtitleChoice() {
-  const video = $("hlsvideo"), want = $("pc-subs").value;
-  const sel = $("pc-subs");
-  const wantedLabel = want ? [...sel.options].find(o => o.value === want)?.text : null;
+function applySubtitleChoice(remember = true) {
+  const video = $("hlsvideo"), sel = $("pc-subs"), want = sel.value;
   for (const tt of video.textTracks)
-    tt.mode = wantedLabel && tt.label === wantedLabel ? "showing" : "disabled";
-  localStorage.setItem("j0kers-subs", want);
+    tt.mode = want && tt.id === want ? "showing" : "disabled";
+  if (remember) {
+    const opt = [...sel.options].find(o => o.value === want);
+    localStorage.setItem("j0kers-sub-lang", (opt && opt.dataset && opt.dataset.lang) || "");
+  }
 }
 
 $("pc-subs").addEventListener("change", applySubtitleChoice);
@@ -827,47 +837,40 @@ $("pc-speed").addEventListener("change", () => {
 $("pc-res").addEventListener("change", async () => {
   localStorage.setItem("j0kers-res", $("pc-res").value);
   // switching quality mid-play: restart the same file at the new height,
-  // resuming from the current position once it's ready
+  // resuming from the current position (playHls enforces the resume point)
   if (!currentMediaPath || mediaKind(currentMediaPath) !== "video") return;
-  const v = $("hlsvideo");
-  const resume = v.currentTime;
-  await playMedia(currentMediaPath);
-  if (resume > 1) {
-    v.addEventListener("loadedmetadata", function once() {
-      v.removeEventListener("loadedmetadata", once);
-      setTimeout(() => { try { v.currentTime = resume; } catch {} }, 300);
-    });
-  }
+  const resume = $("hlsvideo").currentTime;
+  await playMedia(currentMediaPath, resume > 1 ? resume : 0);
 });
 // restore remembered speed/quality
 if (localStorage.getItem("j0kers-speed")) $("pc-speed").value = localStorage.getItem("j0kers-speed");
 if (localStorage.getItem("j0kers-res")) $("pc-res").value = localStorage.getItem("j0kers-res");
 
-/* ---- inline HLS player: native where supported, else hls.js from CDN ---- */
-async function playHls(url) {
+/* ---- inline HLS player: native where supported, else hls.js from CDN ----
+   startAt: 0 = beginning (recordings), null = live edge (channels), or a
+   specific second to resume at (quality switch). */
+async function playHls(url, startAt) {
   const box = $("hlsplayer"), video = $("hlsvideo"), msg = $("hlsmsg");
   box.style.display = "block";
   msg.textContent = "";
   if (window._hls) { window._hls.destroy(); window._hls = null; }
 
-  // Recordings start at the beginning; live channels (ch-*) join the live
-  // edge. A playlist from an in-progress transcode has no ENDLIST, so the
-  // player treats it as live and seeks to the edge AFTER loading — the
-  // loadeddata/playing guards below yank it back to 0 once, post-seek.
-  const fromStart = !/\/ch-[^/]*\//.test(url);
+  const isChannel = /\/ch-[^/]*\//.test(url);
+  // default: recordings from 0, channels from the live edge
+  const target = startAt !== undefined ? startAt : (isChannel ? null : 0);
+
   video.addEventListener("loadedmetadata", function once() {
     video.removeEventListener("loadedmetadata", once);
     video.playbackRate = parseFloat($("pc-speed").value) || 1;
   });
-  if (fromStart) {
-    const enforceStart = () => { if (video.currentTime > 2) video.currentTime = 0; };
-    video.addEventListener("loadeddata", function once2() {
-      video.removeEventListener("loadeddata", once2);
-      enforceStart();
-    });
+  // An in-progress transcode has no ENDLIST, so the player treats it as live
+  // and seeks to the edge after loading. Pull it to `target` once, after any
+  // such seek. A single guard (not two) avoids racing the resume position.
+  if (target !== null) {
+    const enforce = () => { if (Math.abs(video.currentTime - target) > 2) { try { video.currentTime = target; } catch {} } };
     video.addEventListener("playing", function once3() {
       video.removeEventListener("playing", once3);
-      enforceStart();
+      enforce();
     });
   }
 
@@ -897,7 +900,7 @@ async function playHls(url) {
     window._hls = new Hls({ autoStartLoad: false });
     window._hls.loadSource(url);
     window._hls.attachMedia(video);
-    window._hls.startLoad(fromStart ? 0 : -1); // -1 = live edge for channels
+    window._hls.startLoad(target === null ? -1 : target); // -1 = live edge
     video.play().catch(() => {});
   } else {
     msg.textContent = "hls.js failed to load — open the URL in VLC instead.";
@@ -989,9 +992,9 @@ let favoritesLoaded = 0;
 
 async function refreshFavorites(force) {
   if (!force && Date.now() - favoritesLoaded < 15000) return;
-  favoritesLoaded = Date.now();
   let data;
   try { data = await api("/api/favorites"); } catch { return; }
+  favoritesLoaded = Date.now();
   favoritePaths = new Set(data.favorites.map(f => f.path.toLowerCase()));
   if (!data.favorites.length) { $("favorites").innerHTML = ""; return; }
   let h = '<div style="display:flex;flex-wrap:wrap;gap:6px">';
@@ -1011,7 +1014,7 @@ async function pinMedia(path, name) {
     body: JSON.stringify({ path, name }),
   });
   if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || "pin failed"); return; }
-  refreshFavorites(true);
+  await refreshFavorites(true); // update favoritePaths BEFORE re-rendering the grid
   if (currentLibPath) loadLibrary(currentLibPath); // refresh star states
 }
 
@@ -1023,7 +1026,7 @@ async function pinMediaViaPicker() {
 
 async function unpinMedia(path) {
   await fetch("/api/favorites?path=" + encodeURIComponent(path), { method: "DELETE", headers: headers() });
-  refreshFavorites(true);
+  await refreshFavorites(true);
   if (currentLibPath) loadLibrary(currentLibPath);
 }
 
@@ -1270,11 +1273,17 @@ async function playQueuePos(pos) {
   await playMedia(path);
 }
 
-function stopQueue() {
+// clear only the playlist state (leave the video alone — a caller about to
+// start a single stream doesn't want the player torn down and rebuilt)
+function clearQueueState() {
   queue.items = [];
   queue.order = [];
   queue.pos = -1;
   $("np").style.display = "none";
+}
+
+function stopQueue() {
+  clearQueueState();
   const v = $("hlsvideo");
   v.pause();
   if (window._hls) { window._hls.destroy(); window._hls = null; }
@@ -1325,9 +1334,9 @@ $("lib-save").addEventListener("click", async () => {
 let playlistsLoaded = 0;
 async function refreshPlaylists(force) {
   if (!force && Date.now() - playlistsLoaded < 15000) return;
-  playlistsLoaded = Date.now();
   let data;
   try { data = await api("/api/playlists"); } catch { return; }
+  playlistsLoaded = Date.now();
   if (!data.playlists.length) { $("playlists").innerHTML = ""; return; }
   let h = '<div style="display:flex;flex-wrap:wrap;gap:6px">';
   for (const p of data.playlists) {
@@ -1375,9 +1384,12 @@ async function prepareMedia(path) {
   }
 }
 
-async function playMedia(path, row) {
+let playGeneration = 0; // bumped on every playMedia; stale polls bail out
+
+async function playMedia(path, startAt) {
   const name = path.split(/[\\/]/).pop();
   currentMediaPath = path;
+  const gen = ++playGeneration;
   // quality applies to video only; audio has nothing to scale
   const height = mediaKind(path) === "video" ? parseInt($("pc-res").value, 10) || 0 : 0;
   try {
@@ -1398,7 +1410,8 @@ async function playMedia(path, row) {
       if (s.ready) break;
       await new Promise(res2 => setTimeout(res2, 500));
     }
-    playHls(url);
+    if (gen !== playGeneration) return; // a newer play (rapid ⏭/⏮) superseded this one
+    playHls(url, startAt);
     document.getElementById("hlsplayer").scrollIntoView({ behavior: "smooth", block: "center" });
   } catch (e) {
     alert("playback failed: " + e.message);
@@ -1439,11 +1452,11 @@ async function submitAddChannel() {
 let channelsLoaded = 0;
 async function refreshChannels(force) {
   if (!force && Date.now() - channelsLoaded < 10000) return;
-  channelsLoaded = Date.now();
   let data;
   try {
     data = await api("/api/channels");
   } catch { return; }
+  channelsLoaded = Date.now();
   ffmpegOk = data.ffmpegAvailable;
   $("ffmpeg-warn").style.display = ffmpegOk ? "none" : "block";
   if (!data.channels.length) {
@@ -1587,6 +1600,10 @@ async function pickerLoad(path) {
   list.innerHTML = '<div class="pick-row dim">loading…</div>';
   picker.selected = null;
   picker.selectedType = null;
+  // clear the folder path while loading, so Select can't return the previous
+  // folder if clicked mid-load
+  picker.path = "";
+  picker.parentPath = null;
   pickerSync();
 
   let data;
@@ -1783,8 +1800,9 @@ document.addEventListener("click", e => {
     case "copy":        copyText(el, arg); break;
     case "mount-stop":  if (previewPath === arg) stopPreview(); break;
     case "mount-remove": removeMount(arg); break;
-    case "hls-play":    playHls(arg); break;
+    case "hls-play":    clearQueueState(); playHls(arg); break;
     case "hls-stop":    stopHlsVideo(); break;
+    case "session-kill": killSession(arg); break;
     case "hls-remove":  removeHlsStream(arg); break;
     case "ch-restart":  restartChannel(arg); break;
     case "ch-remove":   removeChannel(arg); break;

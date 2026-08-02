@@ -78,6 +78,13 @@ public sealed class RtpSender : IDisposable
     public ushort NextSequence => _sequence;
     public uint CurrentTimestamp => _timestamp;
 
+    // The sequence number / timestamp of the FIRST packet of the current
+    // play, captured when the pump starts. RTP-Info must report these, not
+    // the live values, which the pump advances on another thread the instant
+    // playback begins (RFC 7826 §18.45).
+    public ushort StartSequence { get; private set; }
+    public uint StartTimestamp { get; private set; }
+
     /// <summary>True for UDP transport (as opposed to TCP-interleaved).</summary>
     public bool IsUdp => _rtpSocket is not null;
 
@@ -96,6 +103,8 @@ public sealed class RtpSender : IDisposable
         {
             if (Playing) return;
             Playing = true;
+            StartSequence = _sequence;
+            StartTimestamp = _timestamp;
             _cts = new CancellationTokenSource();
             _pumpTask = Task.Run(() => PumpAsync(_cts.Token));
             if (_rtcpSocket is not null)
