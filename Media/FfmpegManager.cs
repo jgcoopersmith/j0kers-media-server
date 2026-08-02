@@ -240,6 +240,8 @@ public sealed class FfmpegManager : IDisposable
 
             EvictVodCache(keep: stream);
             Directory.CreateDirectory(dir);
+            // remember the source so subtitles can be found for this stream
+            try { File.WriteAllText(Path.Combine(dir, "source.txt"), info.FullName); } catch { }
             var video = VideoEncoder == "copy"
                 ? "-c:v copy "
                 : $"{(height > 0 ? $"-vf scale=-2:{height} " : "")}-c:v {VideoEncoder} {VideoQualityArgs()}-pix_fmt yuv420p ";

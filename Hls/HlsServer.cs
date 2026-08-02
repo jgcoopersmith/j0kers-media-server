@@ -68,6 +68,7 @@ public sealed class HlsServer : IDisposable
                 return;
             }
 
+            OnActivity?.Invoke(); // watching keeps the server alive
             res.Headers["Access-Control-Allow-Origin"] = _config.CorsAllowOrigin;
             res.Headers["Cache-Control"] = "no-cache";
 
@@ -107,6 +108,25 @@ public sealed class HlsServer : IDisposable
                 return;
             }
 
+            // /<stream>/subs/<id>.vtt — a WebVTT track for the player
+            if (parts.Length == 3 && parts[1] == "subs")
+            {
+                var sd = SafeStreamDirectory(parts[0]);
+                if (sd is null || !Directory.Exists(sd) || parts[2].Contains(".."))
+                {
+                    WriteText(res, 404, "text/plain", "unknown stream");
+                    return;
+                }
+                var vtt = ResolveSubtitle(sd, Path.GetFileNameWithoutExtension(parts[2]));
+                if (vtt is null)
+                {
+                    WriteText(res, 404, "text/plain", "subtitle unavailable");
+                    return;
+                }
+                WriteText(res, 200, "text/vtt; charset=utf-8", ReadSharedText(vtt));
+                return;
+            }
+
             if (parts.Length != 2)
             {
                 WriteText(res, 404, "text/plain", "not found");
@@ -117,6 +137,13 @@ public sealed class HlsServer : IDisposable
             if (streamDir is null || !Directory.Exists(streamDir))
             {
                 WriteText(res, 404, "text/plain", "unknown stream");
+                return;
+            }
+
+            // /<stream>/subs.json — the track list for this stream
+            if (parts[1] == "subs.json")
+            {
+                WriteText(res, 200, "application/json", SubtitleListJson(streamDir));
                 return;
             }
 
@@ -275,6 +302,46 @@ public sealed class HlsServer : IDisposable
         }
     }
 
+    /// <summary>Set by Program so streams can expose their subtitles.</summary>
+    public Media.SubtitleManager? Subtitles { get; set; }
+
+    /// <summary>Raised on every request so a pending shutdown can be cancelled.</summary>
+    public Action? OnActivity { get; set; }
+
+    private string SubtitleListJson(string streamDir)
+    {
+        var tracks = new List<Media.SubtitleManager.Track>();
+        if (Subtitles is not null)
+        {
+            var source = Media.SubtitleManager.SourceFile(streamDir);
+            if (source is not null) tracks.AddRange(Subtitles.List(source));
+            tracks.AddRange(Subtitles.UserTracks(Path.Combine(streamDir, "subs")));
+        }
+        return System.Text.Json.JsonSerializer.Serialize(new
+        {
+            tracks = tracks.Select(t => new
+            {
+                id = t.Id,
+                label = t.Label,
+                language = t.Language,
+                kind = t.Kind,
+                supported = t.Supported,
+                url = $"/{Path.GetFileName(streamDir)}/subs/{t.Id}.vtt",
+            }),
+        });
+    }
+
+    /// <summary>Cached VTT for a track, generating it on first request.</summary>
+    private string? ResolveSubtitle(string streamDir, string id)
+    {
+        if (Subtitles is null) return null;
+        var subsDir = Path.Combine(streamDir, "subs");
+        var cached = Path.Combine(subsDir, id + ".vtt");
+        if (File.Exists(cached)) return cached; // includes user-attached tracks
+        var source = Media.SubtitleManager.SourceFile(streamDir);
+        return source is null ? null : Subtitles.GetVtt(source, id, subsDir);
+    }
+
     private static readonly Lazy<byte[]> HlsJsAsset = new(() =>
     {
         using var s = typeof(HlsServer).Assembly.GetManifestResourceStream("hls.min.js")!;
@@ -310,6 +377,7 @@ public sealed class HlsServer : IDisposable
             <script>
               const v = document.getElementById("v");
               const src = "{{src}}";
+              const stream = "{{name}}";
               if (window.Hls && Hls.isSupported()) {
                 const h = new Hls();
                 h.loadSource(src);
@@ -319,6 +387,21 @@ public sealed class HlsServer : IDisposable
               } else {
                 document.querySelector(".bar").textContent = "This browser cannot play HLS — open the raw playlist in VLC.";
               }
+              // subtitles: same-origin tracks, exposed through the native CC menu
+              fetch("/" + encodeURIComponent(stream) + "/subs.json")
+                .then(r => r.ok ? r.json() : null)
+                .then(d => {
+                  for (const t of (d && d.tracks) || []) {
+                    if (!t.supported) continue;
+                    const tr = document.createElement("track");
+                    tr.kind = "subtitles";
+                    tr.label = t.label;
+                    if (t.language) tr.srclang = t.language;
+                    tr.src = t.url;
+                    v.appendChild(tr);
+                  }
+                })
+                .catch(() => {});
               v.play().catch(() => {}); // autoplay may need a tap; controls are visible
             </script>
             </body>

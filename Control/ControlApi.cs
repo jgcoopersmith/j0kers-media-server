@@ -33,6 +33,7 @@ public sealed class ControlApi : IDisposable
     private readonly CancellationTokenSource _cts = new();
 
     private readonly Media.FfmpegManager? _ffmpeg;
+    private readonly Media.SubtitleManager? _subtitles;
     private readonly Action? _requestShutdown;
     private Timer? _closeShutdownTimer;
 
@@ -49,6 +50,7 @@ public sealed class ControlApi : IDisposable
         _services = services;
         _baseDirectory = baseDirectory;
         _ffmpeg = ffmpeg;
+        _subtitles = ffmpeg is not null ? new Media.SubtitleManager(ffmpeg) : null;
         _requestShutdown = requestShutdown;
         _playlists = new Media.PlaylistStore(baseDirectory);
         _library = new Media.LibraryStore(baseDirectory);
@@ -57,6 +59,19 @@ public sealed class ControlApi : IDisposable
 
     /// <summary>The host the listener actually bound (may differ from config after the Windows ACL fallback).</summary>
     public string BoundHost { get; private set; } = "localhost";
+
+    /// <summary>
+    /// Cancels a pending shutdown-on-close. Called for dashboard polls and
+    /// for any HLS request, so navigating to a watch page — or a phone
+    /// streaming a movie — keeps the server alive.
+    /// </summary>
+    public void NoteActivity()
+    {
+        if (_closeShutdownTimer is null) return;
+        Log.Info("control", "activity detected — shutdown cancelled");
+        _closeShutdownTimer.Dispose();
+        _closeShutdownTimer = null;
+    }
 
     public void Start()
     {
@@ -160,12 +175,7 @@ public sealed class ControlApi : IDisposable
                 WriteJson(res, 200, new { scheduled = _config.ShutdownOnClose });
                 return;
             }
-            if (method == "GET" && path == "/api/status" && _closeShutdownTimer is not null)
-            {
-                Log.Info("control", "dashboard reconnected — shutdown cancelled");
-                _closeShutdownTimer.Dispose();
-                _closeShutdownTimer = null;
-            }
+            if (method == "GET" && path == "/api/status") NoteActivity();
 
             switch (method, path)
             {
@@ -429,6 +439,13 @@ public sealed class ControlApi : IDisposable
                     WriteJson(res, 200, new { removed = plName });
                 }
                 else WriteJson(res, 404, new { error = "unknown playlist" });
+                return;
+            }
+
+            // attach a subtitle file the user picked to an existing stream
+            if (method == "POST" && path == "/api/subtitles")
+            {
+                AttachSubtitle(ctx);
                 return;
             }
 
@@ -768,6 +785,69 @@ public sealed class ControlApi : IDisposable
             }
             Log.Info("control", $"favorite pinned: {name} → {full}");
             WriteJson(res, 200, new { added = name });
+        }
+        catch (Exception ex)
+        {
+            WriteJson(res, 400, new { error = ex.Message });
+        }
+    }
+
+    private sealed record SubtitleRequest(string? stream, string? file, string? label);
+
+    /// <summary>
+    /// POST /api/subtitles {stream, file, label?} — attach a subtitle file
+    /// the user picked to a stream; it is converted to WebVTT and appears
+    /// in that stream's track list.
+    /// </summary>
+    private void AttachSubtitle(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        if (_subtitles is null || _ffmpeg?.Available != true)
+        {
+            WriteJson(res, 503, new { error = "ffmpeg is not available" });
+            return;
+        }
+        try
+        {
+            using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
+            var req = JsonSerializer.Deserialize<SubtitleRequest>(reader.ReadToEnd(),
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (string.IsNullOrWhiteSpace(req?.stream) || string.IsNullOrWhiteSpace(req?.file))
+            {
+                WriteJson(res, 400, new { error = "body must be { \"stream\": \"...\", \"file\": \"...\" }" });
+                return;
+            }
+            if (req.stream.Contains("..") || req.stream.Contains('/') || req.stream.Contains('\\'))
+            {
+                WriteJson(res, 400, new { error = "invalid stream name" });
+                return;
+            }
+
+            var mediaRoot = Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
+                ? _serverConfig.Hls.MediaRoot
+                : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
+            var streamDir = Path.GetFullPath(Path.Combine(mediaRoot, req.stream));
+            if (!streamDir.StartsWith(mediaRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                || !Directory.Exists(streamDir))
+            {
+                WriteJson(res, 404, new { error = "unknown stream" });
+                return;
+            }
+            var file = Path.GetFullPath(req.file);
+            if (!System.IO.File.Exists(file))
+            {
+                WriteJson(res, 404, new { error = "subtitle file not found" });
+                return;
+            }
+
+            var track = _subtitles.AttachFile(file, Path.Combine(streamDir, "subs"), req.label);
+            if (track is null)
+            {
+                WriteJson(res, 400, new { error = "could not convert that file to WebVTT — is it a subtitle file?" });
+                return;
+            }
+            Log.Info("control", $"subtitle attached to {req.stream}: {Path.GetFileName(file)}");
+            WriteJson(res, 200, new { added = track.Id, label = track.Label });
         }
         catch (Exception ex)
         {

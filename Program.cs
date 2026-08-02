@@ -163,12 +163,16 @@ try
 {
     ffmpeg = new J0kersMediaServer.Media.FfmpegManager(config.Ffmpeg, mediaRoot, baseDirectory);
     J0kersMediaServer.Services.WindowsUrlAcl.EnsureFor(config);
-    services = new J0kersMediaServer.Services.ServiceController(config, baseDirectory);
+    services = new J0kersMediaServer.Services.ServiceController(config, baseDirectory)
+    {
+        Subtitles = new J0kersMediaServer.Media.SubtitleManager(ffmpeg),
+    };
     services.StartServices();
     if (config.Control.Enabled)
     {
         control = new ControlApi(config, services, baseDirectory, ffmpeg,
             requestShutdown: () => shutdown.TrySetResult());
+        services.OnHlsActivity = control.NoteActivity; // streaming keeps the server up
         control.Start();
 
         if (config.Control.OpenDashboardOnStart)

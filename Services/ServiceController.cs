@@ -21,6 +21,22 @@ public sealed class ServiceController : IDisposable
     public HlsServer? Hls { get; private set; }
     public bool Running { get; private set; }
 
+    /// <summary>Attached to each HLS server so streams can serve subtitles.</summary>
+    public Media.SubtitleManager? Subtitles { get; set; }
+
+    private Action? _onHlsActivity;
+
+    /// <summary>Invoked on each HLS request; also applied to a running server.</summary>
+    public Action? OnHlsActivity
+    {
+        get => _onHlsActivity;
+        set
+        {
+            _onHlsActivity = value;
+            if (Hls is not null) Hls.OnActivity = value;
+        }
+    }
+
     public ServiceController(ServerConfig config, string baseDirectory)
     {
         _config = config;
@@ -39,7 +55,11 @@ public sealed class ServiceController : IDisposable
             }
             if (_config.Hls.Enabled)
             {
-                Hls = new HlsServer(_config.Hls, _baseDirectory);
+                Hls = new HlsServer(_config.Hls, _baseDirectory)
+                {
+                    Subtitles = Subtitles,
+                    OnActivity = _onHlsActivity,
+                };
                 Hls.Start();
             }
             Running = true;

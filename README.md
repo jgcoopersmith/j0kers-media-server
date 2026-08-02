@@ -77,6 +77,14 @@ set `ffmpeg.path`), the dashboard becomes a full media center:
   recognizes virtually every container/format ffmpeg can read.
   (Browser note: h264+aac plays everywhere; hevc/vp9/av1 depend on the
   viewer's browser support.)
+- **Subtitles** — tracks embedded in the media *and* sidecar files next to
+  it (`movie.en.srt`, `movie.ass`, …) are found automatically, converted to
+  WebVTT on demand, and offered in a Subtitles selector in the player (the
+  choice is remembered). **＋ Sub file** attaches any subtitle file you pick
+  from disk to the current stream. Non-UTF-8 subtitles are detected and
+  decoded correctly; image-based tracks (PGS/VobSub) are listed as
+  unavailable since they'd need OCR. Watch pages carry the same tracks, so
+  subtitles work on phones through the native CC menu.
 - **Player controls** — the inline player has ⏪/⏩ 10-second seek
   buttons, playback speed (0.5×–2×), and a quality selector
   (Source/1080p/720p/480p/360p — each height transcodes and caches
@@ -225,6 +233,9 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `GET/POST/DELETE /api/favorites` | list / pin / unpin quick-button media (persisted to `favorites.json`) |
 | `GET /api/codecs` | active transcode codecs + every encoder in the ffmpeg build |
 | `GET http://<host>:<hlsPort>/watch/<stream>` | universal player page for a stream (works on phones; links the raw m3u8 for VLC) |
+| `GET http://<host>:<hlsPort>/<stream>/subs.json` | subtitle tracks for a stream |
+| `GET http://<host>:<hlsPort>/<stream>/subs/<id>.vtt` | a track as WebVTT (converted and cached on first request) |
+| `POST /api/subtitles` `{stream, file}` | attach a subtitle file from disk to a stream |
 | `GET /api/image?path=` | serve a picture for the library viewer |
 | `POST /api/server/start` / `stop` | start / stop the streaming services |
 | `GET/POST /api/settings` | read / save hostname + ports (persisted to `settings.json`) |

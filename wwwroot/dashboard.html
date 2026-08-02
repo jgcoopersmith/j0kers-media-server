@@ -294,11 +294,16 @@
         <button id="np-next" title="Next">⏭</button>
         <button id="np-stop" class="danger" title="Stop playlist">✕</button>
       </div>
-      <video id="hlsvideo" controls playsinline></video>
+      <video id="hlsvideo" controls playsinline crossorigin="anonymous"></video>
       <div id="pctl" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px">
         <button id="pc-back" title="Back 10 seconds">⏪ 10s</button>
         <button id="pc-fwd" title="Forward 10 seconds">10s ⏩</button>
         <span style="flex:1"></span>
+        <label style="color:var(--muted);font-size:12px">Subtitles
+          <select id="pc-subs" class="am-in" style="padding:3px 6px">
+            <option value="">Off</option>
+          </select></label>
+        <button id="pc-subadd" title="Attach a subtitle file from disk">＋ Sub file</button>
         <label style="color:var(--muted);font-size:12px">Speed
           <select id="pc-speed" class="am-in" style="padding:3px 6px">
             <option value="0.5">0.5×</option><option value="0.75">0.75×</option>
@@ -708,6 +713,84 @@ async function refreshHls() {
 }
 
 
+/* ---- subtitles ----
+   Tracks are discovered per stream (embedded tracks + sidecar files next
+   to the media) and served as WebVTT by the HLS server; users can also
+   attach any subtitle file by hand. */
+let currentStreamName = null;
+
+function streamNameFromUrl(url) {
+  const m = url.match(/\/([^/]+)\/index\.m3u8/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+async function loadSubtitles(url) {
+  const video = $("hlsvideo"), sel = $("pc-subs");
+  // clear previous tracks
+  [...video.querySelectorAll("track")].forEach(t => t.remove());
+  sel.innerHTML = '<option value="">Off</option>';
+  currentStreamName = streamNameFromUrl(url);
+  if (!currentStreamName) return;
+
+  const base = url.slice(0, url.lastIndexOf("/"));
+  let data;
+  try {
+    const r = await fetch(base + "/subs.json");
+    if (!r.ok) return;
+    data = await r.json();
+  } catch { return; }
+
+  let unsupported = 0;
+  for (const t of data.tracks || []) {
+    if (!t.supported) { unsupported++; continue; }
+    const track = document.createElement("track");
+    track.kind = "subtitles";
+    track.label = t.label;
+    if (t.language) track.srclang = t.language;
+    track.src = base + "/subs/" + encodeURIComponent(t.id) + ".vtt";
+    video.appendChild(track);
+    sel.appendChild(new Option(t.label, t.id));
+  }
+  if (unsupported)
+    sel.appendChild(new Option(`(${unsupported} image-based track${unsupported > 1 ? "s" : ""} — not shown)`, "", false, false));
+
+  // browsers keep tracks hidden until asked; restore the remembered choice
+  const want = localStorage.getItem("j0kers-subs") || "";
+  if (want && [...sel.options].some(o => o.value === want)) {
+    sel.value = want;
+    applySubtitleChoice();
+  }
+}
+
+function applySubtitleChoice() {
+  const video = $("hlsvideo"), want = $("pc-subs").value;
+  const sel = $("pc-subs");
+  const wantedLabel = want ? [...sel.options].find(o => o.value === want)?.text : null;
+  for (const tt of video.textTracks)
+    tt.mode = wantedLabel && tt.label === wantedLabel ? "showing" : "disabled";
+  localStorage.setItem("j0kers-subs", want);
+}
+
+$("pc-subs").addEventListener("change", applySubtitleChoice);
+
+$("pc-subadd").addEventListener("click", async () => {
+  if (!currentStreamName) { alert("Play a stream first, then attach a subtitle file to it."); return; }
+  const file = await pickPath({ mode: "file", title: "Pick a subtitle file (.srt, .ass, .vtt…)" });
+  if (!file) return;
+  const r = await fetch("/api/subtitles", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...headers() },
+    body: JSON.stringify({ stream: currentStreamName, file }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(data.error || "could not attach that file"); return; }
+  // reload the list and switch to the new track
+  const url = "http://" + location.hostname + ":" + hlsPort + "/" + encodeURIComponent(currentStreamName) + "/index.m3u8";
+  await loadSubtitles(url);
+  $("pc-subs").value = data.added;
+  applySubtitleChoice();
+});
+
 /* Stop button for HLS/mount video playback: ends whatever the inline
    player is doing (single stream or playlist) and hides it. */
 function stopHlsVideo() {
@@ -777,6 +860,8 @@ async function playHls(url) {
       enforceStart();
     });
   }
+
+  loadSubtitles(url);
 
   if (video.canPlayType("application/vnd.apple.mpegurl")) {
     video.src = url;
