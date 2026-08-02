@@ -281,76 +281,75 @@
     </div>
   </div>
 
-  <div class="grid2">
-    <div class="card">
-      <h2 style="display:flex;align-items:center"><span style="flex:1">RTSP mounts</span>
-        <button onclick="toggleAddMount()" id="am-toggle">+ Add mount</button></h2>
-      <div id="addmount" style="display:none;border:1px solid var(--grid);border-radius:10px;padding:12px;margin-bottom:10px">
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <input id="am-path" class="am-in" placeholder="/music" style="width:130px">
-          <select id="am-source" class="am-in" onchange="syncAddMount()">
-            <option value="file">audio file</option>
-            <option value="tone">test tone</option>
-          </select>
-          <span id="am-filerow" style="display:flex;gap:8px;flex:1;min-width:220px">
-            <input id="am-file" class="am-in" placeholder="pick an audio file…" readonly style="flex:1;min-width:0">
-            <button onclick="browseMountFile()">📁 Browse</button>
-          </span>
-          <span id="am-tonerow" style="display:none;align-items:center;gap:6px">
-            <input id="am-freq" class="am-in" type="number" min="20" max="4000" value="440" style="width:80px"> Hz
-          </span>
-        </div>
-        <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
-          <input id="am-desc" class="am-in" placeholder="description (optional)" style="flex:1">
-          <button onclick="submitAddMount()" id="am-submit" style="color:var(--good);border-color:color-mix(in srgb,var(--good) 45%,transparent)">Add</button>
-          <button onclick="toggleAddMount()">Cancel</button>
-        </div>
-        <div id="am-msg" style="color:var(--critical);font-size:12px;margin-top:6px"></div>
+  <div class="card">
+    <h2>HLS streams</h2>
+    <div id="hls"></div>
+    <div id="hlsplayer">
+      <div id="np" style="display:none;align-items:center;gap:8px;margin-bottom:6px">
+        <span style="color:var(--ink);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1"><span id="np-title"></span>
+          <span id="np-pos" style="color:var(--muted);font-size:12px"></span></span>
+        <button id="np-shuf" title="Shuffle">🔀</button>
+        <button id="np-loop" title="Loop">🔁</button>
+        <button id="np-prev" title="Previous">⏮</button>
+        <button id="np-next" title="Next">⏭</button>
+        <button id="np-stop" class="danger" title="Stop playlist">✕</button>
       </div>
-      <div id="mounts"></div>
-      <div id="mountplayer" style="display:none;margin-top:12px">
-        <div style="display:flex;align-items:center;gap:10px">
-          <div style="flex:1;height:8px;border-radius:4px;background:var(--surface-2);overflow:hidden">
-            <div id="vu" style="height:100%;width:0%;background:linear-gradient(90deg,var(--good),var(--warning));transition:width 80ms linear"></div>
-          </div>
-          <input id="vol" type="range" min="0" max="1" step="0.05" value="0.8" style="width:110px">
-        </div>
-        <div id="mountmsg" style="color:var(--muted);font-size:12px;margin-top:6px"></div>
+      <video id="hlsvideo" controls playsinline></video>
+      <div id="pctl" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px">
+        <button id="pc-back" title="Back 10 seconds">⏪ 10s</button>
+        <button id="pc-fwd" title="Forward 10 seconds">10s ⏩</button>
+        <span style="flex:1"></span>
+        <label style="color:var(--muted);font-size:12px">Speed
+          <select id="pc-speed" class="am-in" style="padding:3px 6px">
+            <option value="0.5">0.5×</option><option value="0.75">0.75×</option>
+            <option value="1" selected>1×</option><option value="1.25">1.25×</option>
+            <option value="1.5">1.5×</option><option value="2">2×</option>
+          </select></label>
+        <label style="color:var(--muted);font-size:12px">Quality
+          <select id="pc-res" class="am-in" style="padding:3px 6px">
+            <option value="0" selected>Source</option>
+            <option value="1080">1080p</option><option value="720">720p</option>
+            <option value="480">480p</option><option value="360">360p</option>
+          </select></label>
       </div>
+      <div id="hlsmsg"></div>
     </div>
-    <div class="card">
-      <h2>HLS streams</h2>
-      <div id="hls"></div>
-      <div id="hlsplayer">
-        <div id="np" style="display:none;align-items:center;gap:8px;margin-bottom:6px">
-          <span style="color:var(--ink);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1"><span id="np-title"></span>
-            <span id="np-pos" style="color:var(--muted);font-size:12px"></span></span>
-          <button id="np-shuf" title="Shuffle">🔀</button>
-          <button id="np-loop" title="Loop">🔁</button>
-          <button id="np-prev" title="Previous">⏮</button>
-          <button id="np-next" title="Next">⏭</button>
-          <button id="np-stop" class="danger" title="Stop playlist">✕</button>
-        </div>
-        <video id="hlsvideo" controls playsinline></video>
-        <div id="pctl" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px">
-          <button id="pc-back" title="Back 10 seconds">⏪ 10s</button>
-          <button id="pc-fwd" title="Forward 10 seconds">10s ⏩</button>
-          <span style="flex:1"></span>
-          <label style="color:var(--muted);font-size:12px">Speed
-            <select id="pc-speed" class="am-in" style="padding:3px 6px">
-              <option value="0.5">0.5×</option><option value="0.75">0.75×</option>
-              <option value="1" selected>1×</option><option value="1.25">1.25×</option>
-              <option value="1.5">1.5×</option><option value="2">2×</option>
-            </select></label>
-          <label style="color:var(--muted);font-size:12px">Quality
-            <select id="pc-res" class="am-in" style="padding:3px 6px">
-              <option value="0" selected>Source</option>
-              <option value="1080">1080p</option><option value="720">720p</option>
-              <option value="480">480p</option><option value="360">360p</option>
-            </select></label>
-        </div>
-        <div id="hlsmsg"></div>
+  </div>
+
+  <div class="card">
+    <h2 style="display:flex;align-items:center"><span style="flex:1">RTSP mounts</span>
+      <button onclick="toggleAddMount()" id="am-toggle">+ Add mount</button></h2>
+    <div id="addmount" style="display:none;border:1px solid var(--grid);border-radius:10px;padding:12px;margin-bottom:10px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <input id="am-path" class="am-in" placeholder="/music" style="width:130px">
+        <select id="am-source" class="am-in" onchange="syncAddMount()">
+          <option value="file">audio file</option>
+          <option value="tone">test tone</option>
+        </select>
+        <span id="am-filerow" style="display:flex;gap:8px;flex:1;min-width:220px">
+          <input id="am-file" class="am-in" placeholder="pick an audio file…" readonly style="flex:1;min-width:0">
+          <button onclick="browseMountFile()">📁 Browse</button>
+        </span>
+        <span id="am-tonerow" style="display:none;align-items:center;gap:6px">
+          <input id="am-freq" class="am-in" type="number" min="20" max="4000" value="440" style="width:80px"> Hz
+        </span>
       </div>
+      <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+        <input id="am-desc" class="am-in" placeholder="description (optional)" style="flex:1">
+        <button onclick="submitAddMount()" id="am-submit" style="color:var(--good);border-color:color-mix(in srgb,var(--good) 45%,transparent)">Add</button>
+        <button onclick="toggleAddMount()">Cancel</button>
+      </div>
+      <div id="am-msg" style="color:var(--critical);font-size:12px;margin-top:6px"></div>
+    </div>
+    <div id="mounts"></div>
+    <div id="mountplayer" style="display:none;margin-top:12px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <div style="flex:1;height:8px;border-radius:4px;background:var(--surface-2);overflow:hidden">
+          <div id="vu" style="height:100%;width:0%;background:linear-gradient(90deg,var(--good),var(--warning));transition:width 80ms linear"></div>
+        </div>
+        <input id="vol" type="range" min="0" max="1" step="0.05" value="0.8" style="width:110px">
+      </div>
+      <div id="mountmsg" style="color:var(--muted);font-size:12px;margin-top:6px"></div>
     </div>
   </div>
 
