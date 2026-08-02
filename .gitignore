@@ -20,3 +20,6 @@ publish/
 /library.json
 /config/favorites.json
 /favorites.json
+# accounts: password hashes and key digests — never commit these
+/config/users.json
+/users.json

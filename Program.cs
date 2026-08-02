@@ -176,15 +176,29 @@ if (config.MinimizeToTray && !OperatingSystem.IsWindows())
 
 // (tray mode also turns off shutdown-on-close; see ApplyTrayMode below)
 
-// The control API's drive-by-RCE risk is closed by the CSRF guard (no
-// website can drive it). A LAN peer reaching it directly is the operator's
-// own call, so we don't force a token — just note it once when it's exposed
-// beyond loopback with none set. Set control.authToken to require one.
-if (config.Control.Enabled
-    && config.Control.BindAddress is not ("127.0.0.1" or "localhost" or "::1")
-    && config.Control.AuthToken.Length == 0)
+// Accounts live in users.json next to the rest of the config. Until an
+// administrator exists the server behaves exactly as it did before there
+// were accounts — open — and the dashboard offers to create one.
+J0kersMediaServer.Auth.UserStore userStore;
+try
 {
-    Log.Info("main", "control API is reachable on the network without a token; set control.authToken to require one");
+    userStore = new J0kersMediaServer.Auth.UserStore(baseDirectory);
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine($"Failed to load accounts: {ex.Message}");
+    return 1;
+}
+var auth = new J0kersMediaServer.Auth.AuthService(userStore, config.Control.AuthToken);
+
+if (config.Control.Enabled && !auth.Enforcing)
+{
+    var exposed = config.Control.BindAddress is not ("127.0.0.1" or "localhost" or "::1");
+    Log.Warn("main", exposed
+        ? "no administrator account — the dashboard and its configuration are open to anyone on this network"
+        : "no administrator account — open the dashboard to create one and protect the configuration");
+    // needed to claim the server from anything other than this machine
+    Log.Info("main", $"first-run setup code: {auth.SetupCode}");
 }
 
 var mediaRoot = Path.GetFullPath(Path.IsPathRooted(config.Hls.MediaRoot)
@@ -203,7 +217,7 @@ try
     services.StartServices();
     if (config.Control.Enabled)
     {
-        control = new ControlApi(config, services, baseDirectory, ffmpeg,
+        control = new ControlApi(config, services, baseDirectory, auth, ffmpeg,
             requestShutdown: () => shutdown.TrySetResult());
         services.OnHlsActivity = control.NoteActivity; // streaming keeps the server up
         control.Start();

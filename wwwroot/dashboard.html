@@ -181,6 +181,59 @@
   #cfg h3 { margin: 0 0 14px; font-size: 15px; }
   #cfg label { display: block; color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; margin: 10px 0 4px; }
   #cfg .am-in { width: 100%; }
+
+  /* ---- accounts: sign-in gate, account panel, user administration ---- */
+  .overlay {
+    display: none; position: fixed; inset: 0; z-index: 70;
+    background: rgba(0,0,0,0.62); align-items: center; justify-content: center;
+    overflow-y: auto; padding: 20px;
+  }
+  #login-overlay { z-index: 80; }
+  .dlg {
+    width: min(440px, calc(100vw - 40px));
+    background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+    padding: 18px; box-shadow: 0 18px 50px rgba(0,0,0,0.45);
+  }
+  .dlg.wide { width: min(680px, calc(100vw - 40px)); }
+  .dlg h3 { margin: 0 0 12px; font-size: 15px; }
+  .dlg label { display: block; color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; margin: 12px 0 4px; }
+  .dlg .am-in { width: 100%; }
+  .dlg .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+  .dlg .msg { font-size: 12px; margin-top: 10px; min-height: 16px; color: var(--critical); }
+  .dlg .msg.ok { color: var(--good); }
+  .dlg .hint { color: var(--muted); font-size: 11.5px; margin-top: 6px; line-height: 1.5; }
+  .go { color: var(--good); border-color: color-mix(in srgb, var(--good) 45%, transparent); }
+  .chk { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink); margin-top: 12px; cursor: pointer; }
+  .chk input { width: 15px; height: 15px; flex: none; }
+  .secret {
+    font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all;
+    background: var(--surface-2); border: 1px solid color-mix(in srgb, var(--good) 45%, transparent);
+    border-radius: 8px; padding: 9px 10px; margin-top: 8px; color: var(--ink);
+  }
+  .usr { border: 1px solid var(--grid); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+  .usr .top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .usr .nm { font-weight: 600; font-size: 13px; }
+  .usr .meta { color: var(--muted); font-size: 11.5px; }
+  .badge {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px;
+  }
+  .badge.admin { color: var(--series-1); border-color: color-mix(in srgb, var(--series-1) 45%, transparent); }
+  .badge.off { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 45%, transparent); }
+  .keyrow { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-2); padding: 3px 0; }
+  .keyrow .meta { color: var(--muted); font-size: 11px; flex: 1; }
+  #authnote {
+    display: none; align-items: center; gap: 10px; margin-bottom: 14px; font-size: 12.5px;
+    color: var(--warning); border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
+    background: color-mix(in srgb, var(--warning) 8%, transparent);
+    border-radius: 10px; padding: 9px 12px;
+  }
+  /* a signed-in non-admin never sees an administration control */
+  body:not(.is-admin) .admin-only,
+  body:not(.is-admin) [data-act$="-remove"],
+  body:not(.is-admin) [data-act="fav-add"],
+  body:not(.is-admin) [data-act="ch-restart"],
+  body:not(.is-admin) [data-act="session-kill"] { display: none !important; }
   /* media library sections & thumbnail tiles */
   .lib-h {
     display: flex; align-items: baseline; gap: 8px;
@@ -260,15 +313,17 @@
       <div class="sub"><span class="dot" id="livedot"></span><span id="livetext">connecting…</span></div>
     </div>
     <div class="spacer"></div>
-    <button class="pill" id="powerbtn" onclick="togglePower()" title="Start or stop the streaming services">⏻ …</button>
-    <button class="pill" id="cfgbtn" onclick="openConfig()" title="Configure hostname and ports">⚙ Config</button>
-    <button class="pill" id="browsebtn" onclick="browseAndCopy()" title="Browse this machine and copy a path">📁 Browse</button>
+    <button class="pill admin-only" id="powerbtn" onclick="togglePower()" title="Start or stop the streaming services">⏻ …</button>
+    <button class="pill admin-only" id="cfgbtn" onclick="openConfig()" title="Configure hostname and ports">⚙ Config</button>
+    <button class="pill admin-only" id="usersbtn" onclick="openUsers()" title="Add, edit, and remove user accounts">👥 Users</button>
+    <button class="pill admin-only" id="browsebtn" onclick="browseAndCopy()" title="Browse this machine and copy a path">📁 Browse</button>
+    <button class="pill" id="acctbtn" onclick="openAccount()" title="Your account, password, and keys">👤 <span id="acct-pill">…</span></button>
     <span class="pill" id="verpill">v–</span>
   </header>
 
-  <div id="authbar">
-    <input id="token" type="password" placeholder="Control API bearer token" autocomplete="off">
-    <button onclick="saveToken()">Unlock</button>
+  <div id="authnote">
+    <span style="flex:1">⚠ This server has no administrator account — anyone who can reach this page can reconfigure it.</span>
+    <button onclick="showLogin()">Create one</button>
   </div>
 
   <div class="tiles">
@@ -315,7 +370,7 @@
           <select id="pc-subs" class="am-in" style="padding:3px 6px">
             <option value="">Off</option>
           </select></label>
-        <button id="pc-subadd" title="Attach a subtitle file from disk">＋ Sub file</button>
+        <button id="pc-subadd" class="admin-only" title="Attach a subtitle file from disk">＋ Sub file</button>
         <label style="color:var(--muted);font-size:12px">Speed
           <select id="pc-speed" class="am-in" style="padding:3px 6px">
             <option value="0.5">0.5×</option><option value="0.75">0.75×</option>
@@ -335,8 +390,8 @@
 
   <div class="card">
     <h2 style="display:flex;align-items:center"><span style="flex:1">RTSP mounts</span>
-      <button onclick="toggleAddMount()" id="am-toggle">+ Add mount</button></h2>
-    <div id="addmount" style="display:none;border:1px solid var(--grid);border-radius:10px;padding:12px;margin-bottom:10px">
+      <button onclick="toggleAddMount()" id="am-toggle" class="admin-only">+ Add mount</button></h2>
+    <div id="addmount" class="admin-only" style="display:none;border:1px solid var(--grid);border-radius:10px;padding:12px;margin-bottom:10px">
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <input id="am-path" class="am-in" placeholder="/music" style="width:130px">
         <select id="am-source" class="am-in" onchange="syncAddMount()">
@@ -373,9 +428,9 @@
   <div class="card">
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Media library</span>
       <button id="lib-playall" style="display:none">▶ Play folder</button>
-      <button id="lib-save" style="display:none">☆ Save playlist</button>
-      <button onclick="pinMediaViaPicker()">⭐ Pin media</button>
-      <button onclick="addLibraryRoot()">➕ Add folder</button></h2>
+      <button id="lib-save" class="admin-only" style="display:none">☆ Save playlist</button>
+      <button onclick="pinMediaViaPicker()" class="admin-only">⭐ Pin media</button>
+      <button onclick="addLibraryRoot()" class="admin-only">➕ Add folder</button></h2>
     <div id="favorites" style="margin-bottom:6px"></div>
     <div id="lib-roots" style="margin-bottom:6px"></div>
     <div id="playlists" style="margin-bottom:6px"></div>
@@ -389,8 +444,8 @@
 
   <div class="card">
     <h2 style="display:flex;align-items:center"><span style="flex:1">Live channels</span>
-      <button onclick="toggleAddChannel()" id="ch-toggle">+ Add channel</button></h2>
-    <div id="addchannel" style="display:none;border:1px solid var(--grid);border-radius:10px;padding:12px;margin-bottom:10px">
+      <button onclick="toggleAddChannel()" id="ch-toggle" class="admin-only">+ Add channel</button></h2>
+    <div id="addchannel" class="admin-only" style="display:none;border:1px solid var(--grid);border-radius:10px;padding:12px;margin-bottom:10px">
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <input id="ch-name" class="am-in" placeholder="channel name (e.g. NBC 5.1)" style="width:190px">
         <input id="ch-url" class="am-in" placeholder="http://hdhomerun:5004/auto/v5.1 · rtsp://cam/… · IPTV url" style="flex:1;min-width:260px">
@@ -405,6 +460,85 @@
 
 <div id="lightbox" style="display:none;position:fixed;inset:0;z-index:60;background:rgba(0,0,0,0.85);align-items:center;justify-content:center;cursor:zoom-out" onclick="this.style.display='none'">
   <img id="lightbox-img" style="max-width:94vw;max-height:92vh;border-radius:8px" alt="">
+</div>
+
+<div id="login-overlay" class="overlay">
+  <div class="dlg" role="dialog" aria-modal="true">
+    <h3>🃏 <span id="login-title">Sign in</span></h3>
+    <div id="login-intro" class="hint" style="margin-top:0"></div>
+    <label>Username</label>
+    <input id="login-user" class="am-in" autocomplete="username" autocapitalize="off" spellcheck="false">
+    <label>Password</label>
+    <input id="login-pass" class="am-in" type="password" autocomplete="current-password">
+    <div id="login-confirm-row" style="display:none">
+      <label>Confirm password</label>
+      <input id="login-pass2" class="am-in" type="password" autocomplete="new-password">
+    </div>
+    <div id="login-code-row" style="display:none">
+      <label>Setup code</label>
+      <input id="login-code" class="am-in" autocomplete="off" placeholder="shown in the server's console at startup">
+    </div>
+    <label class="chk"><input id="login-remember" type="checkbox" checked>
+      <span>Remember this device — issue a key so this browser stays signed in</span></label>
+    <div id="login-msg" class="msg"></div>
+    <div class="row">
+      <button id="login-cancel" onclick="closeOverlay('login-overlay')" style="display:none">Cancel</button>
+      <button class="go" id="login-go" onclick="submitLogin()">Sign in</button>
+    </div>
+    <div id="login-insecure" class="hint" style="display:none"></div>
+  </div>
+</div>
+
+<div id="acct-overlay" class="overlay">
+  <div class="dlg" role="dialog" aria-modal="true">
+    <h3>👤 <span id="acct-name">Account</span></h3>
+    <div id="acct-meta" class="hint" style="margin-top:0"></div>
+
+    <label>Change password</label>
+    <input id="acct-cur" class="am-in" type="password" placeholder="current password" autocomplete="current-password">
+    <input id="acct-new" class="am-in" type="password" placeholder="new password (at least 8 characters)" autocomplete="new-password" style="margin-top:6px">
+    <div style="display:flex;justify-content:flex-end;margin-top:8px">
+      <button onclick="changePassword()">Update password</button>
+    </div>
+
+    <label>Keys</label>
+    <div class="hint" style="margin-top:0">A key signs a device in without a password — send it as
+      <span class="mono">Authorization: Bearer …</span>, or <span class="mono">?key=…</span> where headers
+      aren't possible. Revoking one takes effect immediately.</div>
+    <div id="acct-keys" style="margin-top:8px"></div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <input id="acct-keylabel" class="am-in" placeholder="what is this key for?" style="flex:1">
+      <button onclick="mintOwnKey()">＋ New key</button>
+    </div>
+    <div id="acct-secret"></div>
+    <div id="acct-msg" class="msg"></div>
+    <div class="row">
+      <button class="danger" onclick="signOut()">Sign out</button>
+      <button onclick="closeOverlay('acct-overlay')">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="users-overlay" class="overlay">
+  <div class="dlg wide" role="dialog" aria-modal="true">
+    <h3>👥 User accounts</h3>
+    <div class="hint" style="margin-top:0">Administrators can configure the server, start and stop it, and
+      manage accounts. Everyone else can watch what's in the shared library and nothing more.</div>
+    <div id="users-list" style="margin-top:12px"></div>
+
+    <label>Add a user</label>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <input id="nu-name" class="am-in" placeholder="username" style="width:150px" autocapitalize="off" spellcheck="false">
+      <input id="nu-pass" class="am-in" type="password" placeholder="password (or leave blank for key-only)" style="flex:1;min-width:200px" autocomplete="new-password">
+      <select id="nu-role" class="am-in">
+        <option value="user">user</option>
+        <option value="admin">admin</option>
+      </select>
+      <button class="go" onclick="createUser()">Add</button>
+    </div>
+    <div id="users-msg" class="msg"></div>
+    <div class="row"><button onclick="closeOverlay('users-overlay')">Close</button></div>
+  </div>
 </div>
 
 <div id="cfg-overlay">
@@ -456,14 +590,21 @@ const POLL_MS = 2000, HISTORY = 60;          // 60 samples × 2 s = 2 min
 const hist = [];                              // {t: Date, pps: number}
 let lastPackets = null, lastTime = null;
 let hlsPort = null, rtspPort = null;
-let token = sessionStorage.getItem("j0kers-token") || "";
-// bootstrap from a ?token=… link (the console prints one when the server
-// auto-generates a token for a networked bind), then scrub it from the URL
+/* The bearer credential: a device key from "remember this device", or a
+   legacy control.authToken. Keys live in localStorage so a phone stays
+   signed in across restarts; passwords are never stored anywhere — they
+   are exchanged for an HttpOnly session cookie the page cannot read. */
+let token = localStorage.getItem("j0kers-key") || sessionStorage.getItem("j0kers-token") || "";
+let me = null;              // the signed-in account, from /api/auth/state
+let authState = null;       // {authRequired, setupRequired, secure}
+
+// bootstrap from a ?token=/?key=… link, then scrub it from the URL so it
+// doesn't linger in history, bookmarks, or a Referer header
 (function () {
-  const m = location.search.match(/[?&]token=([^&]+)/);
+  const m = location.search.match(/[?&](?:token|key)=([^&]+)/);
   if (m) {
     token = decodeURIComponent(m[1]);
-    sessionStorage.setItem("j0kers-token", token);
+    localStorage.setItem("j0kers-key", token);
     history.replaceState(null, "", location.pathname);
   }
 })();
@@ -477,20 +618,320 @@ function joinPath(base, name) {
 }
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
-function headers() { return token ? { "Authorization": "Bearer " + token } : {}; }
-
-function saveToken() {
-  token = $("token").value.trim();
-  sessionStorage.setItem("j0kers-token", token);
-  $("authbar").style.display = "none";
-  tick();
+/* X-J0kers-CSRF is what tells the server this request came from our own
+   JavaScript: a hostile page can't set a custom header on a cross-origin
+   request without a preflight the browser will refuse, so the session
+   cookie alone can never be ridden from somewhere else. */
+function headers() {
+  const h = { "X-J0kers-CSRF": "1" };
+  if (token) h["Authorization"] = "Bearer " + token;
+  return h;
 }
 
 async function api(path) {
   const r = await fetch(path, { headers: headers() });
-  if (r.status === 401) { $("authbar").style.display = "flex"; throw new Error("unauthorized"); }
+  if (r.status === 401) { showLogin(); throw new Error("unauthorized"); }
   if (!r.ok) throw new Error(path + " → " + r.status);
   return r.json();
+}
+
+/* POST/PUT/DELETE with a JSON body; returns [ok, data]. */
+async function send(method, path, body) {
+  const opts = { method, headers: headers() };
+  if (body !== undefined) {
+    opts.headers = { "Content-Type": "application/json", ...opts.headers };
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(path, opts);
+  let data = {};
+  try { data = await r.json(); } catch {}
+  if (r.status === 401) showLogin();
+  return [r.ok, data];
+}
+
+/* ---- accounts: sign-in gate, session state, role-driven UI ---- */
+
+function closeOverlay(id) { $(id).style.display = "none"; }
+
+/* Who are we, and does this server have accounts at all? Drives both the
+   sign-in gate and which controls the page is allowed to show. */
+async function refreshAuth() {
+  try {
+    authState = await (await fetch("/api/auth/state", { headers: headers() })).json();
+  } catch { return false; }
+  me = authState.user || null;
+  const admin = !!me && me.role === "admin";
+  document.body.classList.toggle("is-admin", admin);
+  $("acct-pill").textContent = me ? (me.username || "local") : "sign in";
+  $("acctbtn").style.display = authState.authRequired ? "" : "none";
+  // no admin account yet: the server is wide open, say so plainly
+  $("authnote").style.display = authState.setupRequired ? "flex" : "none";
+  if (!authState.authenticated) { showLogin(); return false; }
+  closeOverlay("login-overlay");
+  return true;
+}
+
+function showLogin() {
+  // already up: leave the form (and any error on it) exactly as it is —
+  // the poll loop calls in here every couple of seconds while signed out
+  if ($("login-overlay").style.display === "flex") return;
+  const setup = !authState || authState.setupRequired;
+  $("login-title").textContent = setup ? "Set up this server" : "Sign in";
+  $("login-intro").textContent = setup
+    ? "Create the administrator account. Until you do, anyone who can reach this page can reconfigure the server."
+    : "";
+  $("login-go").textContent = setup ? "Create administrator" : "Sign in";
+  $("login-confirm-row").style.display = setup ? "" : "none";
+  // claiming the server from another machine needs the console's code
+  $("login-code-row").style.display = setup && !(authState && authState.secure === true) ? "" : "none";
+  $("login-cancel").style.display = setup && authState && authState.authenticated ? "" : "none";
+  $("login-pass").setAttribute("autocomplete", setup ? "new-password" : "current-password");
+  $("login-insecure").style.display = authState && authState.secure === false ? "" : "none";
+  $("login-insecure").textContent =
+    "⚠ This page is served over plain HTTP, so your password crosses the network unencrypted. "
+    + "On an untrusted network, reach it over a VPN or an HTTPS reverse proxy.";
+  $("login-msg").textContent = "";
+  $("login-overlay").style.display = "flex";
+  setTimeout(() => $(($("login-user").value ? "login-pass" : "login-user")).focus(), 30);
+}
+
+async function submitLogin() {
+  const msg = $("login-msg");
+  msg.className = "msg";
+  const setup = !authState || authState.setupRequired;
+  const username = $("login-user").value.trim();
+  const password = $("login-pass").value;
+  if (!username || !password) { msg.textContent = "username and password are required"; return; }
+  if (setup && password !== $("login-pass2").value) { msg.textContent = "the two passwords don't match"; return; }
+
+  const body = { username, password, remember: $("login-remember").checked };
+  if (setup) body.code = $("login-code").value.trim();
+  const [ok, data] = await send("POST", setup ? "/api/auth/setup" : "/api/auth/login", body);
+  if (!ok) {
+    msg.textContent = data.error || "sign-in failed";
+    if (data.codeRequired) $("login-code-row").style.display = "";
+    return;
+  }
+  // the password is gone from here the moment it's been exchanged
+  $("login-pass").value = $("login-pass2").value = "";
+  if (data.key) { token = data.key; localStorage.setItem("j0kers-key", token); }
+  closeOverlay("login-overlay");
+  await refreshAuth();
+  mountsLoaded = 0; channelsLoaded = 0;
+  tick();
+}
+
+async function signOut() {
+  await send("POST", "/api/auth/logout");
+  token = "";
+  localStorage.removeItem("j0kers-key");
+  sessionStorage.removeItem("j0kers-token");
+  location.reload();
+}
+
+/* ---- account panel: own password and own keys ---- */
+
+async function openAccount() {
+  if (!await refreshAuth()) return;
+  $("acct-msg").textContent = "";
+  $("acct-secret").innerHTML = "";
+  $("acct-cur").value = $("acct-new").value = "";
+  $("acct-name").textContent = me ? (me.displayName || me.username) : "Account";
+  $("acct-meta").textContent = me
+    ? me.role + (me.lastLoginUtc ? " · last signed in " + new Date(me.lastLoginUtc).toLocaleString() : "")
+    : "";
+  renderKeys($("acct-keys"), (me && me.keys) || [], null);
+  $("acct-overlay").style.display = "flex";
+}
+
+function renderKeys(box, keys, userId) {
+  if (!keys.length) { box.innerHTML = '<div class="meta" style="color:var(--muted);font-size:11.5px">No keys.</div>'; return; }
+  box.innerHTML = keys.map(k =>
+    '<div class="keyrow"><span>🔑 ' + esc(k.label) + '</span>'
+    + '<span class="meta">' + (k.expired ? "expired" : k.lastUsedUtc
+        ? "last used " + new Date(k.lastUsedUtc).toLocaleDateString()
+        : "never used") + '</span>'
+    + '<button data-act="key-revoke" data-arg="' + esc(k.id) + '"'
+    + (userId ? ' data-user="' + esc(userId) + '"' : '') + '>Revoke</button></div>').join("");
+}
+
+async function mintOwnKey() {
+  const [ok, data] = await send("POST", "/api/auth/keys", { label: $("acct-keylabel").value.trim() });
+  const msg = $("acct-msg");
+  if (!ok) { msg.className = "msg"; msg.textContent = data.error || "could not create the key"; return; }
+  $("acct-keylabel").value = "";
+  showSecret($("acct-secret"), data.key);
+  await refreshAuth();
+  renderKeys($("acct-keys"), (me && me.keys) || [], null);
+}
+
+/* A key is shown exactly once — only its digest is kept server-side. */
+function showSecret(box, key) {
+  box.innerHTML = '<div class="secret">' + esc(key) + '</div>'
+    + '<div class="hint">Copy this now — it can\'t be shown again.</div>'
+    + '<div style="display:flex;justify-content:flex-end;margin-top:6px">'
+    + '<button data-act="copy" data-arg="' + esc(key) + '">Copy</button></div>';
+}
+
+async function changePassword() {
+  const msg = $("acct-msg");
+  msg.className = "msg";
+  const [ok, data] = await send("POST", "/api/auth/password", {
+    currentPassword: $("acct-cur").value,
+    newPassword: $("acct-new").value,
+  });
+  $("acct-cur").value = $("acct-new").value = "";
+  if (!ok) { msg.textContent = data.error || "could not change the password"; return; }
+  msg.className = "msg ok";
+  msg.textContent = "Password updated. Other sessions for this account were signed out.";
+}
+
+/* ---- user administration ---- */
+
+async function openUsers() {
+  $("users-msg").textContent = "";
+  $("users-overlay").style.display = "flex";
+  await loadUsers();
+}
+
+async function loadUsers() {
+  let data;
+  try { data = await api("/api/users"); }
+  catch (e) { $("users-list").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; return; }
+  $("users-list").innerHTML = data.users.map(u => {
+    const badges = '<span class="badge' + (u.role === "admin" ? " admin" : "") + '">' + esc(u.role) + "</span>"
+      + (u.enabled ? "" : '<span class="badge off">disabled</span>')
+      + (u.hasPassword ? "" : '<span class="badge">key only</span>')
+      + (u.self ? '<span class="badge">you</span>' : "");
+    return '<div class="usr">'
+      + '<div class="top"><span class="nm">' + esc(u.displayName || u.username) + "</span>" + badges
+      + '<span style="flex:1"></span>'
+      + '<button data-act="usr-keys" data-arg="' + esc(u.id) + '">🔑 ' + u.keys.length + "</button>"
+      + '<button data-act="usr-edit" data-arg="' + esc(u.id) + '">Edit</button>'
+      + (u.self ? "" : '<button class="danger" data-act="usr-remove" data-arg="' + esc(u.id) + '">Remove</button>')
+      + "</div>"
+      + '<div class="meta">' + esc(u.username)
+      + (u.sessions ? " · " + u.sessions + " active session" + (u.sessions === 1 ? "" : "s") : "")
+      + (u.lastLoginUtc ? " · last signed in " + new Date(u.lastLoginUtc).toLocaleString() : " · never signed in")
+      + "</div>"
+      + '<div class="usr-panel" id="up-' + esc(u.id) + '" style="display:none;margin-top:8px"></div>'
+      + "</div>";
+  }).join("") || '<div class="empty">No accounts yet.</div>';
+}
+
+async function createUser() {
+  const msg = $("users-msg");
+  msg.className = "msg";
+  const [ok, data] = await send("POST", "/api/users", {
+    username: $("nu-name").value.trim(),
+    password: $("nu-pass").value,
+    role: $("nu-role").value,
+  });
+  if (!ok) { msg.textContent = data.error || "could not create the account"; return; }
+  $("nu-name").value = $("nu-pass").value = "";
+  msg.className = "msg ok";
+  msg.textContent = "Account created.";
+  loadUsers();
+}
+
+function userPanel(id) { return $("up-" + id); }
+
+async function toggleUserEdit(id) {
+  const box = userPanel(id);
+  if (!box) return;
+  if (box.dataset.mode === "edit" && box.style.display !== "none") {
+    box.style.display = "none"; box.dataset.mode = ""; return;
+  }
+  const data = await api("/api/users");
+  const u = data.users.find(x => x.id === id);
+  if (!u) return;
+  box.dataset.mode = "edit";
+  box.style.display = "";
+  box.innerHTML =
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">'
+    + '<input class="am-in" id="ue-name-' + id + '" value="' + esc(u.username) + '" style="width:140px">'
+    + '<input class="am-in" id="ue-disp-' + id + '" value="' + esc(u.displayName) + '" placeholder="display name" style="flex:1;min-width:120px">'
+    + '<select class="am-in" id="ue-role-' + id + '">'
+    + '<option value="user"' + (u.role === "user" ? " selected" : "") + ">user</option>"
+    + '<option value="admin"' + (u.role === "admin" ? " selected" : "") + ">admin</option></select>"
+    + '<label class="chk" style="margin:0"><input type="checkbox" id="ue-on-' + id + '"' + (u.enabled ? " checked" : "") + "><span>enabled</span></label>"
+    + "</div>"
+    + '<div style="display:flex;gap:8px;margin-top:8px">'
+    + '<input class="am-in" type="password" id="ue-pass-' + id + '" placeholder="set a new password (optional)" style="flex:1" autocomplete="new-password">'
+    + '<button class="go" data-act="usr-save" data-arg="' + id + '">Save</button></div>'
+    + '<div class="msg" id="ue-msg-' + id + '"></div>';
+}
+
+async function saveUser(id) {
+  const msg = $("ue-msg-" + id);
+  msg.className = "msg";
+  const body = {
+    username: $("ue-name-" + id).value.trim(),
+    displayName: $("ue-disp-" + id).value.trim(),
+    role: $("ue-role-" + id).value,
+    enabled: $("ue-on-" + id).checked,
+  };
+  const pass = $("ue-pass-" + id).value;
+  if (pass) body.password = pass;
+  const [ok, data] = await send("PUT", "/api/users?id=" + encodeURIComponent(id), body);
+  if (!ok) { msg.textContent = data.error || "could not save"; return; }
+  userPanel(id).style.display = "none";
+  loadUsers();
+  refreshAuth();
+}
+
+async function removeUser(id) {
+  if (!confirm("Remove this account? Their keys and sessions stop working immediately.")) return;
+  const [ok, data] = await send("DELETE", "/api/users?id=" + encodeURIComponent(id));
+  const msg = $("users-msg");
+  msg.className = "msg";
+  if (!ok) { msg.textContent = data.error || "could not remove the account"; return; }
+  loadUsers();
+}
+
+async function toggleUserKeys(id) {
+  const box = userPanel(id);
+  if (!box) return;
+  if (box.dataset.mode === "keys" && box.style.display !== "none") {
+    box.style.display = "none"; box.dataset.mode = ""; return;
+  }
+  const data = await api("/api/users");
+  const u = data.users.find(x => x.id === id);
+  if (!u) return;
+  box.dataset.mode = "keys";
+  box.style.display = "";
+  box.innerHTML = '<div id="uk-list-' + id + '"></div>'
+    + '<div style="display:flex;gap:8px;margin-top:6px">'
+    + '<input class="am-in" id="uk-label-' + id + '" placeholder="what is this key for?" style="flex:1">'
+    + '<button data-act="usr-key-new" data-arg="' + id + '">＋ New key</button></div>'
+    + '<div id="uk-secret-' + id + '"></div>';
+  renderKeys($("uk-list-" + id), u.keys, id);
+}
+
+async function mintUserKey(id) {
+  const [ok, data] = await send("POST", "/api/users/keys?id=" + encodeURIComponent(id),
+    { label: $("uk-label-" + id).value.trim() });
+  if (!ok) { $("users-msg").textContent = data.error || "could not create the key"; return; }
+  $("uk-label-" + id).value = "";
+  showSecret($("uk-secret-" + id), data.key);
+  const users = await api("/api/users");
+  const u = users.users.find(x => x.id === id);
+  if (u) renderKeys($("uk-list-" + id), u.keys, id);
+}
+
+async function revokeKey(keyId, userId) {
+  if (!confirm("Revoke this key? Anything using it stops working immediately.")) return;
+  const path = userId
+    ? "/api/users/keys?id=" + encodeURIComponent(userId) + "&keyId=" + encodeURIComponent(keyId)
+    : "/api/auth/keys?id=" + encodeURIComponent(keyId);
+  await send("DELETE", path);
+  if (userId) {
+    await loadUsers();          // re-renders the row (and closes its panel)
+    toggleUserKeys(userId);     // …so reopen the key list the user was in
+  } else {
+    await refreshAuth();
+    renderKeys($("acct-keys"), (me && me.keys) || [], null);
+  }
 }
 
 function fmtUptime(s) {
@@ -506,7 +947,7 @@ async function tick() {
     [status, sessions] = await Promise.all([api("/api/status"), api("/api/sessions")]);
   } catch (e) {
     $("livedot").classList.remove("live");
-    $("livetext").textContent = e.message === "unauthorized" ? "locked — token required" : "server unreachable";
+    $("livetext").textContent = e.message === "unauthorized" ? "signed out" : "server unreachable";
     return;
   }
 
@@ -1906,10 +2347,20 @@ document.addEventListener("click", e => {
     case "fav-remove":  unpinMedia(arg); break;
     case "pl-play":     playFolder(arg, el.dataset.name); break;
     case "pl-remove":   removePlaylist(arg); break;
+    case "usr-edit":    toggleUserEdit(arg); break;
+    case "usr-save":    saveUser(arg); break;
+    case "usr-remove":  removeUser(arg); break;
+    case "usr-keys":    toggleUserKeys(arg); break;
+    case "usr-key-new": mintUserKey(arg); break;
+    case "key-revoke":  revokeKey(arg, el.dataset.user || null); break;
   }
 });
 
-$("token").addEventListener("keydown", e => { if (e.key === "Enter") saveToken(); });
+// Enter submits the sign-in form from any of its fields
+for (const id of ["login-user", "login-pass", "login-pass2", "login-code"])
+  $(id).addEventListener("keydown", e => { if (e.key === "Enter") submitLogin(); });
+for (const id of ["acct-overlay", "users-overlay"])
+  $(id).addEventListener("mousedown", e => { if (e.target.id === id) closeOverlay(id); });
 
 /* Closing the dashboard shuts the server down cleanly (configurable via
    control.shutdownOnClose). The server waits 5 s before acting, so page
@@ -1920,7 +2371,9 @@ window.addEventListener("pagehide", () => {
   navigator.sendBeacon(url);
 });
 
-tick();
+/* Establish who we are before the first poll, so the page never briefly
+   renders administration controls to someone who isn't an administrator. */
+refreshAuth().then(ok => { if (ok) tick(); });
 setInterval(tick, POLL_MS);
 </script>
 </body>

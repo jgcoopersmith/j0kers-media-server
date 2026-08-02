@@ -57,7 +57,9 @@ until you pick Exit. `--no-tray` overrides the config for one run. On
 macOS/Linux use your init system (systemd/launchd) or `nohup` instead.
 
 The header has a **⏻ Start/Stop** button that stops or starts the streaming
-services (RTSP + HLS) while the dashboard stays up, and a **⚙ Config**
+services (RTSP + HLS) while the dashboard stays up, a **👥 Users** dialog for
+accounts and keys, a **👤 Account** panel for your own password and keys, and
+a **⚙ Config**
 dialog for the hostname/bind address and the RTSP/HLS/control ports — saved to a `settings.json` sidecar and applied by restarting the
 services live (a control-port change takes effect on the next full server
 restart).
@@ -258,13 +260,85 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `GET /api/image?path=` | serve a picture for the library viewer |
 | `POST /api/server/start` / `stop` | start / stop the streaming services |
 | `GET/POST /api/settings` | read / save hostname + ports (persisted to `settings.json`) |
+| `GET /api/auth/state` | is auth on, is setup needed, who am I |
+| `POST /api/auth/setup` | claim the first administrator account (first run only) |
+| `POST /api/auth/login` / `logout` | password → session cookie / drop the session |
+| `POST /api/auth/password` | change your own password |
+| `GET/POST/DELETE /api/auth/keys` | list / mint / revoke your own keys |
+| `GET/POST/PUT/DELETE /api/users` | list / create / edit / remove accounts (admin) |
+| `POST/DELETE /api/users/keys?id=` | mint / revoke a key for another account (admin) |
 
-Binds to loopback by default; set `control.authToken` before exposing it
-more widely.
+Every endpoint above is gated — see **Accounts and access** below.
+
+## Accounts and access
+
+Accounts live in a `users.json` sidecar next to the rest of the config.
+There are two roles:
+
+| | admin | user |
+|---|---|---|
+| watch the shared library, HLS streams, mounts, sessions | ✔ | ✔ |
+| ⚙ Config, ⏻ Start/Stop, 👥 Users, 📁 Browse | ✔ | — |
+| add/remove library folders, channels, mounts, playlists, favorites | ✔ | — |
+| reach files *outside* the shared library | ✔ | — |
+
+A **user** is confined to what has actually been shared: the library
+folders, pinned favorites, and saved playlists. Asking `/api/play`,
+`/api/thumb`, or `/api/image` for anything else is refused, so an account
+handed to a houseguest can't transcode `C:\Users\you\taxes.pdf`.
+
+### First run
+
+Until an administrator exists the server behaves exactly as it always
+has — open — and the dashboard says so plainly with a *Create one* banner.
+Creating that account from the machine itself needs nothing extra; doing
+it from another device also needs the one-time **setup code** logged at
+startup, so nobody on the LAN can claim a freshly started server first.
+
+### Two ways to sign in
+
+**Passwords** are hashed with PBKDF2-HMAC-SHA256 (210 000 iterations, a
+per-user 16-byte salt) and are never stored, logged, or accepted in a URL.
+A successful sign-in returns an `HttpOnly; SameSite=Strict` session
+cookie: page JavaScript can't read it, another site can't make the browser
+send it, and it never appears in history or a `Referer`. Failed attempts
+are throttled per account *and* per source address, escalating from 15
+seconds to 15 minutes; the reply is identical for a wrong username and a
+wrong password. Sessions live in memory only, so a restart signs everyone
+out.
+
+**Keys** are for everything that shouldn't see a login form — a phone, a
+player, a script. Tick *Remember this device* when signing in and the
+dashboard stores one so that browser never asks again; mint more from
+👤 Account (yours) or 👥 Users (anyone's). A key is 256 bits of CSPRNG
+output shown exactly once — only its SHA-256 digest is stored — and is
+presented as a header or, where a media element can't set one, a query
+parameter:
+
+```bash
+curl -H "Authorization: Bearer jmk_…" http://localhost:9090/api/status
+curl "http://localhost:9090/api/thumb?path=…&key=jmk_…"
+```
+
+Revoking a key, disabling an account, or changing a password takes effect
+on the very next request.
+
+State-changing requests carry two CSRF defenses: `Sec-Fetch-Site`/`Origin`
+rejection for anything cross-site, plus a required `X-J0kers-CSRF` header
+whenever the caller is authenticated by cookie — which a cross-origin page
+cannot set without a preflight the browser will refuse.
+
+The legacy `control.authToken` still works and still grants full rights,
+so existing scripts keep running.
+
+> **Plain HTTP.** The dashboard is served unencrypted, so on a network you
+> don't trust, reach it over a VPN or an HTTPS reverse proxy. The sign-in
+> dialog says so when it isn't on loopback or HTTPS.
 
 ## Layout
 
 ```
+Auth/           accounts, password hashing, sessions, API keys
 Configuration/  JSON config model, env overrides, validation
 Rtsp/           RTSP parser, server, sessions, SDP
 Rtp/            RTP packetization, RTCP sender reports, port allocator

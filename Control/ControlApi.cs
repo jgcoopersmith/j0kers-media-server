@@ -1,6 +1,7 @@
 ﻿using System.Net;
 using System.Text;
 using System.Text.Json;
+using J0kersMediaServer.Auth;
 using J0kersMediaServer.Config;
 using J0kersMediaServer.Logging;
 using J0kersMediaServer.Rtsp;
@@ -22,9 +23,10 @@ namespace J0kersMediaServer.Control;
 ///   GET    /api/preview?mount=  live WAV audio of a mount (dashboard player)
 ///   GET    /api/browse[?path=]  drive / folder / file listing (dashboard picker)
 /// </summary>
-public sealed class ControlApi : IDisposable
+public sealed partial class ControlApi : IDisposable
 {
     private readonly ControlConfig _config;
+    private readonly Auth.AuthService _auth;
     private readonly ServerConfig _serverConfig;
     private readonly Services.ServiceController _services;
     private readonly string _baseDirectory;
@@ -44,9 +46,10 @@ public sealed class ControlApi : IDisposable
     private readonly Media.FavoritesStore _favorites;
 
     public ControlApi(ServerConfig serverConfig, Services.ServiceController services, string baseDirectory,
-        Media.FfmpegManager? ffmpeg = null, Action? requestShutdown = null)
+        Auth.AuthService auth, Media.FfmpegManager? ffmpeg = null, Action? requestShutdown = null)
     {
         _config = serverConfig.Control;
+        _auth = auth;
         _serverConfig = serverConfig;
         _services = services;
         _baseDirectory = baseDirectory;
@@ -134,6 +137,75 @@ public sealed class ControlApi : IDisposable
         return false;
     }
 
+    /// <summary>
+    /// The authorization table. Administration is everything that changes
+    /// how the server runs — configuration, the power button, accounts — plus
+    /// the two endpoints that reach outside the media library (the
+    /// filesystem picker and subtitle attachment). Everything else is
+    /// watching, which any signed-in account may do.
+    /// </summary>
+    private static AccessLevel RequiredLevel(string method, string path)
+    {
+        if (path.StartsWith("/api/users", StringComparison.Ordinal)) return AccessLevel.Admin;
+
+        switch (path)
+        {
+            case "/api/config":
+            case "/api/settings":
+            case "/api/browse":
+            case "/api/codecs":
+            case "/api/server/start":
+            case "/api/server/stop":
+            case "/api/channels/restart":
+            case "/api/subtitles":
+                return AccessLevel.Admin;
+        }
+
+        // adding or removing library content is configuration; listing it isn't
+        if (method is "POST" or "PUT" or "DELETE"
+            && path is "/api/mounts" or "/api/channels" or "/api/library"
+                or "/api/favorites" or "/api/playlists" or "/api/hls")
+            return AccessLevel.Admin;
+
+        // cutting someone else's stream off is an operator action
+        if (method == "DELETE" && path.StartsWith("/api/sessions/", StringComparison.Ordinal))
+            return AccessLevel.Admin;
+
+        return AccessLevel.User;
+    }
+
+    /// <summary>
+    /// Whether a non-admin may touch this file. Admins browse the whole
+    /// machine; everyone else is confined to what has actually been shared —
+    /// the library folders, the pinned favorites, and the saved playlists.
+    /// Without this, /api/play would transcode any file on the disk and
+    /// /api/image would serve any picture, for anyone with an account.
+    /// </summary>
+    private bool IsShared(string full)
+    {
+        static bool Under(string root, string candidate)
+        {
+            if (root.Length == 0) return false;
+            var r = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+            return candidate.Equals(r, StringComparison.OrdinalIgnoreCase)
+                || candidate.StartsWith(r + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        }
+
+        var target = Path.TrimEndingDirectorySeparator(full);
+        return _library.All.Any(f => Under(f, target))
+            || _favorites.All.Any(f => Under(f.Path, target))
+            || _playlists.All.Any(p => Under(p.Folder, target));
+    }
+
+    /// <summary>Refuses a non-admin's request for a path outside the shared library.</summary>
+    private bool DenyUnshared(HttpListenerContext ctx, AuthResult auth, string full)
+    {
+        if (auth.IsAdmin || IsShared(full)) return false;
+        Log.Warn("control", $"{auth.Name} was refused a path outside the library: {full}");
+        WriteJson(ctx.Response, 403, new { error = "that file is not in the shared library" });
+        return true;
+    }
+
     private void Handle(HttpListenerContext ctx)
     {
         var res = ctx.Response;
@@ -170,29 +242,67 @@ public sealed class ControlApi : IDisposable
                 return;
             }
 
-            if (_config.AuthToken.Length > 0)
-            {
-                // ?token= is accepted as an alternative to the Authorization
-                // header because <audio> elements cannot set request headers.
-                var auth = ctx.Request.Headers["Authorization"];
-                var queryToken = ctx.Request.QueryString["token"];
-                if (auth != $"Bearer {_config.AuthToken}" && queryToken != _config.AuthToken)
-                {
-                    WriteJson(res, 401, new { error = "unauthorized" });
-                    return;
-                }
-            }
-
             var path = ctx.Request.Url?.AbsolutePath ?? "/";
             var method = ctx.Request.HttpMethod;
+
+            // Who is this? Session cookie, API key, or the legacy
+            // control.authToken — all resolved to one access level.
+            var auth = _auth.Authenticate(ctx);
 
             // CSRF: a state-changing request from another website must be
             // refused even on loopback with no token, or any page the user
             // visits could POST to us. Browsers stamp cross-site requests;
             // non-browser clients (curl/VLC) send neither header and pass.
-            if (method is "POST" or "DELETE" or "PUT" && IsCrossSite(ctx))
+            if (method is "POST" or "DELETE" or "PUT")
             {
-                WriteJson(res, 403, new { error = "cross-site request refused" });
+                if (IsCrossSite(ctx))
+                {
+                    WriteJson(res, 403, new { error = "cross-site request refused" });
+                    return;
+                }
+                // Belt and braces for the cookie case: a cookie rides along
+                // automatically, so a state-changing request authenticated by
+                // one must also prove it was made by our own JavaScript. A
+                // custom header can't be set cross-origin without a preflight
+                // the browser would refuse. Key/token callers aren't browsers
+                // and carry no ambient credential, so they skip this.
+                // …except the page-close beacon: sendBeacon cannot set
+                // headers at all, and Sec-Fetch-Site already covers it.
+                if (auth.IsCookie && path != "/api/server/closing"
+                    && ctx.Request.Headers["X-J0kers-CSRF"] is null)
+                {
+                    WriteJson(res, 403, new { error = "missing X-J0kers-CSRF header" });
+                    return;
+                }
+            }
+
+            // login, logout, setup and self-service key management
+            if (path.StartsWith("/api/auth/", StringComparison.Ordinal))
+            {
+                if (HandleAuthRoutes(ctx, auth, method, path)) return;
+                WriteJson(res, 404, new { error = "not found" });
+                return;
+            }
+
+            // Everything else is gated. Administration (configuration, the
+            // power button, accounts, the filesystem picker) needs an admin;
+            // watching needs any account.
+            var required = RequiredLevel(method, path);
+            if (auth.Level < required)
+            {
+                WriteJson(res, auth.Level == AccessLevel.None ? 401 : 403, new
+                {
+                    error = auth.Level == AccessLevel.None
+                        ? "unauthorized"
+                        : "administrator rights are required for this",
+                });
+                return;
+            }
+
+            if (path.StartsWith("/api/users", StringComparison.Ordinal))
+            {
+                if (HandleUserRoutes(ctx, auth, method, path)) return;
+                WriteJson(res, 404, new { error = "not found" });
                 return;
             }
 
@@ -356,7 +466,7 @@ public sealed class ControlApi : IDisposable
             // ---- media engine (ffmpeg) ----
             if (method == "POST" && path == "/api/play")
             {
-                PlayFile(ctx);
+                PlayFile(ctx, auth);
                 return;
             }
 
@@ -471,7 +581,7 @@ public sealed class ControlApi : IDisposable
 
             if (method == "GET" && path == "/api/thumb")
             {
-                ServeThumbnail(ctx);
+                ServeThumbnail(ctx, auth);
                 return;
             }
 
@@ -512,7 +622,7 @@ public sealed class ControlApi : IDisposable
 
             if (method == "GET" && path == "/api/image")
             {
-                ServeImage(ctx);
+                ServeImage(ctx, auth);
                 return;
             }
 
@@ -1004,7 +1114,7 @@ public sealed class ControlApi : IDisposable
     /// generated by ffmpeg. 404 when ffmpeg is missing or the file has no
     /// visual (the dashboard falls back to an icon).
     /// </summary>
-    private void ServeThumbnail(HttpListenerContext ctx)
+    private void ServeThumbnail(HttpListenerContext ctx, AuthResult auth)
     {
         var res = ctx.Response;
         var path = ctx.Request.QueryString["path"] ?? "";
@@ -1015,6 +1125,7 @@ public sealed class ControlApi : IDisposable
                 WriteJson(res, 400, new { error = "network paths are not allowed" });
                 return;
             }
+            if (DenyUnshared(ctx, auth, full)) return;
             var thumb = _ffmpeg?.GetThumbnail(full);
             if (thumb is null)
             {
@@ -1074,7 +1185,7 @@ public sealed class ControlApi : IDisposable
     private sealed record ChannelRequest(string? name, string? url);
 
     /// <summary>POST /api/play {file} — transcode any media file to HLS and return the stream name.</summary>
-    private void PlayFile(HttpListenerContext ctx)
+    private void PlayFile(HttpListenerContext ctx, AuthResult auth)
     {
         var res = ctx.Response;
         if (_ffmpeg is null || !_ffmpeg.Available)
@@ -1103,6 +1214,7 @@ public sealed class ControlApi : IDisposable
                 WriteJson(res, 400, new { error = "network paths are not allowed" });
                 return;
             }
+            if (DenyUnshared(ctx, auth, file)) return;
             var (stream, ready) = _ffmpeg.StartVod(file, height);
             WriteJson(res, 200, new { stream, ready, playlist = $"/{stream}/index.m3u8" });
         }
@@ -1157,7 +1269,7 @@ public sealed class ControlApi : IDisposable
     };
 
     /// <summary>GET /api/image?path= — serves a picture for the library viewer.</summary>
-    private void ServeImage(HttpListenerContext ctx)
+    private void ServeImage(HttpListenerContext ctx, AuthResult auth)
     {
         var res = ctx.Response;
         var path = ctx.Request.QueryString["path"] ?? "";
@@ -1168,6 +1280,7 @@ public sealed class ControlApi : IDisposable
                 WriteJson(res, 400, new { error = "network paths are not allowed" });
                 return;
             }
+            if (DenyUnshared(ctx, auth, full)) return;
             if (!System.IO.File.Exists(full) || !ImageTypes.TryGetValue(Path.GetExtension(full), out var mime))
             {
                 WriteJson(res, 404, new { error = "not an image" });
