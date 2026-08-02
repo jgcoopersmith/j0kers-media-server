@@ -33,7 +33,7 @@
     "targetDurationSeconds": 6,       // EXT-X-TARGETDURATION (RFC 8216 §4.3.3.1)
     "liveWindowSegments": 0,          // 0 = VOD playlists; N>0 = sliding live window
     "corsAllowOrigin": "",            // "" = this machine's own pages only; "*" = any website
-    "linkLifetimeHours": 12           // how long a signed media link stays playable
+    "linkLifetimeHours": 168          // how long a signed media link stays playable (7 days; editable in ⚙ Config)
   },
 
   "control": {

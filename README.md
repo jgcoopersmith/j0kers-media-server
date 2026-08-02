@@ -70,8 +70,11 @@ byte counter so a viewer leaving can't push the rate negative.
 The header has a **⏻ Start/Stop** button that stops or starts the streaming
 services (RTSP + HLS) while the dashboard stays up, a **👥 Users** dialog for
 accounts and keys, a **👤 Account** panel for your own password and keys, and
-a **⚙ Config**
-dialog for the hostname/bind address and the RTSP/HLS/control ports — saved to a `settings.json` sidecar and applied by restarting the
+a **🌗 theme toggle** (light/dark, remembered per browser and followed by the
+sign-in page; it tracks your system setting until you pick one), and a
+**⚙ Config**
+dialog for the hostname/bind address, the RTSP/HLS/control ports, and how
+long share links live — saved to a `settings.json` sidecar and applied by restarting the
 services live (a control-port change takes effect on the next full server
 restart).
 
@@ -270,7 +273,7 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `POST /api/subtitles` `{stream, file}` | attach a subtitle file from disk to a stream |
 | `GET /api/image?path=` | serve a picture for the library viewer |
 | `POST /api/server/start` / `stop` | start / stop the streaming services |
-| `GET/POST /api/settings` | read / save hostname + ports (persisted to `settings.json`) |
+| `GET/POST /api/settings` | read / save hostname, ports, share-link lifetime (persisted to `settings.json`) |
 | `GET /api/auth/state` | is auth on, is setup needed, who am I |
 | `POST /api/auth/setup` | create the first administrator account (first run only) |
 | `POST /api/auth/login` / `logout` | password → session cookie / drop the session |
@@ -356,9 +359,9 @@ secret in `signing.key`. `GET /api/media/token` mints one — no `stream=`
 for an all-streams token (what the dashboard uses and refreshes on its
 own), or `?stream=x` for a single-stream link to hand to a player. The
 generated playlist carries the token through to every segment URI, because
-players don't inherit a playlist's query string. Tokens expire (12 h by
-default, `hls.linkLifetimeHours`), carry no identity, and grant playback
-only — a leaked one costs an afternoon of access to one stream, not the
+players don't inherit a playlist's query string. Tokens expire (7 days by
+default — `hls.linkLifetimeHours`, or *Share links expire after* in the
+⚙ Config dialog), carry no identity, and grant playback only — a leaked one costs an afternoon of access to one stream, not the
 server.
 
 A signed-in browser can also just browse to the media port directly:
@@ -411,6 +414,17 @@ Control/        HTTP/JSON control API
 Media/          G.711 sources (tone generator, file looper)
 wwwroot/        dashboard single-page app + sign-in page (embedded into the binary)
 config/         sample/default server.json (runtime media/ and clips/ live here too)
+```
+
+## Versioning
+
+`.githooks/pre-commit` bumps the patch component of `<Version>` in the
+csproj on every commit, so each build reports a unique, increasing version
+— shown in the dashboard header and returned by `GET /api/status`. Never
+edit `<Version>` by hand. New clones need it switched on once:
+
+```bash
+git config core.hooksPath .githooks
 ```
 
 ## Build

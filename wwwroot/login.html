@@ -22,7 +22,7 @@
     --critical:    #d03b3b;
   }
   @media (prefers-color-scheme: light) {
-    :root {
+    :root:not([data-theme]) {
       color-scheme: light;
       --page:      #f9f9f7;
       --surface:   #fcfcfb;
@@ -36,6 +36,37 @@
       --good:      #006300;
       --critical:  #d03b3b;
     }
+  }
+  /* the dashboard's theme toggle stores a choice; honour it here too, so
+     signing out doesn't flip the look */
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --page:      #f9f9f7;
+    --surface:   #fcfcfb;
+    --surface-2: #f0efec;
+    --ink:       #0b0b0b;
+    --ink-2:     #52514e;
+    --muted:     #898781;
+    --grid:      #e1e0d9;
+    --border:    rgba(11,11,11,0.10);
+    --series-1:  #2a78d6;
+    --good:      #006300;
+    --critical:  #d03b3b;
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:        #0d0d0d;
+    --surface:     #1a1a19;
+    --surface-2:   #222221;
+    --ink:         #ffffff;
+    --ink-2:       #c3c2b7;
+    --muted:       #898781;
+    --grid:        #2c2c2a;
+    --border:      rgba(255,255,255,0.10);
+    --series-1:    #3987e5;
+    --good:        #0ca30c;
+    --warning:     #fab219;
+    --critical:    #d03b3b;
   }
   * { box-sizing: border-box; }
   body {
@@ -91,6 +122,14 @@
   }
   .note.warn { color: var(--warning); }
 </style>
+<script>
+  (function () {
+    try {
+      var t = localStorage.getItem("j0kers-theme");
+      if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+    } catch (e) { /* storage blocked — fall back to the system preference */ }
+  })();
+</script>
 </head>
 <body>
 <form class="card" id="form" autocomplete="on">

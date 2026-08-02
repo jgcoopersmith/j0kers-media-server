@@ -23,8 +23,12 @@
     --warning:     #fab219;
     --critical:    #d03b3b;
   }
+  /* Light palette. Applied when the system asks for it *and* the user
+     hasn't picked a theme, or when they have explicitly picked light —
+     which is why it is written twice: a media query and an attribute
+     selector can't share one rule. The header toggle sets data-theme. */
   @media (prefers-color-scheme: light) {
-    :root {
+    :root:not([data-theme]) {
       color-scheme: light;
       --page:      #f9f9f7;
       --surface:   #fcfcfb;
@@ -40,6 +44,40 @@
       --good:      #006300;
       --critical:  #d03b3b;
     }
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --page:      #f9f9f7;
+    --surface:   #fcfcfb;
+    --surface-2: #f0efec;
+    --ink:       #0b0b0b;
+    --ink-2:     #52514e;
+    --muted:     #898781;
+    --grid:      #e1e0d9;
+    --baseline:  #c3c2b7;
+    --border:    rgba(11,11,11,0.10);
+    --series-1:  #2a78d6;
+    --accent:    #4a3aa7;
+    --good:      #006300;
+    --critical:  #d03b3b;
+  }
+  /* explicit dark has to be able to beat a system that prefers light */
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:        #0d0d0d;
+    --surface:     #1a1a19;
+    --surface-2:   #222221;
+    --ink:         #ffffff;
+    --ink-2:       #c3c2b7;
+    --muted:       #898781;
+    --grid:        #2c2c2a;
+    --baseline:    #383835;
+    --border:      rgba(255,255,255,0.10);
+    --series-1:    #3987e5;
+    --accent:      #9085e9;
+    --good:        #0ca30c;
+    --warning:     #fab219;
+    --critical:    #d03b3b;
   }
   * { box-sizing: border-box; }
   body {
@@ -286,6 +324,18 @@
   a { color: var(--series-1); text-decoration: none; }
   a:hover { text-decoration: underline; }
 </style>
+<script>
+  /* Runs before the first paint: setting the theme from the page's own
+     script at the bottom would show a flash of the wrong one. */
+  (function () {
+    try {
+      var t = localStorage.getItem("j0kers-theme");
+      if (t !== "light" && t !== "dark")
+        t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", t);
+    } catch (e) { /* storage blocked — the CSS media query still applies */ }
+  })();
+</script>
 </head>
 <body>
 <div class="wrap">
@@ -301,6 +351,7 @@
     <button class="pill admin-only" id="usersbtn" onclick="openUsers()" title="Add, edit, and remove user accounts">👥 Users</button>
     <button class="pill admin-only" id="browsebtn" onclick="browseAndCopy()" title="Browse this machine and copy a path">📁 Browse</button>
     <button class="pill" id="acctbtn" onclick="openAccount()" title="Your account, password, and keys">👤 <span id="acct-pill">…</span></button>
+    <button class="pill" id="themebtn" onclick="toggleTheme()" title="Switch theme">🌗</button>
     <span class="pill" id="verpill">v–</span>
   </header>
 
@@ -493,6 +544,16 @@
       <div style="flex:1"><label>HLS port</label><input id="cfg-hls" class="am-in" type="number" min="1" max="65535"></div>
       <div style="flex:1"><label>Control port</label><input id="cfg-ctl" class="am-in" type="number" min="1" max="65535"></div>
     </div>
+    <label style="margin-top:12px">Share links expire after</label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input id="cfg-link" class="am-in" type="number" min="1" max="8760" style="width:100px">
+      <span style="color:var(--muted);font-size:12px">hours <span id="cfg-link-h"></span></span>
+    </div>
+    <div style="color:var(--muted);font-size:11.5px;margin-top:3px">
+      How long a link to a stream keeps playing — on a phone, in VLC, or shared with someone.
+      Applies to links issued from now on.
+    </div>
+
     <label style="margin-top:12px">Background mode</label>
     <label id="cfg-tray-row" style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;color:var(--ink);font-size:13px;cursor:pointer;margin:0">
       <input id="cfg-tray" type="checkbox" style="width:16px;height:16px">
@@ -613,6 +674,30 @@ async function send(method, path, body) {
 /* ---- accounts: sign-in gate, session state, role-driven UI ---- */
 
 function closeOverlay(id) { $(id).style.display = "none"; }
+
+/* ---- theme: follows the system until you pick, then stays picked ---- */
+const THEME_KEY = "j0kers-theme";
+
+function currentTheme() {
+  return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+}
+
+/* The icon shows what you'd get, not what you're in — a sun on a dark page
+   reads as "go light" rather than as a status light. */
+function paintThemeButton() {
+  const dark = currentTheme() === "dark";
+  $("themebtn").textContent = dark ? "☀" : "🌙";
+  $("themebtn").title = dark ? "Switch to the light theme" : "Switch to the dark theme";
+  $("themebtn").setAttribute("aria-label", $("themebtn").title);
+}
+
+function toggleTheme() {
+  const next = currentTheme() === "dark" ? "light" : "dark";
+  document.documentElement.setAttribute("data-theme", next);
+  try { localStorage.setItem(THEME_KEY, next); } catch { /* private mode */ }
+  paintThemeButton();
+}
+paintThemeButton();
 
 /* Who are we, and does this server have accounts at all? Drives both the
    sign-in gate and which controls the page is allowed to show. */
@@ -1353,6 +1438,8 @@ async function openConfig() {
     $("cfg-rtsp").value = s.rtspPort;
     $("cfg-hls").value = s.hlsPort;
     $("cfg-ctl").value = s.controlPort;
+    $("cfg-link").value = s.linkLifetimeHours;
+    showLinkLifetime();
     cfgInterfaces = s.interfaces || [];
     renderCfgInterfaces();
 
@@ -1399,6 +1486,15 @@ function renderCfgInterfaces() {
   box.innerHTML = h;
 }
 
+/* 168 means nothing at a glance; "7 days" does */
+function showLinkLifetime() {
+  const h = parseInt($("cfg-link").value, 10);
+  $("cfg-link-h").textContent = !h || h < 1 ? ""
+    : h % 24 === 0 ? "· " + (h / 24) + (h === 24 ? " day" : " days")
+    : h === 1 ? "· one hour" : "";
+}
+$("cfg-link").addEventListener("input", showLinkLifetime);
+
 // keep the list in step with what's typed in the bind field
 $("cfg-bind").addEventListener("input", renderCfgInterfaces);
 $("cfg-ifaces").addEventListener("click", e => {
@@ -1418,6 +1514,7 @@ async function saveConfig() {
     rtspPort: parseInt($("cfg-rtsp").value, 10),
     hlsPort: parseInt($("cfg-hls").value, 10),
     controlPort: parseInt($("cfg-ctl").value, 10),
+    linkLifetimeHours: parseInt($("cfg-link").value, 10),
     minimizeToTray: $("cfg-tray").checked,
   };
   // only send fields the user actually changed, so untouched settings
@@ -1438,6 +1535,8 @@ async function saveConfig() {
     if (data.controlPortChanged)
       alert("Saved. RTSP/HLS are already on the new settings; the control port (this dashboard) moves to :" + body.controlPort + " the next time you restart the server.");
     mountsLoaded = 0; channelsLoaded = 0;
+    // a new lifetime only reaches URLs via a freshly minted token
+    if (body.linkLifetimeHours !== undefined) await refreshMediaToken();
     tick();
   } catch (e) {
     msg.textContent = "request failed: " + e.message;

@@ -116,6 +116,7 @@ public sealed class ServerConfig
         [JsonPropertyName("controlPort")] public int? ControlPort { get; set; }
         [JsonPropertyName("authToken")] public string? AuthToken { get; set; }
         [JsonPropertyName("minimizeToTray")] public bool? MinimizeToTray { get; set; }
+        [JsonPropertyName("linkLifetimeHours")] public int? LinkLifetimeHours { get; set; }
     }
 
     private SettingsOverrides _persistedSettings = new();
@@ -150,6 +151,7 @@ public sealed class ServerConfig
         if (s.ControlPort is not null) _persistedSettings.ControlPort = s.ControlPort;
         if (s.AuthToken is not null) _persistedSettings.AuthToken = s.AuthToken;
         if (s.MinimizeToTray is not null) _persistedSettings.MinimizeToTray = s.MinimizeToTray;
+        if (s.LinkLifetimeHours is not null) _persistedSettings.LinkLifetimeHours = s.LinkLifetimeHours;
         File.WriteAllText(SettingsFile, JsonSerializer.Serialize(_persistedSettings, JsonOpts));
     }
 
@@ -168,6 +170,7 @@ public sealed class ServerConfig
         if (s.ControlPort is int cp) Control.Port = cp;
         if (!string.IsNullOrWhiteSpace(s.AuthToken)) Control.AuthToken = s.AuthToken;
         if (s.MinimizeToTray is bool tray) MinimizeToTray = tray;
+        if (s.LinkLifetimeHours is int hours) Hls.LinkLifetimeHours = hours;
     }
 
     private sealed class MountSidecar
@@ -354,11 +357,12 @@ public sealed class HlsConfig
     [JsonPropertyName("corsAllowOrigin")] public string CorsAllowOrigin { get; set; } = "";
 
     /// <summary>
-    /// How long a signed media link stays valid. Long enough to watch a
-    /// film without the URL dying mid-playback; short enough that a leaked
-    /// link isn't permanent.
+    /// How long a signed media link stays valid. A week by default: long
+    /// enough that a link you sent someone still works next weekend, short
+    /// enough that a leaked one isn't permanent. Editable in the dashboard's
+    /// Config dialog.
     /// </summary>
-    [JsonPropertyName("linkLifetimeHours")] public int LinkLifetimeHours { get; set; } = 12;
+    [JsonPropertyName("linkLifetimeHours")] public int LinkLifetimeHours { get; set; } = 168;
 }
 
 public sealed class ControlConfig

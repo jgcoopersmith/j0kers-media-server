@@ -512,6 +512,7 @@ public sealed partial class ControlApi : IDisposable
                     hlsPort = _serverConfig.Hls.Port,
                     controlPort = _serverConfig.Control.Port,
                     minimizeToTray = _serverConfig.MinimizeToTray,
+                    linkLifetimeHours = _serverConfig.Hls.LinkLifetimeHours,
                     // the tray lives in the Windows notification area
                     traySupported = OperatingSystem.IsWindows(),
                     // what "0.0.0.0" actually resolves to right now, so the
@@ -899,6 +900,14 @@ public sealed partial class ControlApi : IDisposable
             !s.BindAddress.Equals("localhost", StringComparison.OrdinalIgnoreCase))
         {
             WriteJson(res, 400, new { error = "bindAddress must be an IP address (0.0.0.0 = all interfaces) or 'localhost'" });
+            return;
+        }
+
+        // an hour at the short end still covers a film; a year at the long
+        // end is effectively "never expires", which is the caller's call
+        if (s.LinkLifetimeHours is int lifetime and (< 1 or > 8760))
+        {
+            WriteJson(res, 400, new { error = "link lifetime must be 1–8760 hours (up to a year)" });
             return;
         }
 
