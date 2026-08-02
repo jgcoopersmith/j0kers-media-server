@@ -102,7 +102,20 @@ public sealed class HlsServer : IDisposable
                 var onDisk = Path.Combine(streamDir, parts[1]);
                 if (File.Exists(onDisk) && !parts[1].Contains(".."))
                 {
-                    WriteText(res, 200, "application/vnd.apple.mpegurl", ReadSharedText(onDisk));
+                    var text = ReadSharedText(onDisk);
+                    // A vod-* transcode that is still running has no ENDLIST,
+                    // which makes players treat it as LIVE: no seek bar,
+                    // playback starts at the live edge, speed is ignored.
+                    // Serve those as finite VOD snapshots instead — the
+                    // dashboard reloads on 'ended' if the transcode grew.
+                    if (parts[0].StartsWith("vod-", StringComparison.OrdinalIgnoreCase) &&
+                        !text.Contains("#EXT-X-ENDLIST"))
+                    {
+                        text = text.Replace("#EXT-X-PLAYLIST-TYPE:EVENT", "#EXT-X-PLAYLIST-TYPE:VOD");
+                        if (!text.EndsWith('\n')) text += "\n";
+                        text += "#EXT-X-ENDLIST\n";
+                    }
+                    WriteText(res, 200, "application/vnd.apple.mpegurl", text);
                     return;
                 }
                 if (parts[1] is "index.m3u8" or "playlist.m3u8")

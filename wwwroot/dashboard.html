@@ -1564,22 +1564,45 @@ $("picker-overlay").addEventListener("mousedown", e => {
   if (e.target.id === "picker-overlay") pickerCancel();
 });
 
+/* Clipboard that works over plain http too: navigator.clipboard only
+   exists on secure contexts (https / localhost), so LAN access at
+   http://<ip>:9090 needs the legacy execCommand path. */
+async function copyToClipboard(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); return true; } catch { /* fall through */ }
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  ta.setSelectionRange(0, text.length);
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { }
+  ta.remove();
+  return ok;
+}
+
 /* Header Browse button: pick anything, copy the path to the clipboard. */
 async function browseAndCopy() {
   const p = await pickPath({ title: "Browse — pick a path to copy" });
   if (!p) return;
   const btn = $("browsebtn");
-  try { await navigator.clipboard.writeText(p); } catch {}
+  const ok = await copyToClipboard(p);
+  if (!ok) { window.prompt("Copy the path:", p); return; }
   const old = btn.textContent;
   btn.textContent = "✓ copied " + (p.length > 24 ? "…" + p.slice(-22) : p);
   setTimeout(() => { btn.textContent = old; }, 2200);
 }
 
-function copyText(btn, text) {
-  navigator.clipboard.writeText(text).then(() => {
-    btn.classList.add("copied"); btn.textContent = "Copied";
-    setTimeout(() => { btn.classList.remove("copied"); btn.textContent = "Copy"; }, 1200);
-  });
+async function copyText(btn, text) {
+  const ok = await copyToClipboard(text);
+  if (!ok) { window.prompt("Copy the URL:", text); return; }
+  btn.classList.add("copied");
+  btn.textContent = "Copied";
+  setTimeout(() => { btn.classList.remove("copied"); btn.textContent = "Copy"; }, 1200);
 }
 
 /* ---- chart: single-series line + area, hairline grid, hover crosshair ---- */
