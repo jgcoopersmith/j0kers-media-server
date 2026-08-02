@@ -27,7 +27,7 @@ namespace J0kersMediaServer.Control;
 /// </summary>
 public sealed partial class ControlApi
 {
-    private sealed record LoginRequest(string? username, string? password, bool? remember, string? code);
+    private sealed record LoginRequest(string? username, string? password, bool? remember);
     private sealed record PasswordRequest(string? currentPassword, string? newPassword);
     private sealed record KeyRequest(string? label, int? days);
     private sealed record UserRequest(string? username, string? password, string? displayName, string? role, bool? enabled);
@@ -176,10 +176,8 @@ public sealed partial class ControlApi
     // ---- first run ----
 
     /// <summary>
-    /// POST /api/auth/setup — creates the very first administrator. Refused
-    /// once any account exists. From another machine it also needs the
-    /// one-time code the server logs at startup, so a LAN neighbour can't
-    /// race the operator to claim the server on its first boot.
+    /// POST /api/auth/setup — creates the very first administrator, and
+    /// signs them in. Refused once any account exists.
     /// </summary>
     private void Setup(HttpListenerContext ctx)
     {
@@ -194,17 +192,7 @@ public sealed partial class ControlApi
             WriteJson(res, 400, new { error });
             return;
         }
-        if (!_auth.CheckSetupCode(ctx, req!.code))
-        {
-            Log.Warn("auth", $"setup rejected from {ctx.Request.RemoteEndPoint}: wrong or missing setup code");
-            WriteJson(res, 403, new
-            {
-                error = "this server was started elsewhere — enter the setup code from its console to claim it",
-                codeRequired = true,
-            });
-            return;
-        }
-        if (UserStore.ValidateUsername(req.username) is string nameError)
+        if (UserStore.ValidateUsername(req!.username) is string nameError)
         {
             WriteJson(res, 400, new { error = nameError });
             return;

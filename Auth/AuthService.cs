@@ -95,19 +95,6 @@ public sealed class AuthService
     /// <summary>No accounts at all: the dashboard should offer first-run setup.</summary>
     public bool SetupRequired => !_users.Any;
 
-    /// <summary>
-    /// One-time code logged at startup while the server is unclaimed.
-    /// Creating the first admin from this machine doesn't need it; doing so
-    /// from anywhere else does, so a neighbour on the same LAN can't claim a
-    /// freshly started server before its owner gets to the browser.
-    /// </summary>
-    public string SetupCode { get; } =
-        Convert.ToHexString(RandomNumberGenerator.GetBytes(4)).ToUpperInvariant();
-
-    public bool CheckSetupCode(HttpListenerContext ctx, string? presented) =>
-        Hls.HttpListenerBinder.IsLoopbackRequest(ctx)
-        || FixedTimeEquals(presented?.Trim().ToUpperInvariant() ?? "", SetupCode);
-
     // ---- request authentication ----
 
     /// <summary>

@@ -489,10 +489,6 @@
         <button type="button" class="pw-eye" data-pw="login-pass2" aria-label="Show password" title="Show password">👁</button>
       </div>
     </div>
-    <div id="login-code-row" style="display:none">
-      <label>Setup code</label>
-      <input id="login-code" class="am-in" autocomplete="off" placeholder="shown in the server's console at startup">
-    </div>
     <label class="chk"><input id="login-remember" type="checkbox" checked>
       <span>Remember this device — issue a key so this browser stays signed in</span></label>
     <div id="login-msg" class="msg"></div>
@@ -697,8 +693,6 @@ function showLogin() {
     : "";
   $("login-go").textContent = setup ? "Create administrator" : "Sign in";
   $("login-confirm-row").style.display = setup ? "" : "none";
-  // claiming the server from another machine needs the console's code
-  $("login-code-row").style.display = setup && !(authState && authState.secure === true) ? "" : "none";
   $("login-cancel").style.display = setup && authState && authState.authenticated ? "" : "none";
   $("login-pass").setAttribute("autocomplete", setup ? "new-password" : "current-password");
   $("login-insecure").style.display = authState && authState.secure === false ? "" : "none";
@@ -721,13 +715,8 @@ async function submitLogin() {
   if (setup && password !== $("login-pass2").value) { msg.textContent = "the two passwords don't match"; return; }
 
   const body = { username, password, remember: $("login-remember").checked };
-  if (setup) body.code = $("login-code").value.trim();
   const [ok, data] = await send("POST", setup ? "/api/auth/setup" : "/api/auth/login", body);
-  if (!ok) {
-    msg.textContent = data.error || "sign-in failed";
-    if (data.codeRequired) $("login-code-row").style.display = "";
-    return;
-  }
+  if (!ok) { msg.textContent = data.error || "sign-in failed"; return; }
   // the password is gone from here the moment it's been exchanged
   $("login-pass").value = $("login-pass2").value = "";
   if (data.key) { token = data.key; localStorage.setItem("j0kers-key", token); }
@@ -2398,7 +2387,7 @@ function hidePasswords() {
 }
 
 // Enter submits the sign-in form from any of its fields
-for (const id of ["login-user", "login-pass", "login-pass2", "login-code"])
+for (const id of ["login-user", "login-pass", "login-pass2"])
   $(id).addEventListener("keydown", e => { if (e.key === "Enter") submitLogin(); });
 for (const id of ["acct-overlay", "users-overlay"])
   $(id).addEventListener("mousedown", e => { if (e.target.id === id) closeOverlay(id); });

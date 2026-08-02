@@ -261,7 +261,7 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `POST /api/server/start` / `stop` | start / stop the streaming services |
 | `GET/POST /api/settings` | read / save hostname + ports (persisted to `settings.json`) |
 | `GET /api/auth/state` | is auth on, is setup needed, who am I |
-| `POST /api/auth/setup` | claim the first administrator account (first run only) |
+| `POST /api/auth/setup` | create the first administrator account (first run only) |
 | `POST /api/auth/login` / `logout` | password → session cookie / drop the session |
 | `POST /api/auth/password` | change your own password |
 | `GET/POST/DELETE /api/auth/keys` | list / mint / revoke your own keys |
@@ -291,9 +291,8 @@ handed to a houseguest can't transcode `C:\Users\you\taxes.pdf`.
 
 Until an administrator exists the server behaves exactly as it always
 has — open — and the dashboard says so plainly with a *Create one* banner.
-Creating that account from the machine itself needs nothing extra; doing
-it from another device also needs the one-time **setup code** logged at
-startup, so nobody on the LAN can claim a freshly started server first.
+Click it, pick a username and password, and you're signed in as the
+administrator.
 
 ### Two ways to sign in
 

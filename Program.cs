@@ -197,8 +197,6 @@ if (config.Control.Enabled && !auth.Enforcing)
     Log.Warn("main", exposed
         ? "no administrator account — the dashboard and its configuration are open to anyone on this network"
         : "no administrator account — open the dashboard to create one and protect the configuration");
-    // needed to claim the server from anything other than this machine
-    Log.Info("main", $"first-run setup code: {auth.SetupCode}");
 }
 
 var mediaRoot = Path.GetFullPath(Path.IsPathRooted(config.Hls.MediaRoot)
