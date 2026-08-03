@@ -20,6 +20,10 @@ publish/
 /library.json
 /config/favorites.json
 /favorites.json
+# free-TV providers: written with a commented template on first run, then
+# it's whichever playlists this install trusts
+/config/providers.json
+/providers.json
 # accounts: password hashes and key digests — never commit these
 /config/users.json
 /users.json
