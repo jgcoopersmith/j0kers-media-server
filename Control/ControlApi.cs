@@ -373,6 +373,10 @@ public sealed partial class ControlApi : IDisposable
                             // people watching over HTTP right now; RTSP
                             // sessions above are counted separately
                             viewers = _services.Viewers.Count,
+                            // every address this port answers on, so the
+                            // dashboard can offer a link per network rather
+                            // than only the one you happen to be browsing
+                            addresses = MediaAddresses(),
                         },
                         ffmpeg = new
                         {
@@ -1580,6 +1584,24 @@ public sealed partial class ControlApi : IDisposable
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Addresses the media port is reachable on. Bound to a single address
+    /// that's the only answer; bound to a wildcard it is every connected
+    /// network, which is the case where a link built from whatever host the
+    /// dashboard happens to be open on is the wrong one to hand to a phone
+    /// on a different subnet.
+    /// </summary>
+    private object[] MediaAddresses()
+    {
+        var bind = _serverConfig.Hls.BindAddress;
+        if (bind is not ("0.0.0.0" or "::" or "*"))
+            return new object[] { new { name = "", address = bind, kind = "", primary = true } };
+
+        return Services.NetworkInfo.Active()
+            .Select(i => (object)new { name = i.Name, address = i.Address, kind = i.Kind, primary = i.Primary })
+            .ToArray();
     }
 
     /// <summary>Bodies here are small JSON objects; nothing legitimate comes close.</summary>

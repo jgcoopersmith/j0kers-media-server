@@ -56,6 +56,13 @@ the server in this mode, so it keeps serving your phone and other devices
 until you pick Exit. `--no-tray` overrides the config for one run. On
 macOS/Linux use your init system (systemd/launchd) or `nohup` instead.
 
+When the server is bound to `0.0.0.0` and more than one network is
+connected, each stream in the **HLS streams** card carries a watch link per
+network (📶 Wi-Fi, 🔌 Ethernet) with a copy button, and marks the one you're
+already browsing on. A link built from whichever address you happen to have
+the dashboard open on is the wrong one to hand to a phone on a different
+subnet. With a single address nothing extra is drawn.
+
 The **Sessions** card lists everyone watching, both kinds at once. RTSP has
 real sessions, so those can be terminated. HLS has none — a viewer is a
 series of unrelated file requests — so one is inferred instead: requests
