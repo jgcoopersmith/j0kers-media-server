@@ -76,6 +76,24 @@ public sealed class HlsViewers
         Interlocked.Add(ref entry.Bytes, bytes);
         Interlocked.Increment(ref entry.Requests);
 
+        MaybePrune();
+    }
+
+    private long _lastPruneTicks = DateTime.UtcNow.Ticks;
+
+    /// <summary>
+    /// Sweeps at most every 30 seconds. Sweeping on every request made the
+    /// cost of serving one segment proportional to the number of viewers,
+    /// which is the wrong shape for something on the media path — and the
+    /// only visible effect of a late sweep is a viewer lingering a few
+    /// seconds past the window.
+    /// </summary>
+    private void MaybePrune()
+    {
+        var now = DateTime.UtcNow.Ticks;
+        var last = Interlocked.Read(ref _lastPruneTicks);
+        if (now - last < TimeSpan.TicksPerSecond * 30) return;
+        if (Interlocked.CompareExchange(ref _lastPruneTicks, now, last) != last) return;
         Prune();
     }
 

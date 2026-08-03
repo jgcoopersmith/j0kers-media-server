@@ -495,11 +495,7 @@ public sealed partial class ControlApi
         error = null;
         try
         {
-            using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
-            var buffer = new char[64 * 1024];
-            var read = reader.ReadBlock(buffer, 0, buffer.Length);
-            if (read == buffer.Length) { error = "request body is too large"; return false; }
-            var body = new string(buffer, 0, read);
+            var body = ReadBody(ctx);
             if (string.IsNullOrWhiteSpace(body))
             {
                 if (allowEmpty) return true;

@@ -76,7 +76,7 @@ public sealed class HlsServer : IDisposable
     /// wired up (a server with no accounts) this port stays open exactly as
     /// it was before.
     /// </summary>
-    private bool Authorized(HttpListenerContext ctx, string scope)
+    private bool Authorized(HttpListenerContext ctx, string scope, Auth.AuthResult? identity)
     {
         // follows account existence live: claiming the server mid-session
         // starts enforcing here too, without a restart
@@ -85,8 +85,7 @@ public sealed class HlsServer : IDisposable
         var q = ctx.Request.QueryString;
         if (Links.Verify(scope, q["exp"], q["sig"])) return true;
 
-        return Sessions is not null
-            && Sessions.Authenticate(ctx).Level != Auth.AccessLevel.None;
+        return identity is not null && identity.Level != Auth.AccessLevel.None;
     }
 
     /// <summary>The caller's token as a query suffix ("?exp=…&amp;sig=…"), or "" when they used a cookie.</summary>
@@ -210,7 +209,12 @@ public sealed class HlsServer : IDisposable
             var scope = parts.Length >= 2 && parts[0] == "watch" ? parts[1]
                 : parts.Length >= 1 && parts[0].Length > 0 ? parts[0]
                 : Auth.MediaLink.AllStreams;
-            if (!Authorized(ctx, scope))
+
+            // Resolved once and reused: authorizing and then naming the
+            // viewer used to authenticate the same request twice, taking the
+            // account-store lock each time, on every segment of every stream.
+            var identity = Sessions?.Authenticate(ctx);
+            if (!Authorized(ctx, scope, identity))
             {
                 Log.Warn("hls", $"unauthorized {ctx.Request.RemoteEndPoint} GET {path}");
                 WriteText(res, 401, "text/plain",
@@ -226,7 +230,7 @@ public sealed class HlsServer : IDisposable
             // Name the account behind this request where there is one. A
             // signed link deliberately carries no identity, so those show up
             // as a share link rather than as somebody.
-            var watcher = Sessions?.Authenticate(ctx).User?.Username;
+            var watcher = identity?.User?.Username;
 
             if (path == "/")
             {

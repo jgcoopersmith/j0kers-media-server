@@ -887,9 +887,7 @@ public sealed partial class ControlApi : IDisposable
         ServerConfig.SettingsOverrides? s;
         try
         {
-            using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
-            s = JsonSerializer.Deserialize<ServerConfig.SettingsOverrides>(reader.ReadToEnd(),
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            s = JsonSerializer.Deserialize<ServerConfig.SettingsOverrides>(ReadBody(ctx), BodyJson);
         }
         catch (Exception ex)
         {
@@ -1048,9 +1046,7 @@ public sealed partial class ControlApi : IDisposable
         var res = ctx.Response;
         try
         {
-            using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
-            var req = JsonSerializer.Deserialize<FavoriteRequest>(reader.ReadToEnd(),
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            var req = JsonSerializer.Deserialize<FavoriteRequest>(ReadBody(ctx), BodyJson);
             if (string.IsNullOrWhiteSpace(req?.path))
             {
                 WriteJson(res, 400, new { error = "body must be { \"path\": \"...\", \"name\": \"optional\" }" });
@@ -1101,9 +1097,7 @@ public sealed partial class ControlApi : IDisposable
         }
         try
         {
-            using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
-            var req = JsonSerializer.Deserialize<SubtitleRequest>(reader.ReadToEnd(),
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            var req = JsonSerializer.Deserialize<SubtitleRequest>(ReadBody(ctx), BodyJson);
             if (string.IsNullOrWhiteSpace(req?.stream) || string.IsNullOrWhiteSpace(req?.file))
             {
                 WriteJson(res, 400, new { error = "body must be { \"stream\": \"...\", \"file\": \"...\" }" });
@@ -1167,9 +1161,7 @@ public sealed partial class ControlApi : IDisposable
         var res = ctx.Response;
         try
         {
-            using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
-            var req = JsonSerializer.Deserialize<LibraryRequest>(reader.ReadToEnd(),
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            var req = JsonSerializer.Deserialize<LibraryRequest>(ReadBody(ctx), BodyJson);
             if (string.IsNullOrWhiteSpace(req?.folder))
             {
                 WriteJson(res, 400, new { error = "body must be { \"folder\": \"...\" }" });
@@ -1243,9 +1235,7 @@ public sealed partial class ControlApi : IDisposable
         var res = ctx.Response;
         try
         {
-            using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
-            var req = JsonSerializer.Deserialize<PlaylistRequest>(reader.ReadToEnd(),
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            var req = JsonSerializer.Deserialize<PlaylistRequest>(ReadBody(ctx), BodyJson);
             if (string.IsNullOrWhiteSpace(req?.name) || string.IsNullOrWhiteSpace(req?.folder))
             {
                 WriteJson(res, 400, new { error = "body must be { \"name\": \"...\", \"folder\": \"...\" }" });
@@ -1285,9 +1275,7 @@ public sealed partial class ControlApi : IDisposable
         }
         try
         {
-            using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
-            var req = JsonSerializer.Deserialize<PlayRequest>(reader.ReadToEnd(),
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            var req = JsonSerializer.Deserialize<PlayRequest>(ReadBody(ctx), BodyJson);
             if (string.IsNullOrWhiteSpace(req?.file))
             {
                 WriteJson(res, 400, new { error = "body must be { \"file\": \"...\", \"height\": 0|360|480|720|1080 }" });
@@ -1329,9 +1317,7 @@ public sealed partial class ControlApi : IDisposable
         }
         try
         {
-            using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
-            var req = JsonSerializer.Deserialize<ChannelRequest>(reader.ReadToEnd(),
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            var req = JsonSerializer.Deserialize<ChannelRequest>(ReadBody(ctx), BodyJson);
             if (string.IsNullOrWhiteSpace(req?.name) || string.IsNullOrWhiteSpace(req?.url))
             {
                 WriteJson(res, 400, new { error = "body must be { \"name\": \"...\", \"url\": \"...\" }" });
@@ -1401,9 +1387,7 @@ public sealed partial class ControlApi : IDisposable
         MountConfig? mount;
         try
         {
-            using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
-            mount = JsonSerializer.Deserialize<MountConfig>(reader.ReadToEnd(),
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            mount = JsonSerializer.Deserialize<MountConfig>(ReadBody(ctx), BodyJson);
         }
         catch (Exception ex)
         {
@@ -1597,6 +1581,32 @@ public sealed partial class ControlApi : IDisposable
             return false;
         }
     }
+
+    /// <summary>Bodies here are small JSON objects; nothing legitimate comes close.</summary>
+    private const int MaxBodyBytes = 64 * 1024;
+
+    /// <summary>
+    /// Reads a request body, refusing an oversized one before it costs
+    /// anything. ReadToEnd on an HttpListener stream reads whatever the
+    /// client cares to send — a 39 MB body turned into roughly 660 MB of
+    /// process memory once decoded to UTF-16 and handed to the parser, so a
+    /// handful of concurrent requests could take the server down.
+    /// </summary>
+    private static string ReadBody(HttpListenerContext ctx)
+    {
+        if (ctx.Request.ContentLength64 > MaxBodyBytes) throw TooLarge();
+
+        using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
+        var buffer = new char[MaxBodyBytes];
+        var read = reader.ReadBlock(buffer, 0, buffer.Length);
+        // filled the buffer and there is still more coming (covers chunked
+        // bodies, which advertise no length at all)
+        if (read == buffer.Length && reader.Peek() >= 0) throw TooLarge();
+        return new string(buffer, 0, read);
+    }
+
+    private static InvalidDataException TooLarge() =>
+        new($"request body is larger than {MaxBodyBytes / 1024} KB");
 
     private void WriteJson(HttpListenerResponse res, int status, object body)
     {

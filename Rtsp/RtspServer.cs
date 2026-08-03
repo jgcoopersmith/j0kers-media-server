@@ -148,7 +148,7 @@ public sealed class RtspServer : IDisposable
             // learn it needs credentials) before being challenged; every
             // method that reveals or delivers media does not.
             var method = request.Method.ToUpperInvariant();
-            if (method != "OPTIONS" && RequiresCredentials(request) is RtspResponse challenge)
+            if (method != "OPTIONS" && RequiresCredentials(request, remote) is RtspResponse challenge)
                 return challenge;
 
             return method switch
@@ -191,12 +191,12 @@ public sealed class RtspServer : IDisposable
     /// rest of the server has. A key works here too, as the username with
     /// any password, for clients you'd rather not give an account password.
     /// </summary>
-    private RtspResponse? RequiresCredentials(RtspRequest request)
+    private RtspResponse? RequiresCredentials(RtspRequest request, IPEndPoint remote)
     {
         if (Accounts is null || !_config.Rtsp.RequireAuth || !Accounts.Enforcing) return null;
 
         var header = request.Headers.TryGetValue("Authorization", out var value) ? value : null;
-        if (Accounts.VerifyRtspCredentials(header)) return null;
+        if (Accounts.VerifyRtspCredentials(header, remote.Address.ToString())) return null;
 
         Log.Warn("rtsp", $"{request.Method} {request.Uri} refused: no valid credentials");
         return new RtspResponse(401, request.CSeq)

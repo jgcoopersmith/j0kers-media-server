@@ -70,6 +70,7 @@ public sealed class AuthService
     {
         public int Failures;
         public DateTime LockedUntilUtc;
+        public DateTime LastFailureUtc = DateTime.UtcNow;
     }
 
     private readonly UserStore _users;
@@ -151,19 +152,35 @@ public sealed class AuthService
         // anything but a key.
         var query = ctx.Request.QueryString["key"] ?? ctx.Request.QueryString["token"];
         if (string.IsNullOrWhiteSpace(query)) return null;
-        WarnAboutKeyInUrl(ctx, query);
+        NoteKeyInUrl();
         return query.Trim();
     }
 
-    private readonly ConcurrentDictionary<string, byte> _urlKeyWarnings = new(StringComparer.Ordinal);
+    private long _urlKeyCount;
+    private long _urlKeyWarnedTicks;
+    private static readonly TimeSpan UrlKeyWarnInterval = TimeSpan.FromMinutes(10);
 
-    /// <summary>Says it once per credential, so a polling script doesn't fill the log.</summary>
-    private void WarnAboutKeyInUrl(HttpListenerContext ctx, string presented)
+    /// <summary>
+    /// Warns that a credential arrived in a URL, at most once every ten
+    /// minutes with a running count.
+    ///
+    /// This deliberately keeps no per-credential state. Remembering which
+    /// credentials had already been warned about meant remembering a value
+    /// an unauthenticated caller chooses, so a loop of requests carrying a
+    /// different bogus ?key= each time grew the table without bound and
+    /// wrote a log line every time — the opposite of what "warn once" was
+    /// supposed to buy. Two counters can't be made to grow.
+    /// </summary>
+    private void NoteKeyInUrl()
     {
-        var id = Digest(presented);
-        if (!_urlKeyWarnings.TryAdd(id, 0)) return;
-        Log.Warn("auth", $"a credential arrived in the URL from {ClientKey(ctx)} " +
-                         "(?key=/?token=) — headers keep it out of logs and history");
+        var total = Interlocked.Increment(ref _urlKeyCount);
+        var now = DateTime.UtcNow.Ticks;
+        var last = Interlocked.Read(ref _urlKeyWarnedTicks);
+        if (last != 0 && now - last < UrlKeyWarnInterval.Ticks) return;
+        // whoever wins the exchange writes the line; the rest stay quiet
+        if (Interlocked.CompareExchange(ref _urlKeyWarnedTicks, now, last) != last) return;
+        Log.Warn("auth", $"credentials are arriving in URLs (?key=/?token=), {total} so far — " +
+                         "a header keeps them out of logs, history and Referer");
     }
 
     private static string? ReadSessionCookie(HttpListenerContext ctx)
@@ -239,6 +256,11 @@ public sealed class AuthService
         _throttles.TryRemove(nameKey, out _);
         _throttles.TryRemove(addrKey, out _);
 
+        // Retire whatever session the caller arrived holding. Signing in
+        // should always hand back a fresh identifier, so a cookie planted
+        // or observed beforehand isn't still valid afterwards.
+        if (ReadSessionCookie(ctx) is string previous) _sessions.TryRemove(Digest(previous), out _);
+
         Log.Info("auth", $"login: {user.Username} ({user.Role}) from {client}");
         return new LoginOutcome(true, user, OpenSession(user, ctx), null);
     }
@@ -266,9 +288,17 @@ public sealed class AuthService
     /// Checks an RTSP <c>Authorization: Basic</c> header. Accepts an account
     /// username and password, or a key as the username (so a camera or a
     /// set-top box can be given something revocable instead of a password).
+    ///
+    /// Throttled on the same counters as the web login, and against the same
+    /// account keys, so an attacker can't sidestep the lockout by moving to
+    /// RTSP — and so a locked-out guess is refused before it costs a
+    /// PBKDF2, which otherwise makes this a cheap way to burn the CPU.
     /// </summary>
-    public bool VerifyRtspCredentials(string? header)
+    public bool VerifyRtspCredentials(string? header, string clientAddress)
     {
+        var addrKey = "addr:" + clientAddress;
+        if (LockedFor(addrKey) > 0) return false;
+
         if (string.IsNullOrEmpty(header)) return false;
         if (!header.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase)) return false;
 
@@ -281,13 +311,27 @@ public sealed class AuthService
         var username = decoded[..split];
         var password = decoded[(split + 1)..];
 
+        // a key is high-entropy and can't be guessed, so it isn't throttled
         if (username.StartsWith(UserStore.KeyPrefix, StringComparison.Ordinal))
             return _users.VerifyKey(username) is not null;
         if (password.StartsWith(UserStore.KeyPrefix, StringComparison.Ordinal)
             && _users.VerifyKey(password) is not null)
             return true;
 
-        return _users.VerifyPassword(username, password) is not null;
+        var nameKey = "user:" + username.Trim().ToLowerInvariant();
+        if (LockedFor(nameKey) > 0) return false;
+
+        if (_users.VerifyPassword(username, password) is not null)
+        {
+            _throttles.TryRemove(nameKey, out _);
+            _throttles.TryRemove(addrKey, out _);
+            return true;
+        }
+
+        RegisterFailure(nameKey);
+        RegisterFailure(addrKey);
+        Log.Warn("auth", $"failed RTSP login for '{username}' from {clientAddress}");
+        return false;
     }
 
     public void Logout(HttpListenerContext ctx)
@@ -332,7 +376,9 @@ public sealed class AuthService
     private int LockedFor(string key)
     {
         if (!_throttles.TryGetValue(key, out var t)) return 0;
-        var remaining = (int)Math.Ceiling((t.LockedUntilUtc - DateTime.UtcNow).TotalSeconds);
+        DateTime until;
+        lock (t) until = t.LockedUntilUtc;   // read under the same lock that writes it
+        var remaining = (int)Math.Ceiling((until - DateTime.UtcNow).TotalSeconds);
         return remaining > 0 ? remaining : 0;
     }
 
@@ -342,6 +388,7 @@ public sealed class AuthService
         lock (t)
         {
             t.Failures++;
+            t.LastFailureUtc = DateTime.UtcNow;
             if (t.Failures >= MaxFailuresBeforeLockout)
             {
                 // 5th failure → 15 s, doubling to a 15 minute ceiling
@@ -349,6 +396,27 @@ public sealed class AuthService
                 var seconds = Math.Min(15 * Math.Pow(2, steps), 900);
                 t.LockedUntilUtc = DateTime.UtcNow.AddSeconds(seconds);
             }
+        }
+        PruneThrottles();
+    }
+
+    /// <summary>
+    /// Drops counters that have gone quiet. Without this, one entry per
+    /// attempted username and per source address accumulates for the life of
+    /// the process — slow, because the address lockout limits the rate, but
+    /// still a table an outsider decides the size of.
+    /// </summary>
+    private void PruneThrottles()
+    {
+        // an entry is only interesting while its lockout could still bite,
+        // plus a grace period so the escalation isn't reset by waiting
+        if (_throttles.Count < 64) return;
+        var cutoff = DateTime.UtcNow - TimeSpan.FromHours(1);
+        foreach (var (key, t) in _throttles)
+        {
+            bool stale;
+            lock (t) stale = t.LastFailureUtc < cutoff && t.LockedUntilUtc < DateTime.UtcNow;
+            if (stale) _throttles.TryRemove(key, out _);
         }
     }
 
