@@ -180,6 +180,19 @@ one in the dashboard; 📌 **pin** turns it into a permanent local channel
 (an ffmpeg restream) so phones, TVs and VLC can play it off this server
 like any other stream.
 
+Three view modes, remembered per browser:
+
+| Mode | Row | Shows |
+|---|---|---|
+| **Condensed** | ~26 px | number and name, for scanning a long lineup |
+| **Default** | ~52 px | logo, name, number · category |
+| **Info** | ~90 px | larger logo plus the channel's description |
+
+Each caps how many rows it draws — 200, 60 and 25 — because what makes a
+list unwieldy is its height rather than its length, and laying out several
+hundred rows is slower than narrowing the search. Whatever is hidden is
+counted at the bottom rather than silently dropped.
+
 Only the playlists go through the server — a few KB of text every few
 seconds. The video segments are fetched by the player straight from the
 provider's CDN, so browsing a 400-channel lineup costs nothing until you

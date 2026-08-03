@@ -158,6 +158,9 @@
   button:hover { border-color: var(--muted); color: var(--ink); }
   button.danger { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 45%, transparent); }
   button.danger:hover { background: color-mix(in srgb, var(--critical) 14%, transparent); }
+  /* Condensed lineup rows: the default button padding sets the row height
+     on its own, so the mode can't get tight without shrinking these too. */
+  .tv-tight button { padding: 1px 7px; font-size: 11.5px; border-radius: 6px; }
   .copied { color: var(--good) !important; }
   button.playing { color: var(--good); border-color: color-mix(in srgb, var(--good) 45%, transparent); }
   #hlsplayer { display: none; margin-top: 12px; }
@@ -524,6 +527,12 @@
       <select id="tv-provider" onchange="loadLineup(true)" class="am-in" style="width:auto"></select>
       <input id="tv-search" class="am-in" placeholder="search channels" style="width:150px" oninput="lineupSearch()">
       <select id="tv-group" onchange="renderLineup()" class="am-in" style="width:auto"></select>
+      <select id="tv-view" onchange="setLineupView(this.value)" class="am-in" style="width:auto"
+              title="How much to show for each channel">
+        <option value="condensed">Condensed</option>
+        <option value="default">Default</option>
+        <option value="info">Info</option>
+      </select>
     </h2>
     <div id="tv-lineup"><div class="empty">Loading the lineup…</div></div>
   </div>
@@ -2287,6 +2296,7 @@ async function loadProviders() {
   }
   sel.innerHTML = data.providers.map(p =>
     '<option value="' + esc(p.id) + '">' + esc(p.name) + '</option>').join("");
+  $("tv-view").value = lineupView;   // the remembered choice, not the markup's first option
   loadLineup(true);
 }
 
@@ -2318,6 +2328,81 @@ function lineupSearch() {
   searchTimer = setTimeout(renderLineup, 120);
 }
 
+/* The three ways to look at a lineup. Each sets its own row cap, because
+   what makes a list unwieldy is its height, not its length: a condensed row
+   is a fraction of an info row, so the same cap would either cripple one or
+   bog down the other. */
+const LINEUP_VIEWS = {
+  condensed: { cap: 200, logo: 0,  row: condensedRow },
+  default:   { cap: 60,  logo: 38, row: defaultRow },
+  info:      { cap: 25,  logo: 72, row: infoRow },
+};
+const VIEW_KEY = "j0kers-tv-view";
+let lineupView = "default";
+try {
+  const saved = localStorage.getItem(VIEW_KEY);
+  if (LINEUP_VIEWS[saved]) lineupView = saved;
+} catch { /* private mode */ }
+
+function setLineupView(v) {
+  lineupView = LINEUP_VIEWS[v] ? v : "default";
+  try { localStorage.setItem(VIEW_KEY, lineupView); } catch { /* private mode */ }
+  // keep the control honest when this is called with anything but a click
+  const sel = $("tv-view");
+  if (sel && sel.value !== lineupView) sel.value = lineupView;
+  renderLineup();
+}
+
+const tvButtons = c =>
+  '<button data-act="tv-play" data-arg="' + esc(c.watch) + '">▶ Watch</button>'
+  + '<button class="edit-only" title="Restream this channel from this server"'
+  + ' data-act="tv-pin" data-arg="' + esc(c.id) + '" data-name="' + esc(c.name) + '">📌</button>';
+
+const tvLogo = (c, px) => !px ? ""
+  : c.logo
+    ? '<img src="' + esc(c.logo) + '" alt="" loading="lazy" style="width:' + px + 'px;height:'
+      + Math.round(px * 0.58) + 'px;object-fit:contain;flex:none">'
+    : '<span style="width:' + px + 'px;flex:none"></span>';
+
+const ellipsis = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+
+/* Number and name on one line, nothing else — the channel number is what
+   you scan by, so it gets a fixed column and stays aligned down the list. */
+function condensedRow(c) {
+  return '<div class="tv-tight" style="display:flex;align-items:center;gap:8px;padding:2px 0;border-bottom:1px solid var(--grid)">'
+    + '<span class="mono" style="color:var(--muted);font-size:11.5px;width:38px;flex:none;text-align:right">'
+    + esc(String(c.number)) + '</span>'
+    + '<span style="flex:1;min-width:0;color:var(--ink);font-size:13px;' + ellipsis + '">' + esc(c.name) + '</span>'
+    + tvButtons(c) + '</div>';
+}
+
+function defaultRow(c) {
+  return '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
+    + tvLogo(c, LINEUP_VIEWS.default.logo)
+    + '<div style="flex:1;min-width:0">'
+    + '<div style="color:var(--ink);' + ellipsis + '">' + esc(c.name) + '</div>'
+    + '<div class="mono" style="color:var(--muted);font-size:11.5px;' + ellipsis + '">'
+    + esc(String(c.number)) + (c.group ? " · " + esc(c.group) : "") + '</div></div>'
+    + tvButtons(c) + '</div>';
+}
+
+/* Adds what the channel actually shows. The summary wraps rather than
+   being clipped — a description cut off mid-sentence is no use, and it is
+   the whole reason for picking this view. */
+function infoRow(c) {
+  return '<div style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--grid)">'
+    + tvLogo(c, LINEUP_VIEWS.info.logo)
+    + '<div style="flex:1;min-width:0">'
+    + '<div style="color:var(--ink);' + ellipsis + '">' + esc(c.name) + '</div>'
+    + '<div class="mono" style="color:var(--muted);font-size:11.5px;margin-bottom:3px;' + ellipsis + '">'
+    + esc(String(c.number)) + (c.group ? " · " + esc(c.group) : "") + '</div>'
+    + (c.summary
+        ? '<div style="color:var(--muted);font-size:12px;line-height:1.45">' + esc(c.summary) + '</div>'
+        : '<div style="color:var(--muted);font-size:12px;font-style:italic">No description.</div>')
+    + '</div>'
+    + '<div style="display:flex;gap:6px;flex:none">' + tvButtons(c) + '</div></div>';
+}
+
 function renderLineup() {
   const q = ($("tv-search").value || "").trim().toLowerCase();
   const group = $("tv-group").value || "";
@@ -2333,24 +2418,10 @@ function renderLineup() {
   /* Capped because the whole lineup is several hundred rows and the browser
      is noticeably slower to lay them all out than anyone is to narrow the
      search. The count says what is hidden rather than pretending. */
-  const cap = 60;
-  let h = "";
-  for (const c of shown.slice(0, cap)) {
-    h += '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
-      + (c.logo
-          ? '<img src="' + esc(c.logo) + '" alt="" loading="lazy" style="width:38px;height:22px;object-fit:contain;flex:none">'
-          : '<span style="width:38px;flex:none"></span>')
-      + '<div style="flex:1;min-width:0">'
-      + '<div style="color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(c.name) + '</div>'
-      + '<div class="mono" style="color:var(--muted);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
-      + esc(String(c.number)) + (c.group ? " · " + esc(c.group) : "") + '</div></div>'
-      + '<button data-act="tv-play" data-arg="' + esc(c.watch) + '">▶ Watch</button>'
-      + '<button class="edit-only" title="Restream this channel from this server"'
-      + ' data-act="tv-pin" data-arg="' + esc(c.id) + '" data-name="' + esc(c.name) + '">📌</button>'
-      + '</div>';
-  }
-  if (shown.length > cap)
-    h += '<div class="empty">' + (shown.length - cap) + ' more — narrow the search to see them.</div>';
+  const view = LINEUP_VIEWS[lineupView] || LINEUP_VIEWS.default;
+  let h = shown.slice(0, view.cap).map(view.row).join("");
+  if (shown.length > view.cap)
+    h += '<div class="empty">' + (shown.length - view.cap) + ' more — narrow the search to see them.</div>';
   // the 📌 button carries .edit-only; CSS hides it for read-only accounts
   $("tv-lineup").innerHTML = h;
 }
