@@ -182,15 +182,22 @@ like any other stream.
 
 Three view modes, remembered per browser:
 
-| Mode | Row | Shows |
+| Mode | Layout | Shows |
 |---|---|---|
-| **Condensed** | ~26 px | number and name, for scanning a long lineup |
-| **Default** | ~52 px | logo, name, number · category |
-| **Info** | ~90 px | larger logo plus the channel's description |
+| **Condensed** | grid of tiles | logo and name — 6 across at 1280px, 8 at 1600 |
+| **Default** | one per row | logo, name, number · category |
+| **Info** | one per row | larger logo plus the channel's description |
 
-Each caps how many rows it draws — 200, 60 and 25 — because what makes a
+Condensed is a grid rather than a longer list, since a few hundred channels
+one-per-row is the thing you were scrolling past in the first place. The
+column count follows the card width (`auto-fill`), so a narrow window or a
+phone gets fewer columns instead of a sideways scrollbar — down to a single
+column at phone width. The tile itself is the Watch button; at that size a
+separate one would be most of the tile. 📌 still pins.
+
+Each mode caps how many it draws — 240, 60 and 25 — because what makes a
 list unwieldy is its height rather than its length, and laying out several
-hundred rows is slower than narrowing the search. Whatever is hidden is
+hundred is slower than narrowing the search. Whatever is over the cap is
 counted at the bottom rather than silently dropped.
 
 Only the playlists go through the server — a few KB of text every few

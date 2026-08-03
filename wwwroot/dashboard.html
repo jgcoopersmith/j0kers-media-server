@@ -158,9 +158,19 @@
   button:hover { border-color: var(--muted); color: var(--ink); }
   button.danger { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 45%, transparent); }
   button.danger:hover { background: color-mix(in srgb, var(--critical) 14%, transparent); }
-  /* Condensed lineup rows: the default button padding sets the row height
-     on its own, so the mode can't get tight without shrinking these too. */
-  .tv-tight button { padding: 1px 7px; font-size: 11.5px; border-radius: 6px; }
+  /* Condensed lineup: a grid of tiles rather than one channel per row, so a
+     few hundred channels are scannable without scrolling past all of them.
+     auto-fill means the column count follows the card width — a narrow
+     window or a phone gets fewer columns rather than a sideways scrollbar. */
+  .tv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 6px; }
+  .tv-grid .empty { grid-column: 1 / -1; }
+  .tv-tile {
+    display: flex; align-items: center; gap: 6px; min-width: 0;
+    padding: 4px 6px; border: 1px solid var(--grid); border-radius: 8px; cursor: pointer;
+  }
+  .tv-tile:hover { border-color: var(--muted); background: var(--surface-2); }
+  /* the default button padding would set the tile height on its own */
+  .tv-tile button { padding: 0 4px; font-size: 11px; border: none; background: none; }
   .copied { color: var(--good) !important; }
   button.playing { color: var(--good); border-color: color-mix(in srgb, var(--good) 45%, transparent); }
   #hlsplayer { display: none; margin-top: 12px; }
@@ -2333,9 +2343,9 @@ function lineupSearch() {
    is a fraction of an info row, so the same cap would either cripple one or
    bog down the other. */
 const LINEUP_VIEWS = {
-  condensed: { cap: 200, logo: 0,  row: condensedRow },
-  default:   { cap: 60,  logo: 38, row: defaultRow },
-  info:      { cap: 25,  logo: 72, row: infoRow },
+  condensed: { cap: 240, logo: 26, row: condensedTile, container: "tv-grid" },
+  default:   { cap: 60,  logo: 38, row: defaultRow,    container: "" },
+  info:      { cap: 25,  logo: 72, row: infoRow,       container: "" },
 };
 const VIEW_KEY = "j0kers-tv-view";
 let lineupView = "default";
@@ -2366,14 +2376,19 @@ const tvLogo = (c, px) => !px ? ""
 
 const ellipsis = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
 
-/* Number and name on one line, nothing else — the channel number is what
-   you scan by, so it gets a fixed column and stays aligned down the list. */
-function condensedRow(c) {
-  return '<div class="tv-tight" style="display:flex;align-items:center;gap:8px;padding:2px 0;border-bottom:1px solid var(--grid)">'
-    + '<span class="mono" style="color:var(--muted);font-size:11.5px;width:38px;flex:none;text-align:right">'
-    + esc(String(c.number)) + '</span>'
-    + '<span style="flex:1;min-width:0;color:var(--ink);font-size:13px;' + ellipsis + '">' + esc(c.name) + '</span>'
-    + tvButtons(c) + '</div>';
+/* One tile in the condensed grid: logo and name, and the tile itself is the
+   Watch button — at this size a separate one would be most of the tile. The
+   pin sits inside it, and the click dispatcher resolves to the nearest
+   [data-act], so pressing 📌 pins rather than playing. Number and category
+   move to the tooltip; the name is what anyone scans a grid for. */
+function condensedTile(c) {
+  const title = esc(String(c.number)) + (c.group ? " · " + esc(c.group) : "") + " — " + esc(c.name);
+  return '<div class="tv-tile" title="' + title + '" data-act="tv-play" data-arg="' + esc(c.watch) + '">'
+    + tvLogo(c, LINEUP_VIEWS.condensed.logo)
+    + '<span style="flex:1;min-width:0;color:var(--ink);font-size:12.5px;' + ellipsis + '">' + esc(c.name) + '</span>'
+    + '<button class="edit-only" title="Restream this channel from this server"'
+    + ' data-act="tv-pin" data-arg="' + esc(c.id) + '" data-name="' + esc(c.name) + '">📌</button>'
+    + '</div>';
 }
 
 function defaultRow(c) {
@@ -2410,8 +2425,10 @@ function renderLineup() {
     (!group || c.group === group) &&
     (!q || c.name.toLowerCase().includes(q) || (c.summary || "").toLowerCase().includes(q)));
 
+  const box = $("tv-lineup");
   if (!shown.length) {
-    $("tv-lineup").innerHTML = '<div class="empty">Nothing matches.</div>';
+    box.className = "";
+    box.innerHTML = '<div class="empty">Nothing matches.</div>';
     return;
   }
 
@@ -2423,7 +2440,8 @@ function renderLineup() {
   if (shown.length > view.cap)
     h += '<div class="empty">' + (shown.length - view.cap) + ' more — narrow the search to see them.</div>';
   // the 📌 button carries .edit-only; CSS hides it for read-only accounts
-  $("tv-lineup").innerHTML = h;
+  box.className = view.container;
+  box.innerHTML = h;
 }
 
 async function pinTvChannel(id, name) {
