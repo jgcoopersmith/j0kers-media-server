@@ -246,15 +246,21 @@
     border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px;
   }
   .badge.admin { color: var(--series-1); border-color: color-mix(in srgb, var(--series-1) 45%, transparent); }
+  .badge.edit { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
   .badge.off { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 45%, transparent); }
   .keyrow { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-2); padding: 3px 0; }
   .keyrow .meta { color: var(--muted); font-size: 11px; flex: 1; }
-  /* a signed-in non-admin never sees an administration control */
+  /* Two tiers of hiding. .admin-only is the server's own configuration —
+     Config, Users, the power button. .edit-only is everything that changes
+     what the library offers, which an edit account may do and a read
+     account may not. The server enforces both regardless; this only keeps
+     the page honest about what the buttons would achieve. */
   body:not(.is-admin) .admin-only,
-  body:not(.is-admin) [data-act$="-remove"],
-  body:not(.is-admin) [data-act="fav-add"],
-  body:not(.is-admin) [data-act="ch-restart"],
   body:not(.is-admin) [data-act="session-kill"] { display: none !important; }
+  body:not(.can-edit) .edit-only,
+  body:not(.can-edit) [data-act$="-remove"],
+  body:not(.can-edit) [data-act="fav-add"],
+  body:not(.can-edit) [data-act="ch-restart"] { display: none !important; }
   /* media library sections & thumbnail tiles */
   .lib-h {
     display: flex; align-items: baseline; gap: 8px;
@@ -349,7 +355,6 @@
     <button class="pill admin-only" id="powerbtn" onclick="togglePower()" title="Start or stop the streaming services">⏻ …</button>
     <button class="pill admin-only" id="cfgbtn" onclick="openConfig()" title="Configure hostname and ports">⚙ Config</button>
     <button class="pill admin-only" id="usersbtn" onclick="openUsers()" title="Add, edit, and remove user accounts">👥 Users</button>
-    <button class="pill admin-only" id="browsebtn" onclick="browseAndCopy()" title="Browse this machine and copy a path">📁 Browse</button>
     <button class="pill" id="acctbtn" onclick="openAccount()" title="Your account, password, and keys">👤 <span id="acct-pill">…</span></button>
     <button class="pill" id="themebtn" onclick="toggleTheme()" title="Switch theme">🌗</button>
     <span class="pill" id="verpill">v–</span>
@@ -389,7 +394,7 @@
           <select id="pc-subs" class="am-in" style="padding:3px 6px">
             <option value="">Off</option>
           </select></label>
-        <button id="pc-subadd" class="admin-only" title="Attach a subtitle file from disk">＋ Sub file</button>
+        <button id="pc-subadd" class="edit-only" title="Attach a subtitle file from disk">＋ Sub file</button>
         <label style="color:var(--muted);font-size:12px">Speed
           <select id="pc-speed" class="am-in" style="padding:3px 6px">
             <option value="0.5">0.5×</option><option value="0.75">0.75×</option>
@@ -409,8 +414,8 @@
 
   <div class="card">
     <h2 style="display:flex;align-items:center"><span style="flex:1">RTSP mounts</span>
-      <button onclick="toggleAddMount()" id="am-toggle" class="admin-only">+ Add mount</button></h2>
-    <div id="addmount" class="admin-only" style="display:none;border:1px solid var(--grid);border-radius:10px;padding:12px;margin-bottom:10px">
+      <button onclick="toggleAddMount()" id="am-toggle" class="edit-only">+ Add mount</button></h2>
+    <div id="addmount" class="edit-only" style="display:none;border:1px solid var(--grid);border-radius:10px;padding:12px;margin-bottom:10px">
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <input id="am-path" class="am-in" placeholder="/music" style="width:130px">
         <select id="am-source" class="am-in" onchange="syncAddMount()">
@@ -447,9 +452,9 @@
   <div class="card">
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Media library</span>
       <button id="lib-playall" style="display:none">▶ Play folder</button>
-      <button id="lib-save" class="admin-only" style="display:none">☆ Save playlist</button>
-      <button onclick="pinMediaViaPicker()" class="admin-only">⭐ Pin media</button>
-      <button onclick="addLibraryRoot()" class="admin-only">➕ Add folder</button></h2>
+      <button id="lib-save" class="edit-only" style="display:none">☆ Save playlist</button>
+      <button onclick="pinMediaViaPicker()" class="edit-only">⭐ Pin media</button>
+      <button onclick="addLibraryRoot()" class="edit-only">➕ Add folder</button></h2>
     <div id="favorites" style="margin-bottom:6px"></div>
     <div id="lib-roots" style="margin-bottom:6px"></div>
     <div id="playlists" style="margin-bottom:6px"></div>
@@ -463,8 +468,8 @@
 
   <div class="card">
     <h2 style="display:flex;align-items:center"><span style="flex:1">Live channels</span>
-      <button onclick="toggleAddChannel()" id="ch-toggle" class="admin-only">+ Add channel</button></h2>
-    <div id="addchannel" class="admin-only" style="display:none;border:1px solid var(--grid);border-radius:10px;padding:12px;margin-bottom:10px">
+      <button onclick="toggleAddChannel()" id="ch-toggle" class="edit-only">+ Add channel</button></h2>
+    <div id="addchannel" class="edit-only" style="display:none;border:1px solid var(--grid);border-radius:10px;padding:12px;margin-bottom:10px">
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <input id="ch-name" class="am-in" placeholder="channel name (e.g. NBC 5.1)" style="width:190px">
         <input id="ch-url" class="am-in" placeholder="http://hdhomerun:5004/auto/v5.1 · rtsp://cam/… · IPTV url" style="flex:1;min-width:260px">
@@ -514,8 +519,12 @@
 <div id="users-overlay" class="overlay">
   <div class="dlg wide" role="dialog" aria-modal="true">
     <h3>👥 User accounts</h3>
-    <div class="hint" style="margin-top:0">Administrators can configure the server, start and stop it, and
-      manage accounts. Everyone else can watch what's in the shared library and nothing more.</div>
+    <div class="hint" style="margin-top:0">
+      <b>Admin</b> — full access, including the Config dialog, the power button, and these accounts.<br>
+      <b>Edit</b> — adds and removes library folders, channels, mounts, playlists and streams, but can't
+      reach the Config dialog or accounts.<br>
+      <b>Read</b> — watches what's been shared, and nothing else.
+    </div>
     <div id="users-list" style="margin-top:12px"></div>
 
     <label>Add a user</label>
@@ -523,7 +532,8 @@
       <input id="nu-name" class="am-in" placeholder="username" style="width:150px" autocapitalize="off" spellcheck="false">
       <input id="nu-pass" class="am-in" type="password" placeholder="password (or leave blank for key-only)" style="flex:1;min-width:200px" autocomplete="new-password">
       <select id="nu-role" class="am-in">
-        <option value="user">user</option>
+        <option value="read">read</option>
+        <option value="edit">edit</option>
         <option value="admin">admin</option>
       </select>
       <button class="go" onclick="createUser()">Add</button>
@@ -706,8 +716,9 @@ async function refreshAuth() {
     authState = await (await fetch("/api/auth/state", { headers: headers() })).json();
   } catch { return false; }
   me = authState.user || null;
-  const admin = !!me && me.role === "admin";
-  document.body.classList.toggle("is-admin", admin);
+  const role = (me && me.role) || "";
+  document.body.classList.toggle("is-admin", role === "admin");
+  document.body.classList.toggle("can-edit", role === "admin" || role === "edit");
   $("acct-pill").textContent = me ? (me.username || "local") : "sign in";
   $("acctbtn").style.display = authState.authRequired ? "" : "none";
   if (!authState.authenticated) { showLogin(); return false; }
@@ -802,7 +813,7 @@ async function loadUsers() {
   try { data = await api("/api/users"); }
   catch (e) { $("users-list").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; return; }
   $("users-list").innerHTML = data.users.map(u => {
-    const badges = '<span class="badge' + (u.role === "admin" ? " admin" : "") + '">' + esc(u.role) + "</span>"
+    const badges = '<span class="badge ' + esc(u.role) + '">' + esc(u.role) + "</span>"
       + (u.enabled ? "" : '<span class="badge off">disabled</span>')
       + (u.hasPassword ? "" : '<span class="badge">key only</span>')
       + (u.self ? '<span class="badge">you</span>' : "");
@@ -855,8 +866,9 @@ async function toggleUserEdit(id) {
     + '<input class="am-in" id="ue-name-' + id + '" value="' + esc(u.username) + '" style="width:140px">'
     + '<input class="am-in" id="ue-disp-' + id + '" value="' + esc(u.displayName) + '" placeholder="display name" style="flex:1;min-width:120px">'
     + '<select class="am-in" id="ue-role-' + id + '">'
-    + '<option value="user"' + (u.role === "user" ? " selected" : "") + ">user</option>"
-    + '<option value="admin"' + (u.role === "admin" ? " selected" : "") + ">admin</option></select>"
+    + ["read", "edit", "admin"].map(r =>
+        '<option value="' + r + '"' + (u.role === r ? " selected" : "") + ">" + r + "</option>").join("")
+    + "</select>"
     + '<label class="chk" style="margin:0"><input type="checkbox" id="ue-on-' + id + '"' + (u.enabled ? " checked" : "") + "><span>enabled</span></label>"
     + "</div>"
     + '<div style="display:flex;gap:8px;margin-top:8px">'
@@ -2287,17 +2299,6 @@ async function copyToClipboard(text) {
   return ok;
 }
 
-/* Header Browse button: pick anything, copy the path to the clipboard. */
-async function browseAndCopy() {
-  const p = await pickPath({ title: "Browse — pick a path to copy" });
-  if (!p) return;
-  const btn = $("browsebtn");
-  const ok = await copyToClipboard(p);
-  if (!ok) { window.prompt("Copy the path:", p); return; }
-  const old = btn.textContent;
-  btn.textContent = "✓ copied " + (p.length > 24 ? "…" + p.slice(-22) : p);
-  setTimeout(() => { btn.textContent = old; }, 2200);
-}
 
 async function copyText(btn, text) {
   const ok = await copyToClipboard(text);

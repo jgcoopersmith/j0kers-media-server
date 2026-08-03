@@ -141,7 +141,7 @@ public sealed partial class ControlApi
                 WriteJson(res, 200, new
                 {
                     users = store.All.Select(u => DescribeUser(u, auth)),
-                    roles = new[] { UserStore.RoleAdmin, UserStore.RoleUser },
+                    roles = UserStore.Roles,
                 });
                 return true;
 

@@ -86,8 +86,8 @@ native HLS or hls.js.
 The dashboard also ships a reusable **`pickPath()`** file browser (drives →
 folders → files, backed by `/api/browse`): any dashboard feature can call
 `await pickPath({ mode: "file" | "folder" | "any", title, startPath })` and
-get an absolute path back, or `null` on cancel. The 📁 **Browse** button in
-the header uses it to copy a path to the clipboard.
+get an absolute path back, or `null` on cancel — it backs *Add folder*,
+*Pin media*, the mount file picker, and *＋ Sub file*.
 
 ### Any media, one dashboard
 
@@ -281,7 +281,7 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `GET /api/media/token[?stream=x]` | signed-link token for the media port (all streams, or one) |
 | `POST /api/auth/password` | change your own password |
 | `GET/POST/DELETE /api/auth/keys` | list / mint / revoke your own keys |
-| `GET/POST/PUT/DELETE /api/users` | list / create / edit / remove accounts (admin) |
+| `GET/POST/PUT/DELETE /api/users` | list / create / edit / remove accounts (admin only) |
 | `POST/DELETE /api/users/keys?id=` | mint / revoke a key for another account (admin) |
 
 Every endpoint above is gated — see **Accounts and access** below.
@@ -289,19 +289,32 @@ Every endpoint above is gated — see **Accounts and access** below.
 ## Accounts and access
 
 Accounts live in a `users.json` sidecar next to the rest of the config.
-There are two roles:
+There are three roles:
 
-| | admin | user |
-|---|---|---|
-| watch the shared library, HLS streams, mounts, sessions | ✔ | ✔ |
-| ⚙ Config, ⏻ Start/Stop, 👥 Users, 📁 Browse | ✔ | — |
-| add/remove library folders, channels, mounts, playlists, favorites | ✔ | — |
-| reach files *outside* the shared library | ✔ | — |
+| | admin | edit | read |
+|---|---|---|---|
+| watch the shared library, HLS streams, mounts, sessions | ✔ | ✔ | ✔ |
+| add/remove library folders, channels, mounts, playlists, favorites | ✔ | ✔ | — |
+| delete HLS streams, attach subtitles, browse this machine | ✔ | ✔ | — |
+| reach files *outside* the shared library | ✔ | ✔ | — |
+| ⚙ Config, ⏻ Start/Stop, terminate someone's session | ✔ | — | — |
+| 👥 Users — create, edit, and remove accounts | ✔ | — | — |
 
-A **user** is confined to what has actually been shared: the library
-folders, pinned favorites, and saved playlists. Asking `/api/play`,
+The split is between what the server *runs* and what it *offers*. **Admin**
+owns the former: ports, bind address, the power button, and the accounts
+themselves — only an admin can add a user. **Edit** owns the latter: it
+curates the library but never sees the Config dialog. **Read** watches and
+nothing else.
+
+A **read** account is confined to what has actually been shared: the
+library folders, pinned favorites, and saved playlists. Asking `/api/play`,
 `/api/thumb`, or `/api/image` for anything else is refused, so an account
-handed to a houseguest can't transcode `C:\Users\you\taxes.pdf`.
+handed to a houseguest can't transcode `C:\Users\you\taxes.pdf`. Edit
+accounts aren't confined — they add the library folders in the first
+place, so the restriction would be theatre.
+
+The pre-three-tier role name `user` is still read as **read**, so an
+existing `users.json` keeps working.
 
 Browsing to the dashboard prompts for a username and password first: `GET /`
 serves a sign-in page, and the dashboard itself is never sent to a browser

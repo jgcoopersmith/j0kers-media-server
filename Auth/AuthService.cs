@@ -6,15 +6,17 @@ using J0kersMediaServer.Logging;
 
 namespace J0kersMediaServer.Auth;
 
-/// <summary>How much authority a request carries.</summary>
+/// <summary>How much authority a request carries. Ordered: each tier includes the one below.</summary>
 public enum AccessLevel
 {
     /// <summary>Unauthenticated — the login screen and static assets only.</summary>
     None = 0,
-    /// <summary>A signed-in non-admin: watch and browse the library, nothing else.</summary>
-    User = 1,
-    /// <summary>Full rights: configuration, power, users, the filesystem picker.</summary>
-    Admin = 2,
+    /// <summary>Watch what has been shared. Changes nothing.</summary>
+    Read = 1,
+    /// <summary>Adds and removes library content — folders, channels, mounts, playlists, streams.</summary>
+    Edit = 2,
+    /// <summary>Everything: configuration, the power button, and accounts.</summary>
+    Admin = 3,
 }
 
 /// <summary>
@@ -121,8 +123,7 @@ public sealed class AuthService
         return AuthResult.Anonymous;
     }
 
-    private static AccessLevel LevelOf(UserAccount user) =>
-        user.IsAdmin ? AccessLevel.Admin : AccessLevel.User;
+    private static AccessLevel LevelOf(UserAccount user) => UserStore.LevelOf(user.Role);
 
     /// <summary>
     /// Pulls the credential out of an Authorization header, an

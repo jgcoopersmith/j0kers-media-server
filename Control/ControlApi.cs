@@ -142,46 +142,55 @@ public sealed partial class ControlApi : IDisposable
     }
 
     /// <summary>
-    /// The authorization table. Administration is everything that changes
-    /// how the server runs — configuration, the power button, accounts — plus
-    /// the two endpoints that reach outside the media library (the
-    /// filesystem picker and subtitle attachment). Everything else is
-    /// watching, which any signed-in account may do.
+    /// The authorization table, in three tiers.
+    ///
+    /// Admin is anything that changes how the server *runs* — its
+    /// configuration, its power state, and who may use it. Edit is anything
+    /// that changes what the server *offers*: library folders, channels,
+    /// mounts, playlists, pinned media, and the streams themselves, plus the
+    /// filesystem picker those need to name a path. Read is everything
+    /// left — listing and watching, which any signed-in account may do.
     /// </summary>
     private static AccessLevel RequiredLevel(string method, string path)
     {
+        // accounts are the administrator's alone, including creating them
         if (path.StartsWith("/api/users", StringComparison.Ordinal)) return AccessLevel.Admin;
 
         switch (path)
         {
             case "/api/config":
             case "/api/settings":
-            case "/api/browse":
-            case "/api/codecs":
             case "/api/server/start":
             case "/api/server/stop":
+                return AccessLevel.Admin;
+
+            // picking a path off this machine, and the codec list that the
+            // add-content forms show
+            case "/api/browse":
+            case "/api/codecs":
             case "/api/channels/restart":
             case "/api/subtitles":
-                return AccessLevel.Admin;
+                return AccessLevel.Edit;
         }
 
-        // adding or removing library content is configuration; listing it isn't
+        // adding or removing what the server offers; listing it stays Read
         if (method is "POST" or "PUT" or "DELETE"
             && path is "/api/mounts" or "/api/channels" or "/api/library"
                 or "/api/favorites" or "/api/playlists" or "/api/hls")
-            return AccessLevel.Admin;
+            return AccessLevel.Edit;
 
-        // cutting someone else's stream off is an operator action
+        // cutting off somebody else's stream is an operator action
         if (method == "DELETE" && path.StartsWith("/api/sessions/", StringComparison.Ordinal))
             return AccessLevel.Admin;
 
-        return AccessLevel.User;
+        return AccessLevel.Read;
     }
 
     /// <summary>
-    /// Whether a non-admin may touch this file. Admins browse the whole
-    /// machine; everyone else is confined to what has actually been shared —
-    /// the library folders, the pinned favorites, and the saved playlists.
+    /// Whether a read-only account may touch this file. Edit and above name
+    /// paths for a living — they add the library folders — so the machine is
+    /// open to them; a read account is confined to what has actually been
+    /// shared: the library folders, pinned favorites, and saved playlists.
     /// Without this, /api/play would transcode any file on the disk and
     /// /api/image would serve any picture, for anyone with an account.
     /// </summary>
@@ -201,10 +210,10 @@ public sealed partial class ControlApi : IDisposable
             || _playlists.All.Any(p => Under(p.Folder, target));
     }
 
-    /// <summary>Refuses a non-admin's request for a path outside the shared library.</summary>
+    /// <summary>Refuses a read-only account's request for a path outside the shared library.</summary>
     private bool DenyUnshared(HttpListenerContext ctx, AuthResult auth, string full)
     {
-        if (auth.IsAdmin || IsShared(full)) return false;
+        if (auth.Level >= AccessLevel.Edit || IsShared(full)) return false;
         Log.Warn("control", $"{auth.Name} was refused a path outside the library: {full}");
         WriteJson(ctx.Response, 403, new { error = "that file is not in the shared library" });
         return true;
@@ -304,7 +313,9 @@ public sealed partial class ControlApi : IDisposable
                 {
                     error = auth.Level == AccessLevel.None
                         ? "unauthorized"
-                        : "administrator rights are required for this",
+                        : required == AccessLevel.Admin
+                            ? "administrator rights are required for this"
+                            : "this account is read-only",
                 });
                 return;
             }

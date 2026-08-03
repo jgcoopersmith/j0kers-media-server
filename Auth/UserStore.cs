@@ -30,7 +30,7 @@ public sealed class UserAccount
     [JsonPropertyName("username")] public string Username { get; set; } = "";
     [JsonPropertyName("displayName")] public string DisplayName { get; set; } = "";
     /// <summary>"admin" (full configuration rights) or "user" (watch only).</summary>
-    [JsonPropertyName("role")] public string Role { get; set; } = UserStore.RoleUser;
+    [JsonPropertyName("role")] public string Role { get; set; } = UserStore.RoleRead;
     [JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
     /// <summary>PHC-ish string, or empty for a key-only account.</summary>
     [JsonPropertyName("passwordHash")] public string PasswordHash { get; set; } = "";
@@ -51,8 +51,14 @@ public sealed class UserAccount
 /// </summary>
 public sealed class UserStore
 {
+    /// <summary>Full access: configuration, the power button, and accounts.</summary>
     public const string RoleAdmin = "admin";
-    public const string RoleUser = "user";
+    /// <summary>Adds and removes library content, but can't reach the Config dialog or accounts.</summary>
+    public const string RoleEdit = "edit";
+    /// <summary>Watches what has been shared. Changes nothing.</summary>
+    public const string RoleRead = "read";
+
+    public static readonly string[] Roles = { RoleAdmin, RoleEdit, RoleRead };
 
     private const int Iterations = 210_000;
     private const int SaltBytes = 16;
@@ -241,8 +247,24 @@ public sealed class UserStore
         }
     }
 
-    public static string NormalizeRole(string? role) =>
-        RoleAdmin.Equals(role?.Trim(), StringComparison.OrdinalIgnoreCase) ? RoleAdmin : RoleUser;
+    /// <summary>
+    /// Anything unrecognised becomes read — the least dangerous reading of a
+    /// typo. "user" is the pre-three-tier name for read and is still
+    /// accepted, so an existing users.json keeps working.
+    /// </summary>
+    public static string NormalizeRole(string? role) => (role?.Trim().ToLowerInvariant()) switch
+    {
+        RoleAdmin => RoleAdmin,
+        RoleEdit => RoleEdit,
+        _ => RoleRead,
+    };
+
+    public static AccessLevel LevelOf(string? role) => NormalizeRole(role) switch
+    {
+        RoleAdmin => AccessLevel.Admin,
+        RoleEdit => AccessLevel.Edit,
+        _ => AccessLevel.Read,
+    };
 
     /// <summary>
     /// Applies the supplied fields. Refuses any edit that would leave the
