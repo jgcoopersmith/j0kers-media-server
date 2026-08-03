@@ -518,6 +518,16 @@
     <div id="channels"><div class="empty">No channels. Add an HDHomeRun tuner URL, IPTV stream, or camera to restream it as HLS.</div></div>
   </div>
 
+  <div class="card">
+    <h2 style="display:flex;align-items:center;gap:8px">
+      <span style="flex:1">Free TV</span>
+      <select id="tv-provider" onchange="loadLineup(true)" class="am-in" style="width:auto"></select>
+      <input id="tv-search" class="am-in" placeholder="search channels" style="width:150px" oninput="lineupSearch()">
+      <select id="tv-group" onchange="renderLineup()" class="am-in" style="width:auto"></select>
+    </h2>
+    <div id="tv-lineup"><div class="empty">Loading the lineup…</div></div>
+  </div>
+
 </div>
 
 <div id="lightbox" style="display:none;position:fixed;inset:0;z-index:60;background:rgba(0,0,0,0.85);align-items:center;justify-content:center;cursor:zoom-out" onclick="this.style.display='none'">
@@ -1118,8 +1128,16 @@ async function tick() {
     await refreshLibraryRoots(true);
     if (libraryRoots.length) loadLibrary(libraryRoots[0]);
   }
+
+  // the lineup is a few hundred rows off a remote service — fetch it once,
+  // not on every poll
+  if (!tvBooted) {
+    tvBooted = true;
+    loadProviders();
+  }
 }
 let libraryBooted = false;
+let tvBooted = false;
 
 let activeTranscodes = [];
 
@@ -1545,7 +1563,8 @@ async function playHls(url, startAt) {
   msg.textContent = "";
   if (window._hls) { window._hls.destroy(); window._hls = null; }
 
-  const isChannel = /\/ch-[^/]*\//.test(url);
+  // a restreamed channel, or a provider channel coming through the TV proxy
+  const isChannel = /\/ch-[^/]*\//.test(url) || url.startsWith("/api/tv/");
   // default: recordings from 0, channels from the live edge
   const target = startAt !== undefined ? startAt : (isChannel ? null : 0);
 
@@ -2249,6 +2268,110 @@ async function removeChannel(name) {
   refreshChannels(true);
 }
 
+/* ---- free TV (Pluto TV and playlist providers) ----
+   The lineup is a few hundred channels, so it is fetched once per provider
+   and filtered in the page: typing in the search box shouldn't cost a round
+   trip. Playback goes through the server's proxy on this same origin, which
+   is what keeps the provider's session token fresh — see Media/Providers. */
+let lineup = [];            // the current provider's channels, unfiltered
+let lineupProvider = "";
+let lineupLoading = false;
+
+async function loadProviders() {
+  let data;
+  try { data = await api("/api/tv/providers"); } catch { return; }
+  const sel = $("tv-provider");
+  if (!data.providers.length) {
+    $("tv-lineup").innerHTML = '<div class="empty">No channel providers are configured.</div>';
+    return;
+  }
+  sel.innerHTML = data.providers.map(p =>
+    '<option value="' + esc(p.id) + '">' + esc(p.name) + '</option>').join("");
+  loadLineup(true);
+}
+
+async function loadLineup(force) {
+  const id = $("tv-provider").value || "pluto";
+  if (!force && id === lineupProvider) return;
+  if (lineupLoading) return;
+  lineupLoading = true;
+  $("tv-lineup").innerHTML = '<div class="empty">Loading the lineup…</div>';
+  try {
+    const data = await api("/api/tv/lineup?provider=" + encodeURIComponent(id));
+    lineup = data.channels || [];
+    lineupProvider = id;
+    const groups = data.groups || [];
+    $("tv-group").innerHTML = '<option value="">all groups</option>'
+      + groups.map(g => '<option value="' + esc(g) + '">' + esc(g) + '</option>').join("");
+    renderLineup();
+  } catch (e) {
+    $("tv-lineup").innerHTML = '<div class="empty">Could not load the lineup: ' + esc(e.message) + '</div>';
+  } finally {
+    lineupLoading = false;
+  }
+}
+
+/* Debounced so holding a key down doesn't re-render the list per keystroke. */
+let searchTimer = 0;
+function lineupSearch() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(renderLineup, 120);
+}
+
+function renderLineup() {
+  const q = ($("tv-search").value || "").trim().toLowerCase();
+  const group = $("tv-group").value || "";
+  const shown = lineup.filter(c =>
+    (!group || c.group === group) &&
+    (!q || c.name.toLowerCase().includes(q) || (c.summary || "").toLowerCase().includes(q)));
+
+  if (!shown.length) {
+    $("tv-lineup").innerHTML = '<div class="empty">Nothing matches.</div>';
+    return;
+  }
+
+  /* Capped because the whole lineup is several hundred rows and the browser
+     is noticeably slower to lay them all out than anyone is to narrow the
+     search. The count says what is hidden rather than pretending. */
+  const cap = 60;
+  let h = "";
+  for (const c of shown.slice(0, cap)) {
+    h += '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
+      + (c.logo
+          ? '<img src="' + esc(c.logo) + '" alt="" loading="lazy" style="width:38px;height:22px;object-fit:contain;flex:none">'
+          : '<span style="width:38px;flex:none"></span>')
+      + '<div style="flex:1;min-width:0">'
+      + '<div style="color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(c.name) + '</div>'
+      + '<div class="mono" style="color:var(--muted);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+      + esc(String(c.number)) + (c.group ? " · " + esc(c.group) : "") + '</div></div>'
+      + '<button data-act="tv-play" data-arg="' + esc(c.watch) + '">▶ Watch</button>'
+      + '<button class="edit-only" title="Restream this channel from this server"'
+      + ' data-act="tv-pin" data-arg="' + esc(c.id) + '" data-name="' + esc(c.name) + '">📌</button>'
+      + '</div>';
+  }
+  if (shown.length > cap)
+    h += '<div class="empty">' + (shown.length - cap) + ' more — narrow the search to see them.</div>';
+  // the 📌 button carries .edit-only; CSS hides it for read-only accounts
+  $("tv-lineup").innerHTML = h;
+}
+
+async function pinTvChannel(id, name) {
+  if (!confirm("Restream \"" + name + "\" from this server?\n\nThis starts an ffmpeg job that runs "
+    + "continuously, so the channel gets its own local HLS stream that phones, TVs and VLC can play.")) return;
+  try {
+    const r = await fetch("/api/tv/pin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers() },
+      body: JSON.stringify({ provider: lineupProvider, id, name }),
+    });
+    const data = await r.json();
+    if (!r.ok) { alert(data.error || ("failed: " + r.status)); return; }
+    refreshChannels(true);
+  } catch (e) {
+    alert("request failed: " + e.message);
+  }
+}
+
 /* ---- add-mount flow (uses pickPath for the file source) ---- */
 function toggleAddMount() {
   const f = $("addmount");
@@ -2498,6 +2621,8 @@ document.addEventListener("click", e => {
     case "hls-remove":  removeHlsStream(arg); break;
     case "ch-restart":  restartChannel(arg); break;
     case "ch-remove":   removeChannel(arg); break;
+    case "tv-play":     clearQueueState(); playHls(arg); break;
+    case "tv-pin":      pinTvChannel(arg, el.dataset.name); break;
     case "lib-open":    loadLibrary(arg); break;
     case "lib-img":     viewImage(arg); break;
     case "lib-play":    prepareMedia(arg); break;

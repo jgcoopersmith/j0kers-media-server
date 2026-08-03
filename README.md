@@ -171,6 +171,53 @@ tombstone. HLS stream rows have a ✕ too, which deletes the stream's
 playlist and segment files from disk (live-channel streams are refused —
 remove the channel instead).
 
+### Free TV
+
+The **Free TV** card browses free ad-supported (FAST) lineups and plays
+them here. **Pluto TV** is built in and needs no account or configuration —
+around 400 channels, searchable and grouped by category. ▶ **Watch** plays
+one in the dashboard; 📌 **pin** turns it into a permanent local channel
+(an ffmpeg restream) so phones, TVs and VLC can play it off this server
+like any other stream.
+
+Only the playlists go through the server — a few KB of text every few
+seconds. The video segments are fetched by the player straight from the
+provider's CDN, so browsing a 400-channel lineup costs nothing until you
+pin something. What the proxy is really for is the session token: Pluto's
+expires, and a player refetches its playlist for as long as the channel is
+on, so each fetch is re-authorized on the way through. That is also why a
+pinned channel points at this server's own `/api/tv/watch` URL rather than
+at the provider — the restream survives the token rolling over.
+
+Ads are stitched into these streams by the provider and are passed through
+untouched. The segments carry HLS `AES-128` (RFC 8216 §4.3.2.4) with the
+key served openly next to them — transport encryption that ffmpeg and
+hls.js handle unaided, not DRM, and nothing here circumvents a licence
+server.
+
+**Other services** go in a `providers.json` sidecar next to your config,
+written with a commented template on first run:
+
+```json
+[
+  { "id": "tubi", "name": "Tubi", "url": "https://…/tubi.m3u", "enabled": true }
+]
+```
+
+Anything that is an extended-M3U playlist works — `group-title`, `tvg-logo`
+and `tvg-id` are read, and `tvg-id` is preferred as the channel's identity
+so a pinned channel keeps resolving when the playlist is refetched. This
+is how the services with no usable public API of their own — Tubi, The Roku
+Channel, Samsung TV Plus — are reached: aim at a playlist somebody keeps
+current and the churn stays with whoever maintains it, rather than in this
+codebase. Add `"relaySegments": true` if playback fails with a CORS error
+in the browser console; it routes the video through the server too, at the
+cost of the bandwidth.
+
+**Sling Freestream is not supported.** Its streams are Widevine DRM, so no
+playlist or proxy can make them play here — that would mean breaking the
+DRM, which this server does not do.
+
 Check the control API:
 
 ```bash
@@ -281,6 +328,10 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `GET /api/thumb?path=` | cached JPEG thumbnail for a video or picture (ffmpeg) |
 | `GET/POST/DELETE /api/favorites` | list / pin / unpin quick-button media (persisted to `favorites.json`) |
 | `GET /api/codecs` | active transcode codecs + every encoder in the ffmpeg build |
+| `GET /api/tv/providers` | free-TV providers available (built-in Pluto TV + `providers.json`) |
+| `GET /api/tv/lineup?provider=&q=&group=` | a provider's channels, optionally filtered |
+| `GET /api/tv/watch?provider=&id=&s=` | freshly authorized HLS for one channel (signature or account) |
+| `POST /api/tv/pin` `{provider,id,name}` | restream a provider channel as a permanent local channel |
 | `GET http://<host>:<hlsPort>/watch/<stream>` | universal player page for a stream (works on phones; links the raw m3u8 for VLC) |
 | `GET http://<host>:<hlsPort>/<stream>/subs.json` | subtitle tracks for a stream |
 | `GET http://<host>:<hlsPort>/<stream>/subs/<id>.vtt` | a track as WebVTT (converted and cached on first request) |
@@ -438,7 +489,8 @@ Rtsp/           RTSP parser, server, sessions, SDP
 Rtp/            RTP packetization, RTCP sender reports, port allocator
 Hls/            RFC 8216 playlist generation + segment serving, viewer tracking
 Control/        HTTP/JSON control API
-Media/          G.711 sources (tone generator, file looper)
+Media/          G.711 sources (tone generator, file looper), ffmpeg engine
+Media/Providers/ free-TV lineups (Pluto TV, M3U playlists) + the HLS proxy
 wwwroot/        dashboard single-page app + sign-in page (embedded into the binary)
 config/         sample/default server.json (runtime media/ and clips/ live here too)
 ```

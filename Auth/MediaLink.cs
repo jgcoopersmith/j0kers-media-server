@@ -91,6 +91,32 @@ public sealed class MediaLink
         return Matches(stream, expiry, sig) || Matches(AllStreams, expiry, sig);
     }
 
+    /// <summary>
+    /// Signs something the TV proxy is allowed to act on — an upstream URL it
+    /// may fetch, or a "tv:provider:channel" capability naming one channel.
+    ///
+    /// The proxy takes its target from the query string, which without this
+    /// would make it an open relay: anyone who could reach the control port
+    /// could have the server fetch arbitrary URLs on their behalf, including
+    /// hosts only it can see. A signature means the only targets it accepts
+    /// are ones it generated itself.
+    ///
+    /// These deliberately don't expire. They authorize a public free-TV
+    /// channel and nothing else, and the restreaming ffmpeg process holding
+    /// one has no way to refresh it.
+    /// </summary>
+    public string SignUrl(string target) =>
+        UserStore.Base64Url(HMACSHA256.HashData(_secret, Encoding.UTF8.GetBytes("url\n" + target)));
+
+    /// <summary>True when this target carries a signature this install minted.</summary>
+    public bool VerifyUrl(string target, string? sig)
+    {
+        if (string.IsNullOrEmpty(sig)) return false;
+        var expected = Encoding.ASCII.GetBytes(SignUrl(target));
+        var actual = Encoding.ASCII.GetBytes(sig);
+        return expected.Length == actual.Length && CryptographicOperations.FixedTimeEquals(expected, actual);
+    }
+
     private bool Matches(string scope, long exp, string presented)
     {
         var expected = Encoding.ASCII.GetBytes(Signature(scope, exp));

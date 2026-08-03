@@ -1,0 +1,312 @@
+using System.Net.Http.Json;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using J0kersMediaServer.Logging;
+
+namespace J0kersMediaServer.Media.Providers;
+
+/// <summary>
+/// Pluto TV's free linear lineup (~400 channels, no account).
+///
+/// Three calls, in order:
+///   1. <c>boot.pluto.tv/v4/start</c> — anonymous session. Returns a JWT,
+///      the stitcher host to use, and the query string ("stitcherParams")
+///      that every stream URL has to carry.
+///   2. <c>service-channels…/v2/guide/channels</c> — the lineup, each entry
+///      carrying the stitcher path for its master playlist.
+///   3. the stitcher host + that path + params + jwt — a plain multi-bitrate
+///      HLS master playlist.
+///
+/// The streams are ordinary HLS. Segments carry <c>EXT-X-KEY:METHOD=AES-128</c>
+/// with the key served openly over HTTPS alongside them — that is RFC 8216
+/// transport encryption, which ffmpeg and hls.js decrypt unaided, not DRM.
+/// There is no licence server involved and nothing here circumvents one.
+/// Ads are stitched into the stream by Pluto and are left exactly as sent.
+///
+/// The session expires (boot says how soon in <c>refreshInSec</c>), which is
+/// why <see cref="ResolveAsync"/> re-mints the URL per play rather than
+/// storing one.
+/// </summary>
+public sealed class PlutoTvProvider : IChannelProvider, IDisposable
+{
+    public string Id => "pluto";
+    public string Name => "Pluto TV";
+    public bool Enabled => true;
+
+    private const string BootUrl = "https://boot.pluto.tv/v4/start";
+    private const string UserAgent =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+    private readonly HttpClient _http;
+    private readonly SemaphoreSlim _gate = new(1, 1);
+
+    private sealed record Session(string Token, string StitcherHost, string Params, DateTime ExpiresUtc);
+
+    private Session? _session;
+    private IReadOnlyList<ProviderChannel> _lineup = Array.Empty<ProviderChannel>();
+    private Dictionary<string, string> _paths = new(StringComparer.OrdinalIgnoreCase);
+    private DateTime _lineupFetchedUtc = DateTime.MinValue;
+
+    /// <summary>The lineup changes rarely; the session does not outlive the hour.</summary>
+    private static readonly TimeSpan LineupTtl = TimeSpan.FromHours(6);
+
+    public PlutoTvProvider(HttpClient http)
+    {
+        _http = http;
+    }
+
+    // ---- session ---------------------------------------------------------
+
+    /// <summary>
+    /// A per-install client id. Pluto keys the session to it; reusing one
+    /// value keeps us looking like a single device rather than a new one on
+    /// every request.
+    /// </summary>
+    private readonly string _clientId = Guid.NewGuid().ToString();
+
+    private async Task<Session> SessionAsync(CancellationToken ct)
+    {
+        var current = _session;
+        if (current is not null && DateTime.UtcNow < current.ExpiresUtc) return current;
+
+        await _gate.WaitAsync(ct);
+        try
+        {
+            current = _session;
+            if (current is not null && DateTime.UtcNow < current.ExpiresUtc) return current;
+
+            var q = new Dictionary<string, string>
+            {
+                ["appName"] = "web",
+                ["appVersion"] = "8.0.0",
+                ["deviceVersion"] = "120.0.0",
+                ["deviceModel"] = "web",
+                ["deviceMake"] = "chrome",
+                ["deviceType"] = "web",
+                ["clientID"] = _clientId,
+                ["clientModelNumber"] = "1.0.0",
+                ["serverSideAds"] = "false",
+            };
+            var url = BootUrl + "?" + string.Join("&", q.Select(kv =>
+                $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
+
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
+            using var resp = await _http.SendAsync(req, ct);
+            resp.EnsureSuccessStatusCode();
+
+            var boot = await resp.Content.ReadFromJsonAsync<BootResponse>(cancellationToken: ct)
+                       ?? throw new InvalidOperationException("empty boot response");
+            if (string.IsNullOrWhiteSpace(boot.SessionToken))
+                throw new InvalidOperationException("boot returned no session token");
+
+            var stitcher = boot.Servers?.Stitcher?.TrimEnd('/');
+            if (string.IsNullOrWhiteSpace(stitcher))
+                throw new InvalidOperationException("boot returned no stitcher host");
+
+            // refreshInSec is how long Pluto says the session is good for;
+            // renew early so a resolve never races the expiry.
+            var life = boot.RefreshInSec > 60 ? boot.RefreshInSec : 3600;
+            var session = new Session(boot.SessionToken, stitcher, boot.StitcherParams ?? "",
+                DateTime.UtcNow.AddSeconds(life * 0.8));
+
+            _session = session;
+            Log.Info("pluto", $"session established (valid ~{(int)(life * 0.8 / 60)} min)");
+            return session;
+        }
+        finally { _gate.Release(); }
+    }
+
+    // ---- lineup ----------------------------------------------------------
+
+    public async Task<IReadOnlyList<ProviderChannel>> LineupAsync(CancellationToken ct = default)
+    {
+        if (_lineup.Count > 0 && DateTime.UtcNow - _lineupFetchedUtc < LineupTtl) return _lineup;
+
+        var session = await SessionAsync(ct);
+        var url = "https://service-channels.clusters.pluto.tv/v2/guide/channels" +
+                  "?limit=1000&offset=0&sort=number%3Aasc";
+
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + session.Token);
+        req.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
+        using var resp = await _http.SendAsync(req, ct);
+        resp.EnsureSuccessStatusCode();
+
+        var guide = await resp.Content.ReadFromJsonAsync<GuideResponse>(cancellationToken: ct);
+        var raw = guide?.Data ?? new List<GuideChannel>();
+        var categories = await CategoriesAsync(session, ct);
+
+        var channels = new List<ProviderChannel>(raw.Count);
+        var paths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var c in raw)
+        {
+            if (string.IsNullOrWhiteSpace(c.Id) || string.IsNullOrWhiteSpace(c.Name)) continue;
+            // plutoOfficeOnly entries are internal test loops, not viewable
+            if (c.PlutoOfficeOnly) continue;
+            var path = c.Stitched?.Path;
+            if (string.IsNullOrWhiteSpace(path)) continue;
+
+            // the guide names a channel's category only by id
+            var group = c.Category;
+            if (string.IsNullOrWhiteSpace(group) && c.CategoryIDs is { Count: > 0 })
+                categories.TryGetValue(c.CategoryIDs[0], out group);
+
+            paths[c.Id] = path;
+            channels.Add(new ProviderChannel(
+                Id: c.Id,
+                Name: c.Name,
+                Group: group ?? "",
+                LogoUrl: PickLogo(c.Images),
+                Number: c.Number,
+                Summary: c.Summary));
+        }
+
+        _lineup = channels;
+        _paths = paths;
+        _lineupFetchedUtc = DateTime.UtcNow;
+        Log.Info("pluto", $"lineup: {channels.Count} channels");
+        return _lineup;
+    }
+
+    /// <summary>
+    /// Category id → display name, so the lineup can be grouped. A failure
+    /// here costs the grouping and nothing else, so it is not fatal.
+    /// </summary>
+    private async Task<Dictionary<string, string>> CategoriesAsync(Session session, CancellationToken ct)
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get,
+                "https://service-channels.clusters.pluto.tv/v2/guide/categories");
+            req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + session.Token);
+            req.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
+            using var resp = await _http.SendAsync(req, ct);
+            resp.EnsureSuccessStatusCode();
+
+            var body = await resp.Content.ReadFromJsonAsync<CategoryResponse>(cancellationToken: ct);
+            foreach (var c in body?.Data ?? new List<Category>())
+                if (!string.IsNullOrWhiteSpace(c.Id) && !string.IsNullOrWhiteSpace(c.Name))
+                    map[c.Id] = c.Name;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("pluto", $"could not load categories ({ex.Message}) — channels will be ungrouped");
+        }
+        return map;
+    }
+
+    /// <summary>Prefers a square/tile logo, falling back to whatever is offered.</summary>
+    private static string? PickLogo(List<GuideImage>? images)
+    {
+        if (images is null || images.Count == 0) return null;
+        return images.FirstOrDefault(i => i.Type == "colorLogoPNG")?.Url
+               ?? images.FirstOrDefault(i => i.Type == "solidLogoPNG")?.Url
+               ?? images[0].Url;
+    }
+
+    // ---- resolve ---------------------------------------------------------
+
+    public async Task<string?> ResolveAsync(string channelId, CancellationToken ct = default)
+    {
+        if (_paths.Count == 0) await LineupAsync(ct);
+        if (!_paths.TryGetValue(channelId, out var path)) return null;
+
+        var session = await SessionAsync(ct);
+
+        // the guide gives "/stitch/hls/channel/{id}/master.m3u8" but the v4
+        // stitcher host serves it under /v2
+        var rel = path.StartsWith('/') ? path : "/" + path;
+        if (!rel.StartsWith("/v2/", StringComparison.Ordinal)) rel = "/v2" + rel;
+
+        var parts = new List<string>(2);
+        if (!string.IsNullOrEmpty(session.Params)) parts.Add(session.Params);
+        parts.Add("jwt=" + session.Token);
+
+        var sep = rel.Contains('?') ? '&' : '?';
+        return $"{session.StitcherHost}{rel}{sep}{string.Join("&", parts)}";
+    }
+
+    /// <summary>
+    /// Swaps the <c>jwt</c> in a stitcher URL for the current session's.
+    ///
+    /// Only URLs on the stitcher host carry one; the segments and keys live
+    /// on the CDN and authorize themselves, so they are returned untouched.
+    /// </summary>
+    public async Task<string> RefreshAsync(string url, CancellationToken ct = default)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var u)) return url;
+        if (!u.Query.Contains("jwt=", StringComparison.Ordinal)) return url;
+
+        Session session;
+        try { session = await SessionAsync(ct); }
+        catch (Exception ex)
+        {
+            Log.Warn("pluto", $"could not refresh session: {ex.Message}");
+            return url;
+        }
+
+        var rebuilt = string.Join("&", u.Query.TrimStart('?').Split('&').Select(kv =>
+            kv.StartsWith("jwt=", StringComparison.Ordinal) ? "jwt=" + session.Token : kv));
+        return u.GetLeftPart(UriPartial.Path) + "?" + rebuilt;
+    }
+
+    public void Dispose() => _gate.Dispose();
+
+    // ---- wire types ------------------------------------------------------
+
+    private sealed class BootResponse
+    {
+        [JsonPropertyName("sessionToken")] public string? SessionToken { get; set; }
+        [JsonPropertyName("stitcherParams")] public string? StitcherParams { get; set; }
+        [JsonPropertyName("refreshInSec")] public int RefreshInSec { get; set; }
+        [JsonPropertyName("servers")] public BootServers? Servers { get; set; }
+    }
+
+    private sealed class BootServers
+    {
+        [JsonPropertyName("stitcher")] public string? Stitcher { get; set; }
+    }
+
+    private sealed class GuideResponse
+    {
+        [JsonPropertyName("data")] public List<GuideChannel>? Data { get; set; }
+    }
+
+    private sealed class GuideChannel
+    {
+        [JsonPropertyName("id")] public string? Id { get; set; }
+        [JsonPropertyName("name")] public string? Name { get; set; }
+        [JsonPropertyName("number")] public int Number { get; set; }
+        [JsonPropertyName("summary")] public string? Summary { get; set; }
+        [JsonPropertyName("category")] public string? Category { get; set; }
+        [JsonPropertyName("categoryIDs")] public List<string>? CategoryIDs { get; set; }
+        [JsonPropertyName("plutoOfficeOnly")] public bool PlutoOfficeOnly { get; set; }
+        [JsonPropertyName("stitched")] public GuideStitched? Stitched { get; set; }
+        [JsonPropertyName("images")] public List<GuideImage>? Images { get; set; }
+    }
+
+    private sealed class GuideStitched
+    {
+        [JsonPropertyName("path")] public string? Path { get; set; }
+    }
+
+    private sealed class GuideImage
+    {
+        [JsonPropertyName("type")] public string? Type { get; set; }
+        [JsonPropertyName("url")] public string? Url { get; set; }
+    }
+
+    private sealed class CategoryResponse
+    {
+        [JsonPropertyName("data")] public List<Category>? Data { get; set; }
+    }
+
+    private sealed class Category
+    {
+        [JsonPropertyName("id")] public string? Id { get; set; }
+        [JsonPropertyName("name")] public string? Name { get; set; }
+    }
+}

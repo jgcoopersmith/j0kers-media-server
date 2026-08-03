@@ -46,6 +46,17 @@ public sealed partial class ControlApi : IDisposable
     private readonly Media.LibraryStore _library;
     private readonly Media.FavoritesStore _favorites;
 
+    /// <summary>
+    /// Free ad-supported TV: the provider lineups and the proxy that makes
+    /// their playlists playable from here. One HttpClient for all of it —
+    /// these talk to a handful of hosts continuously, so a per-call client
+    /// would burn sockets for nothing.
+    /// </summary>
+    private readonly HttpClient _providerHttp;
+    private readonly Media.Providers.ProviderRegistry _providers;
+    private readonly Media.Providers.HlsProxy _tvProxy;
+    private readonly HashSet<string> _relayProviders;
+
     public ControlApi(ServerConfig serverConfig, Services.ServiceController services, string baseDirectory,
         Auth.AuthService auth, Auth.MediaLink mediaLinks,
         Media.FfmpegManager? ffmpeg = null, Action? requestShutdown = null)
@@ -62,6 +73,16 @@ public sealed partial class ControlApi : IDisposable
         _playlists = new Media.PlaylistStore(baseDirectory);
         _library = new Media.LibraryStore(baseDirectory);
         _favorites = new Media.FavoritesStore(baseDirectory);
+
+        _providerHttp = new HttpClient(new SocketsHttpHandler
+        {
+            AutomaticDecompression = System.Net.DecompressionMethods.All,
+            PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+        })
+        { Timeout = TimeSpan.FromSeconds(20) };
+        _providers = Media.Providers.ProviderStore.Load(baseDirectory, _providerHttp);
+        _relayProviders = Media.Providers.ProviderStore.RelaySet(baseDirectory);
+        _tvProxy = new Media.Providers.HlsProxy(_providerHttp, mediaLinks);
     }
 
     /// <summary>The host the listener actually bound (may differ from config after the Windows ACL fallback).</summary>
@@ -170,6 +191,9 @@ public sealed partial class ControlApi : IDisposable
             case "/api/codecs":
             case "/api/channels/restart":
             case "/api/subtitles":
+            // pinning a provider channel adds a restreaming job, same as
+            // adding one by hand; browsing and watching a lineup is Read
+            case "/api/tv/pin":
                 return AccessLevel.Edit;
         }
 
@@ -300,6 +324,17 @@ public sealed partial class ControlApi : IDisposable
             {
                 if (HandleAuthRoutes(ctx, auth, method, path)) return;
                 WriteJson(res, 404, new { error = "not found" });
+                return;
+            }
+
+            // The TV proxy authorizes by signature as well as by account: the
+            // ffmpeg process restreaming a pinned channel is not signed in and
+            // cannot be, and neither is a player following a rewritten
+            // playlist. A signature this install minted is proof enough, and
+            // it names exactly one channel or one upstream URL.
+            if (method == "GET" && path is "/api/tv/watch" or "/api/tv/r" && IsSignedTvRequest(ctx, path))
+            {
+                TvProxy(ctx, entry: path == "/api/tv/watch").GetAwaiter().GetResult();
                 return;
             }
 
@@ -608,6 +643,36 @@ public sealed partial class ControlApi : IDisposable
                 var name = ctx.Request.QueryString["name"] ?? "";
                 if (_ffmpeg?.RestartChannel(name) == true) WriteJson(res, 200, new { restarted = name });
                 else WriteJson(res, 404, new { error = "unknown channel" });
+                return;
+            }
+
+            // ---- free ad-supported TV (Pluto TV + playlist providers) ----
+            if (method == "GET" && path == "/api/tv/providers")
+            {
+                WriteJson(res, 200, new
+                {
+                    providers = _providers.All
+                        .Where(p => p.Enabled)
+                        .Select(p => new { id = p.Id, name = p.Name }),
+                });
+                return;
+            }
+
+            if (method == "GET" && path == "/api/tv/lineup")
+            {
+                TvLineup(ctx).GetAwaiter().GetResult();
+                return;
+            }
+
+            if (method == "GET" && (path == "/api/tv/watch" || path == "/api/tv/r"))
+            {
+                TvProxy(ctx, entry: path == "/api/tv/watch").GetAwaiter().GetResult();
+                return;
+            }
+
+            if (method == "POST" && path == "/api/tv/pin")
+            {
+                TvPin(ctx).GetAwaiter().GetResult();
                 return;
             }
 
@@ -1321,6 +1386,224 @@ public sealed partial class ControlApi : IDisposable
         }
     }
 
+    // ---- free ad-supported TV -------------------------------------------
+
+    /// <summary>
+    /// The capability string a /api/tv/watch signature covers. Naming the
+    /// channel rather than the resolved URL is what lets the link outlive the
+    /// provider's session token — the URL is re-resolved on every fetch.
+    /// </summary>
+    private static string TvScope(string provider, string channel) => $"tv:{provider}:{channel}";
+
+    /// <summary>True when a proxy request carries a signature we minted.</summary>
+    private bool IsSignedTvRequest(HttpListenerContext ctx, string path)
+    {
+        var q = ctx.Request.QueryString;
+        var sig = q["s"];
+        if (string.IsNullOrEmpty(sig)) return false;
+
+        return path == "/api/tv/watch"
+            ? _mediaLinks.VerifyUrl(TvScope(q["provider"] ?? "pluto", q["id"] ?? ""), sig)
+            : _mediaLinks.VerifyUrl(q["u"] ?? "", sig);
+    }
+
+    /// <summary>
+    /// GET /api/tv/lineup?provider=&amp;q=&amp;group= — one provider's channels,
+    /// optionally filtered. The lineup is cached by the provider itself, so
+    /// this is cheap to call while someone types in the search box.
+    /// </summary>
+    private async Task TvLineup(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var id = ctx.Request.QueryString["provider"] ?? "pluto";
+        var provider = _providers.Get(id);
+        if (provider is null || !provider.Enabled)
+        {
+            WriteJson(res, 404, new { error = $"unknown provider '{id}'" });
+            return;
+        }
+
+        try
+        {
+            var all = await provider.LineupAsync(_cts.Token);
+
+            var q = (ctx.Request.QueryString["q"] ?? "").Trim();
+            var group = (ctx.Request.QueryString["group"] ?? "").Trim();
+            var matches = all.Where(c =>
+                (q.Length == 0 || c.Name.Contains(q, StringComparison.OrdinalIgnoreCase)
+                               || (c.Summary?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false)) &&
+                (group.Length == 0 || c.Group.Equals(group, StringComparison.OrdinalIgnoreCase)));
+
+            WriteJson(res, 200, new
+            {
+                provider = provider.Id,
+                name = provider.Name,
+                total = all.Count,
+                groups = all.Select(c => c.Group).Where(g => g.Length > 0)
+                            .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(g => g),
+                channels = matches.Select(c => new
+                {
+                    id = c.Id, name = c.Name, group = c.Group,
+                    logo = c.LogoUrl, number = c.Number, summary = c.Summary,
+                    // signed so playback works however the caller signed in —
+                    // a session cookie, a device key, or an external player
+                    // handed the link — without re-authorizing every segment
+                    watch = $"/api/tv/watch?provider={Uri.EscapeDataString(provider.Id)}" +
+                            $"&id={Uri.EscapeDataString(c.Id)}" +
+                            $"&s={Uri.EscapeDataString(_mediaLinks.SignUrl(TvScope(provider.Id, c.Id)))}",
+                }),
+            });
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("tv", $"lineup for {id} failed: {ex.Message}");
+            WriteJson(res, 502, new { error = $"could not reach {provider.Name}: {ex.Message}" });
+        }
+    }
+
+    /// <summary>
+    /// The proxy, in its two forms.
+    ///
+    /// <c>/api/tv/watch?provider=&amp;id=</c> is the entry point: it resolves a
+    /// freshly authorized master playlist for that channel and rewrites it.
+    /// <c>/api/tv/r?u=&amp;s=</c> is every URL that rewriting produced —
+    /// signed, so this cannot be pointed at anything the server did not
+    /// itself hand out.
+    /// </summary>
+    private async Task TvProxy(HttpListenerContext ctx, bool entry)
+    {
+        var res = ctx.Response;
+        string url;
+        bool relay;
+        string providerId;
+
+        if (entry)
+        {
+            var id = ctx.Request.QueryString["provider"] ?? "pluto";
+            var channel = ctx.Request.QueryString["id"] ?? "";
+            var provider = _providers.Get(id);
+            if (provider is null || !provider.Enabled)
+            {
+                WriteJson(res, 404, new { error = $"unknown provider '{id}'" });
+                return;
+            }
+
+            string? resolved;
+            try { resolved = await provider.ResolveAsync(channel, _cts.Token); }
+            catch (Exception ex)
+            {
+                Log.Warn("tv", $"resolve {id}/{channel} failed: {ex.Message}");
+                WriteJson(res, 502, new { error = ex.Message });
+                return;
+            }
+
+            if (resolved is null)
+            {
+                WriteJson(res, 404, new { error = "unknown channel" });
+                return;
+            }
+            url = resolved;
+            providerId = provider.Id;
+            relay = _relayProviders.Contains(provider.Id);
+        }
+        else
+        {
+            url = ctx.Request.QueryString["u"] ?? "";
+            providerId = ctx.Request.QueryString["p"] ?? "";
+            var sig = ctx.Request.QueryString["s"];
+            relay = ctx.Request.QueryString["relay"] == "1";
+            if (!_mediaLinks.VerifyUrl(url, sig))
+            {
+                // an unsigned target is either tampering or a stale link from
+                // before the key was regenerated; neither is worth fetching
+                WriteJson(res, 403, new { error = "bad or missing signature" });
+                return;
+            }
+        }
+
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var target) ||
+            target.Scheme is not ("http" or "https"))
+        {
+            WriteJson(res, 400, new { error = "target must be an http(s) URL" });
+            return;
+        }
+
+        try
+        {
+            // The signature covers the URL as it was minted, so it is checked
+            // above against the original; only then is the stale token in it
+            // swapped for a live one.
+            var owner = _providers.Get(providerId);
+            if (owner is not null) url = await owner.RefreshAsync(url, _cts.Token);
+
+            var result = await _tvProxy.FetchAsync(url, providerId, "/api/tv/r", relay, _cts.Token);
+            res.StatusCode = result.Status;
+            res.ContentType = result.ContentType;
+            // live playlists change every few seconds; nothing here may be held
+            res.Headers["Cache-Control"] = "no-store";
+            res.ContentLength64 = result.Body.Length;
+            await res.OutputStream.WriteAsync(result.Body, _cts.Token);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("tv", $"proxy failed: {ex.Message}");
+            try { WriteJson(res, 502, new { error = ex.Message }); } catch { }
+        }
+    }
+
+    private sealed record TvPinRequest(string? provider, string? id, string? name);
+
+    /// <summary>
+    /// POST /api/tv/pin {provider,id,name} — turn a provider channel into a
+    /// permanent local channel.
+    ///
+    /// The channel is pointed at this server's own proxy URL rather than at
+    /// the provider, so the restream keeps working after the provider's
+    /// session token has rolled over.
+    /// </summary>
+    private async Task TvPin(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        if (_ffmpeg is null || !_ffmpeg.Available)
+        {
+            WriteJson(res, 503, new { error = "ffmpeg is not available — install it (winget install Gyan.FFmpeg) and restart" });
+            return;
+        }
+
+        try
+        {
+            var req = JsonSerializer.Deserialize<TvPinRequest>(ReadBody(ctx), BodyJson);
+            var providerId = req?.provider ?? "pluto";
+            var channelId = req?.id ?? "";
+            var provider = _providers.Get(providerId);
+            if (provider is null || !provider.Enabled || string.IsNullOrWhiteSpace(channelId))
+            {
+                WriteJson(res, 400, new { error = "body must be { \"provider\": \"…\", \"id\": \"…\" }" });
+                return;
+            }
+
+            var lineup = await provider.LineupAsync(_cts.Token);
+            var channel = lineup.FirstOrDefault(c => c.Id == channelId);
+            if (channel is null)
+            {
+                WriteJson(res, 404, new { error = "unknown channel" });
+                return;
+            }
+
+            var name = string.IsNullOrWhiteSpace(req?.name) ? channel.Name : req!.name!.Trim();
+            var sig = _mediaLinks.SignUrl(TvScope(provider.Id, channel.Id));
+            var url = $"http://127.0.0.1:{_config.Port}/api/tv/watch" +
+                      $"?provider={Uri.EscapeDataString(provider.Id)}&id={Uri.EscapeDataString(channel.Id)}" +
+                      $"&s={Uri.EscapeDataString(sig)}";
+
+            var stream = _ffmpeg.AddChannel(name, url);
+            Log.Info("control", $"pinned {provider.Name} channel: {name}");
+            WriteJson(res, 200, new { stream, playlist = $"/{stream}/index.m3u8", name });
+        }
+        catch (InvalidOperationException ex) { WriteJson(res, 409, new { error = ex.Message }); }
+        catch (Exception ex) { WriteJson(res, 400, new { error = ex.Message }); }
+    }
+
     /// <summary>POST /api/channels {name,url} — add and start a live channel.</summary>
     private void AddChannel(HttpListenerContext ctx)
     {
@@ -1655,6 +1938,8 @@ public sealed partial class ControlApi : IDisposable
     {
         _cts.Cancel();
         try { _listener?.Stop(); } catch { }
+        try { _providers.Dispose(); } catch { }
+        try { _providerHttp.Dispose(); } catch { }
     }
 }
 
