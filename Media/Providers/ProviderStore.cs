@@ -97,17 +97,28 @@ public static class ProviderStore
     // reached: point at a playlist that someone keeps current, and the churn
     // stays with whoever maintains it.
     //
-    // Nothing is enabled by default: pick a playlist you trust and set
-    // "enabled": true. "relaySegments" is only needed if playback fails with a
-    // CORS error in the browser console — it routes the video through this
-    // server instead of straight from the source.
+    // Nothing is enabled by default: uncomment a line and set "enabled": true.
+    // "relaySegments" is only needed if playback fails with a CORS error in the
+    // browser console — it routes the video through this server instead of
+    // straight from the source. None of the three below need it.
+    //
+    // These point at iptv-org, which is community-maintained and refreshed
+    // continuously; the URLs are stable but what is behind them is not this
+    // project's to promise. Individual channels come and go, so an occasional
+    // dead one is normal rather than a fault here.
     //
     // Note: Sling Freestream is deliberately absent. Its streams are DRM
     // (Widevine), so no playlist can make them play here.
     [
-      // { "id": "tubi",    "name": "Tubi",             "url": "https://example/tubi.m3u",    "enabled": false },
-      // { "id": "roku",    "name": "The Roku Channel", "url": "https://example/roku.m3u",    "enabled": false },
-      // { "id": "samsung", "name": "Samsung TV Plus",  "url": "https://example/samsung.m3u", "enabled": false }
+      // { "id": "tubi",    "name": "Tubi",
+      //   "url": "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/us_tubi.m3u",
+      //   "enabled": true },
+      // { "id": "roku",    "name": "The Roku Channel",
+      //   "url": "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/us_roku.m3u",
+      //   "enabled": true },
+      // { "id": "samsung", "name": "Samsung TV Plus",
+      //   "url": "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/us_samsung.m3u",
+      //   "enabled": true }
     ]
     """;
 

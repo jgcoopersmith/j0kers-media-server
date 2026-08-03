@@ -216,13 +216,27 @@ hls.js handle unaided, not DRM, and nothing here circumvents a licence
 server.
 
 **Other services** go in a `providers.json` sidecar next to your config,
-written with a commented template on first run:
+written with a commented template on first run. Uncomment what you want:
 
 ```json
 [
-  { "id": "tubi", "name": "Tubi", "url": "https://…/tubi.m3u", "enabled": true }
+  { "id": "tubi", "name": "Tubi",
+    "url": "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/us_tubi.m3u",
+    "enabled": true },
+  { "id": "roku", "name": "The Roku Channel",
+    "url": "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/us_roku.m3u",
+    "enabled": true },
+  { "id": "samsung", "name": "Samsung TV Plus",
+    "url": "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/us_samsung.m3u",
+    "enabled": true }
 ]
 ```
+
+Restart to pick up changes — the file is read at startup. That gives Tubi
+(~176), The Roku Channel (~32) and Samsung TV Plus (~410) alongside Pluto,
+all clear HLS with no DRM and none needing `relaySegments`. Individual
+channels come and go in a community playlist, so an occasional dead one is
+normal rather than a fault here — the lineup loads, that channel 404s.
 
 Anything that is an extended-M3U playlist works — `group-title`, `tvg-logo`
 and `tvg-id` are read, and `tvg-id` is preferred as the channel's identity
