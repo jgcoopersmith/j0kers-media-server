@@ -307,7 +307,7 @@ catch (Exception ex)
 }
 
 /// <summary>
-/// URLs the dashboard is reachable on � see Services/NetworkInfo for the
+/// URLs the dashboard is reachable on — see Services/NetworkInfo for the
 /// interface selection rules (connected physical networks only).
 /// </summary>
 static string[] DashboardUrls(string bindAddress, int port) =>

@@ -876,7 +876,7 @@ public sealed partial class ControlApi : IDisposable
     }
 
     /// <summary>
-    /// POST /api/settings � save hostname/port settings to the settings.json
+    /// POST /api/settings — save hostname/port settings to the settings.json
     /// sidecar and apply them by restarting the streaming services. A control
     /// port change is saved but only takes effect on the next full restart
     /// (this API is serving the current request on the old port).
@@ -900,7 +900,7 @@ public sealed partial class ControlApi : IDisposable
         {
             if (port is int p and (< 1 or > 65535))
             {
-                WriteJson(res, 400, new { error = $"{name} must be 1�65535" });
+                WriteJson(res, 400, new { error = $"{name} must be 1–65535" });
                 return;
             }
         }
