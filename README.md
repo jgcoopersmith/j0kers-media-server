@@ -63,6 +63,13 @@ already browsing on. A link built from whichever address you happen to have
 the dashboard open on is the wrong one to hand to a phone on a different
 subnet. With a single address nothing extra is drawn.
 
+The **Transcodes** tile counts the conversions running and how far each has
+got, read from ffmpeg's own `-progress` stream against the source duration.
+The bar tracks the least-advanced job, since that's the one that decides
+when everything is done; hover for a per-job breakdown. A source whose
+length can't be probed shows elapsed output time and a dimmed bar rather
+than a misleading percentage.
+
 The **Sessions** card lists everyone watching, both kinds at once. RTSP has
 real sessions, so those can be terminated. HLS has none — a viewer is a
 series of unrelated file requests — so one is inferred instead: requests
@@ -257,7 +264,7 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | Endpoint | Purpose |
 |---|---|
 | `GET /` | web dashboard when signed in, sign-in page when not (both embedded) |
-| `GET /api/status` | identity, uptime, session counts |
+| `GET /api/status` | identity, uptime, session counts, transcode progress |
 | `GET /api/config` | effective config (token redacted) |
 | `GET /api/mounts` | configured mounts + announcement URI |
 | `GET /api/sessions` | who is watching: RTSP sessions and HLS viewers |

@@ -27,6 +27,21 @@ public sealed class FfmpegManager : IDisposable
     private readonly string _channelsFile;
     private readonly object _lock = new();
     private readonly Dictionary<string, Process> _vodJobs = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// How far each running conversion has got, from ffmpeg's own -progress
+    /// stream. DurationSeconds is 0 when the source length couldn't be
+    /// probed — a live or malformed input — in which case only the elapsed
+    /// position is meaningful and Percent stays null.
+    /// </summary>
+    public sealed record VodProgress(string Stream, string Title, double DoneSeconds, double DurationSeconds)
+    {
+        public int? Percent => DurationSeconds > 0
+            ? Math.Clamp((int)Math.Round(DoneSeconds / DurationSeconds * 100), 0, 100)
+            : null;
+    }
+
+    private readonly Dictionary<string, VodProgress> _vodProgress = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Process> _liveJobs = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<ChannelDef> _channels = new();
     private bool _disposed;
@@ -227,6 +242,35 @@ public sealed class FfmpegManager : IDisposable
         }
     }
 
+    /// <summary>Length of a media file in seconds, or 0 when it can't be determined.</summary>
+    private double ProbeDurationSeconds(string file)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo(FfprobePath)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            foreach (var a in new[] { "-v", "error", "-show_entries", "format=duration",
+                                      "-of", "default=noprint_wrappers=1:nokey=1", file })
+                psi.ArgumentList.Add(a);
+            using var p = Process.Start(psi);
+            if (p is null) return 0;
+            var output = p.StandardOutput.ReadToEnd().Trim();
+            p.WaitForExit(15_000);
+            return double.TryParse(output, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var seconds) && seconds > 0
+                ? seconds : 0;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
     /// <summary>ffprobe lives beside ffmpeg; falls back to PATH.</summary>
     public string FfprobePath
     {
@@ -340,7 +384,11 @@ public sealed class FfmpegManager : IDisposable
             try { File.WriteAllText(Path.Combine(dir, "source.txt"), info.FullName); } catch { }
             // built as a list: a file name containing a quote must never be
             // able to become extra ffmpeg arguments
-            var args = new List<string> { "-hide_banner", "-loglevel", "error", "-y", "-i", info.FullName };
+            // -progress writes machine-readable key=value lines to stdout;
+            // -nostats drops the human progress bar that would otherwise
+            // repeat the same information over stderr
+            var args = new List<string> { "-hide_banner", "-loglevel", "error", "-nostats",
+                                          "-progress", "pipe:1", "-y", "-i", info.FullName };
             if (VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase))
             {
                 args.AddRange(new[] { "-c:v", "copy" });
@@ -364,7 +412,12 @@ public sealed class FfmpegManager : IDisposable
             if (fmp4) args.AddRange(new[] { "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4" });
             args.AddRange(new[] { "-hls_segment_filename", Path.Combine(dir, $"seg_%05d.{segExt}"), playlist });
 
-            var job = Spawn(args, $"vod {info.Name}", dir);
+            var title = Media.StreamTitle.Prettify(stream);
+            var duration = ProbeDurationSeconds(info.FullName);
+            lock (_progressLock) _vodProgress[stream] = new VodProgress(stream, title, 0, duration);
+
+            var job = Spawn(args, $"vod {info.Name}", dir,
+                onProgressLine: line => NoteVodProgress(stream, title, duration, line));
             _vodJobs[stream] = job;
             job.Exited += (_, _) =>
             {
@@ -374,6 +427,7 @@ public sealed class FfmpegManager : IDisposable
                     if (_vodJobs.TryGetValue(stream, out var q) && ReferenceEquals(q, job))
                         _vodJobs.Remove(stream);
                 }
+                lock (_progressLock) _vodProgress.Remove(stream);
             };
             return (stream, false);
         }
@@ -419,6 +473,43 @@ public sealed class FfmpegManager : IDisposable
         File.Exists(Path.Combine(_mediaRoot, stream, "index.m3u8"));
 
     /// <summary>Streams whose conversion is currently running.</summary>
+    private readonly object _progressLock = new();
+
+    /// <summary>
+    /// Parses one line of ffmpeg's -progress output. The useful key is
+    /// out_time, which is an unambiguous HH:MM:SS.ffffff — out_time_ms is a
+    /// long-standing misnomer that actually carries microseconds, so it is
+    /// left alone.
+    /// </summary>
+    private void NoteVodProgress(string stream, string title, double duration, string line)
+    {
+        const string key = "out_time=";
+        if (!line.StartsWith(key, StringComparison.Ordinal)) return;
+        var value = line[key.Length..].Trim();
+        if (!TimeSpan.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, out var at)) return;
+        if (at < TimeSpan.Zero) return;   // ffmpeg emits N/A as a negative before the first frame
+
+        lock (_progressLock)
+        {
+            // only present while the job is live; Exited removes it
+            if (_vodProgress.ContainsKey(stream))
+                _vodProgress[stream] = new VodProgress(stream, title, at.TotalSeconds, duration);
+        }
+    }
+
+    /// <summary>Progress of every conversion running right now.</summary>
+    public IReadOnlyList<VodProgress> VodProgressSnapshot
+    {
+        get
+        {
+            var running = ActiveVodStreams;
+            lock (_progressLock)
+                return running
+                    .Select(s => _vodProgress.TryGetValue(s, out var p) ? p : new VodProgress(s, s, 0, 0))
+                    .ToArray();
+        }
+    }
+
     public IReadOnlyList<string> ActiveVodStreams
     {
         get
@@ -720,17 +811,23 @@ public sealed class FfmpegManager : IDisposable
 
     // ---- plumbing -------------------------------------------------------
 
-    private Process Spawn(IEnumerable<string> args, string label, string? workingDir = null)
+    private Process Spawn(IEnumerable<string> args, string label, string? workingDir = null,
+        Action<string>? onProgressLine = null)
     {
         var psi = new ProcessStartInfo(FfmpegPath)
         {
             RedirectStandardError = true,
+            // only opened when someone is listening: ffmpeg blocks once an
+            // unread pipe fills, which would stall the transcode
+            RedirectStandardOutput = onProgressLine is not null,
             UseShellExecute = false,
             CreateNoWindow = true,
             WorkingDirectory = workingDir ?? "",
         };
         foreach (var a in args) psi.ArgumentList.Add(a);
         var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
+        if (onProgressLine is not null)
+            p.OutputDataReceived += (_, e) => { if (e.Data is not null) onProgressLine(e.Data); };
         var errTail = new Queue<string>(8);
         p.ErrorDataReceived += (_, e) =>
         {
@@ -761,6 +858,7 @@ public sealed class FfmpegManager : IDisposable
         };
         p.Start();
         p.BeginErrorReadLine();
+        if (onProgressLine is not null) p.BeginOutputReadLine();
         Log.Info("ffmpeg", $"started: {label}");
         return p;
     }

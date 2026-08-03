@@ -389,6 +389,17 @@ public sealed partial class ControlApi : IDisposable
                         // readings into a live rate
                         bytesServed = _services.Served.TotalBytes,
                         transcodes = _ffmpeg?.ActiveVodStreams ?? (IReadOnlyList<string>)Array.Empty<string>(),
+                        // the same conversions with how far each has got
+                        transcoding = (_ffmpeg?.VodProgressSnapshot
+                                       ?? Array.Empty<Media.FfmpegManager.VodProgress>())
+                            .Select(v => new
+                            {
+                                stream = v.Stream,
+                                title = v.Title,
+                                percent = v.Percent,
+                                doneSeconds = (int)v.DoneSeconds,
+                                durationSeconds = (int)v.DurationSeconds,
+                            }),
                     });
                     return;
 
