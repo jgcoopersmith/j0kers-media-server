@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vlctest — j0kers</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🃏</text></svg>">
+<style>
+  body { margin: 0; background: #0d0d0d; color: #c3c2b7; font-family: system-ui, sans-serif; }
+  video { display: block; width: 100vw; max-height: 88vh; background: #000; }
+  .bar { padding: 10px 14px; font-size: 13px; }
+  a { color: #3987e5; }
+</style>
+<script src="/hls.min.js"></script>
+</head>
+<body>
+<video id="v" controls playsinline></video>
+<div class="bar">🃏 Vlctest · <a href="/ch-vlctest/index.m3u8?exp=1786412075&sig=M4W-FoPS9OeTNQHna9gsXm7dmImBj363D6WJvA5gcbk">raw playlist</a> (for VLC etc.)
+  <div style="color:#6f6e69;font-size:11px;margin-top:2px">ch-vlctest</div></div>
+<script>
+  const v = document.getElementById("v");
+  const src = "/ch-vlctest/index.m3u8?exp=1786412075&sig=M4W-FoPS9OeTNQHna9gsXm7dmImBj363D6WJvA5gcbk";
+  const stream = "ch-vlctest";
+  // recordings start at the beginning; live channels join the edge
+  const live = /^ch-/i.test(stream);
+  if (!live) {
+    v.addEventListener("playing", function once() {
+      v.removeEventListener("playing", once);
+      if (v.currentTime > 2) { try { v.currentTime = 0; } catch (e) {} }
+    });
+  }
+  if (window.Hls && Hls.isSupported()) {
+    // startPosition is what actually pins the initial seek;
+    // startLoad(0) alone still lets hls.js pick its own spot
+    const h = new Hls(live ? {} : { startPosition: 0 });
+    h.loadSource(src);
+    h.attachMedia(v);
+  } else if (v.canPlayType("application/vnd.apple.mpegurl")) {
+    v.src = src;
+  } else {
+    document.querySelector(".bar").textContent = "This browser cannot play HLS — open the raw playlist in VLC.";
+  }
+  // subtitles: same-origin tracks, exposed through the native CC menu
+  fetch("/" + encodeURIComponent(stream) + "/subs.json" + "?exp=1786412075\u0026sig=M4W-FoPS9OeTNQHna9gsXm7dmImBj363D6WJvA5gcbk")
+    .then(r => r.ok ? r.json() : null)
+    .then(d => {
+      for (const t of (d && d.tracks) || []) {
+        if (!t.supported) continue;
+        const tr = document.createElement("track");
+        tr.kind = "subtitles";
+        tr.label = t.label;
+        if (t.language) tr.srclang = t.language;
+        tr.src = t.url;
+        v.appendChild(tr);
+      }
+    })
+    .catch(() => {});
+  v.play().catch(() => {}); // autoplay may need a tap; controls are visible
+</script>
+</body>
+</html>

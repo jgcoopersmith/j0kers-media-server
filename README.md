@@ -58,10 +58,22 @@ macOS/Linux use your init system (systemd/launchd) or `nohup` instead.
 
 When the server is bound to `0.0.0.0` and more than one network is
 connected, each stream in the **HLS streams** card carries a watch link per
-network (📶 Wi-Fi, 🔌 Ethernet) with a copy button, and marks the one you're
-already browsing on. A link built from whichever address you happen to have
-the dashboard open on is the wrong one to hand to a phone on a different
-subnet. With a single address nothing extra is drawn.
+network (📶 Wi-Fi, 🔌 Ethernet), and marks the one you're already browsing
+on. A link built from whichever address you happen to have the dashboard
+open on is the wrong one to hand to a phone on a different subnet. With a
+single address nothing extra is drawn.
+
+**Two kinds of link, and they are not interchangeable.** *Copy* (⧉ per
+network) gives the `/watch/` page: HTML, with a player in it, for opening in
+a browser. *Copy for VLC* (🎬 per network) gives the `.m3u8` playlist
+itself, which is what VLC, Kodi and anything else that plays a URL actually
+want — hand one of those the watch page and it has a web page and nothing to
+play. Both carry the signed token, and the playlist's segments carry it too,
+so a player follows them without needing an account.
+
+Copied links also avoid `localhost`: browsing the dashboard on the machine
+itself would otherwise put `localhost` in every link, which on a phone means
+the phone. A copied link falls back to the server's default-route address.
 
 The **Transcodes** tile counts the conversions running and how far each has
 got, read from ffmpeg's own `-progress` stream against the source duration.
