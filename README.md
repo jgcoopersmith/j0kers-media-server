@@ -211,20 +211,12 @@ list unwieldy is its height rather than its length, and laying out several
 hundred is slower than narrowing the search. Whatever is over the cap is
 counted at the bottom rather than silently dropped.
 
-The **HLS streams**, **RTSP mounts** and **Media library** cards carry the
-same three modes, each remembered separately. Switching view re-renders
-from what was already fetched rather than re-hitting the API.
-
-For streams and mounts, condensed is a grid — poster and title for a
+The **HLS streams** and **RTSP mounts** cards carry the same three modes,
+each remembered separately. Condensed is a grid — poster and title for a
 stream, the mount path for a mount; info adds the playlist URL and source
-for a stream, and the source, description and origin for a mount.
-
-The library follows the familiar list / icons / details split: **condensed**
-drops the posters and lists everything as names, which is the quickest way
-through a folder of two hundred films and asks the server for no thumbnails
-at all; **default** keeps folders and music as rows with videos and pictures
-as tiles; **info** widens the tiles (5 across rather than 8) and puts the
-size and duration under every one.
+for a stream, and the source, description and origin for a mount. Switching
+view re-renders from what was already fetched rather than re-hitting the
+API.
 
 Only the playlists go through the server — a few KB of text every few
 seconds. The video segments are fetched by the player straight from the
