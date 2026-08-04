@@ -177,27 +177,15 @@
   #hlsvideo { width: 100%; border-radius: 10px; background: #000; max-height: 320px; display: block; }
   #hlsmsg { color: var(--muted); font-size: 12px; margin-top: 6px; }
 
-  /* The title, over the picture. Wrapper is only here to position it —
-     the video keeps its own sizing. */
-  #videowrap { position: relative; }
+  /* What is playing, on its own line above the picture — off the video, so
+     it never covers a frame and never has to get out of the way. Stays put
+     for as long as something is playing. */
   #vtitle {
-    position: absolute; top: 0; left: 0; right: 0;
-    padding: 8px 12px 20px;
-    border-radius: 10px 10px 0 0;
-    /* a scrim rather than a solid bar: readable over a bright frame without
-       boxing off the top of the picture */
-    background: linear-gradient(to bottom, rgba(0,0,0,.72), rgba(0,0,0,0));
-    color: #fff; font-size: 13px; font-weight: 500;
-    text-shadow: 0 1px 3px rgba(0,0,0,.9);
+    color: var(--ink); font-size: 13px; font-weight: 500;
+    margin-bottom: 6px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    pointer-events: none;             /* never eats a click meant for the video */
-    opacity: 1; transition: opacity .35s ease;
   }
-  /* Fades out of the way once you have read it, and comes back whenever the
-     pointer is over the player — the same manners as the control bar. */
-  #vtitle.faded { opacity: 0; }
-  #videowrap:hover #vtitle { opacity: 1; }
-  #vtitle:empty, #vtitle.hidden { display: none; }
+  #vtitle.hidden { display: none; }
 
 
   details summary { cursor: pointer; color: var(--ink-2); font-size: 13px; user-select: none; }
@@ -480,10 +468,8 @@
         <button id="np-next" title="Next">⏭</button>
         <button id="np-stop" class="danger" title="Stop playlist">✕</button>
       </div>
-      <div id="videowrap">
-        <video id="hlsvideo" controls playsinline crossorigin="anonymous"></video>
-        <div id="vtitle"><span id="vtitle-text"></span></div>
-      </div>
+      <div id="vtitle"><span id="vtitle-text"></span></div>
+      <video id="hlsvideo" controls playsinline crossorigin="anonymous"></video>
       <div id="pctl" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px">
         <button id="pc-back" title="Back 10 seconds">⏪ 10s</button>
         <button id="pc-fwd" title="Forward 10 seconds">10s ⏩</button>
@@ -1723,17 +1709,12 @@ function playerTitleFor(url) {
   return (known && known.title) || name;
 }
 
-/* Shows it, then lets it fade so it isn't sitting on the picture all film.
-   Hovering the player brings it back — that part is CSS. */
-let vtitleTimer = 0;
+/* Names what is playing, and leaves it named. It sits above the picture
+   rather than on it, so there is nothing to fade out of the way — it stays
+   until playback stops. */
 function setPlayerTitle(text) {
-  const box = $("vtitle"), span = $("vtitle-text");
-  span.textContent = text || "";
-  box.classList.toggle("hidden", !text);
-  if (!text) return;
-  box.classList.remove("faded");
-  clearTimeout(vtitleTimer);
-  vtitleTimer = setTimeout(() => box.classList.add("faded"), 3500);
+  $("vtitle-text").textContent = text || "";
+  $("vtitle").classList.toggle("hidden", !text);
 }
 
 async function loadSubtitles(url) {
