@@ -190,6 +190,8 @@ public sealed partial class ControlApi : IDisposable
             case "/api/browse":
             case "/api/codecs":
             case "/api/channels/restart":
+            case "/api/channels/start":
+            case "/api/channels/stop":
             case "/api/subtitles":
             // pinning a provider channel adds a restreaming job, same as
             // adding one by hand; browsing and watching a lineup is Read
@@ -615,7 +617,8 @@ public sealed partial class ControlApi : IDisposable
                 {
                     ffmpegAvailable = _ffmpeg?.Available ?? false,
                     channels = (_ffmpeg?.Channels ?? new List<(Media.FfmpegManager.ChannelDef, string, string)>())
-                        .Select(c => new { name = c.Item1.Name, url = c.Item1.Url, stream = c.Item2, status = c.Item3 }),
+                        .Select(c => new { name = c.Item1.Name, url = c.Item1.Url, stream = c.Item2,
+                                           status = c.Item3, started = c.Item1.Started }),
                 });
                 return;
             }
@@ -642,6 +645,30 @@ public sealed partial class ControlApi : IDisposable
             {
                 var name = ctx.Request.QueryString["name"] ?? "";
                 if (_ffmpeg?.RestartChannel(name) == true) WriteJson(res, 200, new { restarted = name });
+                else WriteJson(res, 404, new { error = "unknown channel" });
+                return;
+            }
+
+            if (method == "POST" && path == "/api/channels/start")
+            {
+                var name = ctx.Request.QueryString["name"] ?? "";
+                if (_ffmpeg?.StartChannel(name) == true)
+                {
+                    Log.Info("control", $"channel started: {name}");
+                    WriteJson(res, 200, new { started = name });
+                }
+                else WriteJson(res, 404, new { error = "unknown channel" });
+                return;
+            }
+
+            if (method == "POST" && path == "/api/channels/stop")
+            {
+                var name = ctx.Request.QueryString["name"] ?? "";
+                if (_ffmpeg?.StopChannel(name) == true)
+                {
+                    Log.Info("control", $"channel stopped: {name}");
+                    WriteJson(res, 200, new { stopped = name });
+                }
                 else WriteJson(res, 404, new { error = "unknown channel" });
                 return;
             }
@@ -1596,9 +1623,12 @@ public sealed partial class ControlApi : IDisposable
                       $"?provider={Uri.EscapeDataString(provider.Id)}&id={Uri.EscapeDataString(channel.Id)}" +
                       $"&s={Uri.EscapeDataString(sig)}";
 
-            var stream = _ffmpeg.AddChannel(name, url);
-            Log.Info("control", $"pinned {provider.Name} channel: {name}");
-            WriteJson(res, 200, new { stream, playlist = $"/{stream}/index.m3u8", name });
+            // saved idle: pinning is bookmarking, and a restream is a
+            // transcode that runs until it's stopped — starting one is the
+            // user's call, from the Live channels card
+            var stream = _ffmpeg.AddChannel(name, url, start: false);
+            Log.Info("control", $"pinned {provider.Name} channel: {name} (idle)");
+            WriteJson(res, 200, new { stream, playlist = $"/{stream}/index.m3u8", name, started = false });
         }
         catch (InvalidOperationException ex) { WriteJson(res, 409, new { error = ex.Message }); }
         catch (Exception ex) { WriteJson(res, 400, new { error = ex.Message }); }

@@ -352,6 +352,11 @@
     cursor: pointer; display: block;
   }
   .hls-thumb:hover { border-color: var(--series-1); }
+  /* poster for a condensed tile — the tile is the click target, not the image */
+  .hls-thumb-sm {
+    width: 34px; height: 20px; flex: none; border-radius: 4px;
+    object-fit: cover; background: #000; border: 1px solid var(--border); display: block;
+  }
   .hls-thumb-fallback {
     display: flex; align-items: center; justify-content: center;
     font-size: 16px; background: var(--surface-2); cursor: default;
@@ -424,7 +429,13 @@
   </div>
 
   <div class="card">
-    <h2>HLS streams</h2>
+    <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">HLS streams</span>
+      <select id="hls-view" onchange="setCardView('hls', this.value, renderHls)" class="am-in" style="width:auto"
+              title="How much to show for each stream">
+        <option value="condensed">Condensed</option>
+        <option value="default">Default</option>
+        <option value="info">Info</option>
+      </select></h2>
     <div id="hls"></div>
     <div id="hlsplayer">
       <div id="np" style="display:none;align-items:center;gap:8px;margin-bottom:6px">
@@ -464,7 +475,13 @@
   </div>
 
   <div class="card">
-    <h2 style="display:flex;align-items:center"><span style="flex:1">RTSP mounts</span>
+    <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">RTSP mounts</span>
+      <select id="mounts-view" onchange="setCardView('mounts', this.value, renderMounts)" class="am-in" style="width:auto"
+              title="How much to show for each mount">
+        <option value="condensed">Condensed</option>
+        <option value="default">Default</option>
+        <option value="info">Info</option>
+      </select>
       <button onclick="toggleAddMount()" id="am-toggle" class="edit-only">+ Add mount</button></h2>
     <div id="addmount" class="edit-only" style="display:none;border:1px solid var(--grid);border-radius:10px;padding:12px;margin-bottom:10px">
       <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -1112,6 +1129,13 @@ async function tick() {
   rtspPort = status.rtsp.port; hlsPort = status.hls.port;
   hlsAddresses = status.hls.addresses || [];
 
+  // before anything draws, so the first paint is already the chosen view
+  if (!viewsBooted) {
+    viewsBooted = true;
+    loadCardView("hls");
+    loadCardView("mounts");
+  }
+
   // both kinds of viewing count: RTSP sessions and people watching over HLS
   const viewers = status.hls.viewers || 0;
   $("t-sessions").textContent = status.rtsp.sessions + viewers;
@@ -1157,6 +1181,7 @@ async function tick() {
 }
 let libraryBooted = false;
 let tvBooted = false;
+let viewsBooted = false;
 
 let activeTranscodes = [];
 
@@ -1261,23 +1286,61 @@ async function refreshMounts() {
   try { data = await api("/api/mounts"); }
   catch { return; } // don't stamp the cache on failure — retry next tick
   mountsLoaded = Date.now();
+  lastMounts = data;
+  renderMounts();
+}
+
+let lastMounts = null;
+
+/* Kept apart from the fetch so switching view doesn't re-hit the API. */
+function renderMounts() {
+  if (!lastMounts) return;
+  const view = cardView("mounts");
+  const uriOf = m => "rtsp://" + location.hostname + ":" + rtspPort + m.path;
   let h = "";
-  for (const m of data.mounts) {
-    const uri = "rtsp://" + location.hostname + ":" + rtspPort + m.path;
-    h += '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
+
+  for (const m of lastMounts.mounts) {
+    const uri = uriOf(m);
+    if (view === "condensed") {
+      // the path is the mount's identity; the full URI is a click away on Copy
+      h += '<div class="tv-tile">'
+        + '<span class="mono" style="flex:1;min-width:0;color:var(--ink);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+        + esc(m.path) + '</span>'
+        + '<button data-preview="' + esc(m.path) + '" data-act="preview" title="Play">▶</button>'
+        + '<button data-act="copy" data-arg="' + esc(uri) + '" title="Copy the rtsp:// URI">⧉</button>'
+        + '</div>';
+      continue;
+    }
+
+    const detail = view === "info"
+      ? '<div style="color:var(--muted);font-size:12px;margin-top:2px">source: ' + esc(m.source) + '</div>'
+        + (m.description ? '<div style="color:var(--muted);font-size:12px">' + esc(m.description) + '</div>' : "")
+        + '<div style="color:var(--muted);font-size:12px">' + (m.dynamic ? "added via dashboard" : "from server.json") + '</div>'
+      : '<div style="color:var(--muted);font-size:12px">' + esc(m.source)
+        + (m.description ? " · " + esc(m.description) : "") + (m.dynamic ? " · added via dashboard" : "") + '</div>';
+
+    h += '<div style="display:flex;align-items:' + (view === "info" ? "flex-start" : "center")
+      + ';gap:8px;padding:' + (view === "info" ? "10px" : "7px") + ' 0;border-bottom:1px solid var(--grid)">'
       + '<div style="flex:1;min-width:0"><div class="mono" style="color:var(--ink)">' + esc(uri) + '</div>'
-      + '<div style="color:var(--muted);font-size:12px">' + esc(m.source) + (m.description ? " · " + esc(m.description) : "") + (m.dynamic ? " · added via dashboard" : "") + '</div></div>'
+      + detail + '</div>'
       + '<button data-preview="' + esc(m.path) + '" data-act="preview">▶ Play</button>'
       + '<button data-act="mount-stop" data-arg="' + esc(m.path) + '">■ Stop</button>'
       + '<button data-act="copy" data-arg="' + esc(uri) + '">Copy</button>'
       + '<button class="danger" title="Remove mount" data-act="mount-remove" data-arg="' + esc(m.path) + '">✕</button>'
       + '</div>';
   }
-  if (data.announcementService) {
-    const uri = data.announcementService.replace("<host>", location.hostname);
-    h += '<div style="padding:8px 0 0;color:var(--muted);font-size:12px">Announcements: <span class="mono">' + esc(uri) + '</span></div>';
+
+  const box = $("mounts");
+  box.className = view === "condensed" ? "tv-grid" : "";
+  box.innerHTML = h || '<div class="empty">No mounts configured.</div>';
+
+  // outside the grid, so it doesn't become a tile
+  if (lastMounts.announcementService && view !== "condensed") {
+    const uri = lastMounts.announcementService.replace("<host>", location.hostname);
+    box.insertAdjacentHTML("beforeend",
+      '<div style="padding:8px 0 0;color:var(--muted);font-size:12px">Announcements: <span class="mono">'
+      + esc(uri) + '</span></div>');
   }
-  $("mounts").innerHTML = h || '<div class="empty">No mounts configured.</div>';
   syncPreviewButtons();
 }
 
@@ -1409,46 +1472,83 @@ function interfaceLinks(streamName) {
     + "</div>";
 }
 
+let lastHls = null;
+
 async function refreshHls() {
   try {
     const r = await fetch(mediaUrl("/"));
     const data = await r.json();
     $("t-hls").textContent = data.streams.length;
     $("t-hls-d").textContent = "on port " + hlsPort;
-    if (!data.streams.length) { $("hls").innerHTML = '<div class="empty">No HLS streams. Drop segment files in a subfolder of the media root.</div>'; return; }
-    let h = "";
-    for (const s of data.streams) {
-      const url = mediaUrl(s.playlist);
-      // the watch page plays in any browser (phones included); the raw
-      // m3u8 is linked from that page for VLC users
-      const watchUrl = mediaUrl("/watch/" + encodeURIComponent(s.name));
-      const transcoding = activeTranscodes.includes(s.name)
-        ? '<span title="Transcode in progress — playable now, growing as it converts">⏳</span> ' : "";
-      // small poster frame taken from the stream's own media; click to play.
-      // Falls back to an icon if a frame can't be grabbed.
-      const posterUrl = mediaUrl("/" + encodeURIComponent(s.name) + "/thumb.jpg");
-      const thumb = '<img class="hls-thumb" src="' + esc(posterUrl) + '" alt=""'
-        + ' data-act="hls-play" data-arg="' + esc(url) + '" title="' + esc(s.source || s.name) + '"'
-        + ' onerror="this.replaceWith(Object.assign(document.createElement(\'span\'),'
-        + '{className:\'hls-thumb hls-thumb-fallback\',textContent:\'🎬\'}))">';
-      // readable title on top, the stream id (what the URLs use) underneath
-      h += '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
-        + thumb
-        + '<div style="flex:1;min-width:0">' + transcoding
-        + '<a href="' + esc(watchUrl) + '" target="_blank" rel="noopener" title="Open the watch page">'
-        + esc(s.title || s.name) + '</a>'
-        + '<div class="mono" style="color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
-        + esc(s.name) + '</div>'
-        + interfaceLinks(s.name) + '</div>'
-        + '<button data-act="hls-play" data-arg="' + esc(url) + '">▶ Play</button>'
-        + '<button data-act="hls-stop" data-arg="' + esc(url) + '">■ Stop</button>'
-        + '<button data-act="copy" data-arg="' + esc(watchUrl) + '" title="Copy a link that plays in any browser">Copy</button>'
-        + '<button class="danger" title="Delete this stream\'s playlist and segments" data-act="hls-remove" data-arg="' + esc(s.name) + '">✕</button></div>';
-    }
-    $("hls").innerHTML = h;
+    lastHls = data;
+    renderHls();
   } catch {
+    lastHls = null;
+    $("hls").className = "";
     $("hls").innerHTML = '<div class="empty">HLS endpoint unreachable.</div>';
   }
+}
+
+/* Kept apart from the fetch so switching view doesn't re-hit the media port. */
+function renderHls() {
+  if (!lastHls) return;
+  const box = $("hls");
+  if (!lastHls.streams.length) {
+    box.className = "";
+    box.innerHTML = '<div class="empty">No HLS streams. Drop segment files in a subfolder of the media root.</div>';
+    return;
+  }
+
+  const view = cardView("hls");
+  let h = "";
+
+  for (const s of lastHls.streams) {
+    const url = mediaUrl(s.playlist);
+    // the watch page plays in any browser (phones included); the raw
+    // m3u8 is linked from that page for VLC users
+    const watchUrl = mediaUrl("/watch/" + encodeURIComponent(s.name));
+    const transcoding = activeTranscodes.includes(s.name)
+      ? '<span title="Transcode in progress — playable now, growing as it converts">⏳</span> ' : "";
+    // small poster frame taken from the stream's own media; click to play.
+    // Falls back to an icon if a frame can't be grabbed.
+    const posterUrl = mediaUrl("/" + encodeURIComponent(s.name) + "/thumb.jpg");
+    const thumb = cls => '<img class="' + cls + '" src="' + esc(posterUrl) + '" alt=""'
+      + ' data-act="hls-play" data-arg="' + esc(url) + '" title="' + esc(s.source || s.name) + '"'
+      + ' onerror="this.replaceWith(Object.assign(document.createElement(\'span\'),'
+      + '{className:\'' + cls + ' hls-thumb-fallback\',textContent:\'🎬\'}))">';
+
+    if (view === "condensed") {
+      // poster and title only — the whole tile plays, as in the TV grid
+      h += '<div class="tv-tile" data-act="hls-play" data-arg="' + esc(url) + '" title="' + esc(s.name) + '">'
+        + thumb("hls-thumb-sm")
+        + '<span style="flex:1;min-width:0;color:var(--ink);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+        + transcoding + esc(s.title || s.name) + '</span></div>';
+      continue;
+    }
+
+    // readable title on top, the stream id (what the URLs use) underneath
+    h += '<div style="display:flex;align-items:' + (view === "info" ? "flex-start" : "center")
+      + ';gap:8px;padding:' + (view === "info" ? "10px" : "7px") + ' 0;border-bottom:1px solid var(--grid)">'
+      + thumb("hls-thumb")
+      + '<div style="flex:1;min-width:0">' + transcoding
+      + '<a href="' + esc(watchUrl) + '" target="_blank" rel="noopener" title="Open the watch page">'
+      + esc(s.title || s.name) + '</a>'
+      + '<div class="mono" style="color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+      + esc(s.name) + '</div>'
+      + (view === "info"
+          ? '<div class="mono" style="color:var(--muted);font-size:11px;margin-top:2px;word-break:break-all">'
+            + esc(url) + '</div>'
+            + (s.source ? '<div style="color:var(--muted);font-size:12px">' + esc(s.source) + '</div>' : "")
+          : "")
+      + interfaceLinks(s.name) + '</div>'
+      + '<button data-act="hls-play" data-arg="' + esc(url) + '">▶ Play</button>'
+      + '<button data-act="hls-stop" data-arg="' + esc(url) + '">■ Stop</button>'
+      + '<button data-act="copy" data-arg="' + esc(watchUrl) + '" title="Copy a link that plays in any browser">Copy</button>'
+      + '<button class="danger" title="Delete this stream\'s playlist and segments" data-act="hls-remove" data-arg="' + esc(s.name) + '">✕</button></div>';
+  }
+
+  box.className = view === "condensed" ? "tv-grid" : "";
+  box.innerHTML = h;
 }
 
 
@@ -2264,12 +2364,19 @@ async function refreshChannels(force) {
   for (const c of data.channels) {
     const url = mediaUrl("/" + c.stream + "/index.m3u8");
     const live = c.status === "running";
+    // idle = saved but never started (a fresh pin). It has no playlist on
+    // disk yet, so offering Play would just fail — offer Start instead.
+    const idle = c.status === "idle";
     h += '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
       + '<span class="state ' + (live ? "playing" : "ready") + '"><span class="dot"></span></span>'
       + '<div style="flex:1;min-width:0"><div style="color:var(--ink)">' + esc(c.name) + '</div>'
       + '<div class="mono" style="color:var(--muted);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(c.url) + ' · ' + esc(c.status) + '</div></div>'
-      + '<button data-act="hls-play" data-arg="' + esc(url) + '">▶ Play</button>'
-      + '<button title="Restart channel" data-act="ch-restart" data-arg="' + esc(c.name) + '">↻</button>'
+      + (idle
+          ? '<button title="Start restreaming this channel from this server"'
+            + ' data-act="ch-start" data-arg="' + esc(c.name) + '">▶ Start</button>'
+          : '<button data-act="hls-play" data-arg="' + esc(url) + '">▶ Play</button>'
+            + '<button title="Stop restreaming (keeps the channel)" data-act="ch-stop" data-arg="' + esc(c.name) + '">■ Stop</button>'
+            + '<button title="Restart channel" data-act="ch-restart" data-arg="' + esc(c.name) + '">↻</button>')
       + '<button class="danger" title="Remove channel" data-act="ch-remove" data-arg="' + esc(c.name) + '">✕</button>'
       + '</div>';
   }
@@ -2278,6 +2385,19 @@ async function refreshChannels(force) {
 
 async function restartChannel(name) {
   await fetch("/api/channels/restart?name=" + encodeURIComponent(name), { method: "POST", headers: headers() });
+  refreshChannels(true);
+}
+
+async function startChannel(name) {
+  await fetch("/api/channels/start?name=" + encodeURIComponent(name), { method: "POST", headers: headers() });
+  // ffmpeg needs a moment to write the first segments before the row is
+  // worth redrawing as running
+  refreshChannels(true);
+  setTimeout(() => refreshChannels(true), 3000);
+}
+
+async function stopChannel(name) {
+  await fetch("/api/channels/stop?name=" + encodeURIComponent(name), { method: "POST", headers: headers() });
   refreshChannels(true);
 }
 
@@ -2306,7 +2426,7 @@ async function loadProviders() {
   }
   sel.innerHTML = data.providers.map(p =>
     '<option value="' + esc(p.id) + '">' + esc(p.name) + '</option>').join("");
-  $("tv-view").value = lineupView;   // the remembered choice, not the markup's first option
+  loadCardView("tv");   // the remembered choice, not the markup's first option
   loadLineup(true);
 }
 
@@ -2320,9 +2440,13 @@ async function loadLineup(force) {
     const data = await api("/api/tv/lineup?provider=" + encodeURIComponent(id));
     lineup = data.channels || [];
     lineupProvider = id;
+    // Most playlist providers carry no group-title at all, and a filter whose
+    // only option is "all" is furniture. Show it only where it does something.
     const groups = data.groups || [];
-    $("tv-group").innerHTML = '<option value="">all groups</option>'
+    const groupSel = $("tv-group");
+    groupSel.innerHTML = '<option value="">all groups</option>'
       + groups.map(g => '<option value="' + esc(g) + '">' + esc(g) + '</option>').join("");
+    groupSel.style.display = groups.length ? "" : "none";
     renderLineup();
   } catch (e) {
     $("tv-lineup").innerHTML = '<div class="empty">Could not load the lineup: ' + esc(e.message) + '</div>';
@@ -2338,6 +2462,33 @@ function lineupSearch() {
   searchTimer = setTimeout(renderLineup, 120);
 }
 
+/* ---- per-card view modes ----
+   Condensed / Default / Info mean the same thing everywhere — less, the
+   usual, more — but what that is belongs to each card. Remembered per card
+   so choosing a dense channel grid doesn't also strip the mount list. */
+const VIEW_NAMES = ["condensed", "default", "info"];
+const cardViews = {};
+
+function cardView(key) { return cardViews[key] || "default"; }
+
+function setCardView(key, v, rerender) {
+  cardViews[key] = VIEW_NAMES.includes(v) ? v : "default";
+  try { localStorage.setItem("j0kers-view-" + key, cardViews[key]); } catch { /* private mode */ }
+  const sel = $(key + "-view");
+  if (sel && sel.value !== cardViews[key]) sel.value = cardViews[key];
+  if (rerender) rerender();
+}
+
+/* Restores the remembered choice and points the control at it. */
+function loadCardView(key) {
+  try {
+    const saved = localStorage.getItem("j0kers-view-" + key);
+    if (VIEW_NAMES.includes(saved)) cardViews[key] = saved;
+  } catch { /* private mode */ }
+  const sel = $(key + "-view");
+  if (sel) sel.value = cardView(key);
+}
+
 /* The three ways to look at a lineup. Each sets its own row cap, because
    what makes a list unwieldy is its height, not its length: a condensed row
    is a fraction of an info row, so the same cap would either cripple one or
@@ -2347,21 +2498,7 @@ const LINEUP_VIEWS = {
   default:   { cap: 60,  logo: 38, row: defaultRow,    container: "" },
   info:      { cap: 25,  logo: 72, row: infoRow,       container: "" },
 };
-const VIEW_KEY = "j0kers-tv-view";
-let lineupView = "default";
-try {
-  const saved = localStorage.getItem(VIEW_KEY);
-  if (LINEUP_VIEWS[saved]) lineupView = saved;
-} catch { /* private mode */ }
-
-function setLineupView(v) {
-  lineupView = LINEUP_VIEWS[v] ? v : "default";
-  try { localStorage.setItem(VIEW_KEY, lineupView); } catch { /* private mode */ }
-  // keep the control honest when this is called with anything but a click
-  const sel = $("tv-view");
-  if (sel && sel.value !== lineupView) sel.value = lineupView;
-  renderLineup();
-}
+function setLineupView(v) { setCardView("tv", v, renderLineup); }
 
 const tvButtons = c =>
   '<button data-act="tv-play" data-arg="' + esc(c.watch) + '">▶ Watch</button>'
@@ -2435,7 +2572,7 @@ function renderLineup() {
   /* Capped because the whole lineup is several hundred rows and the browser
      is noticeably slower to lay them all out than anyone is to narrow the
      search. The count says what is hidden rather than pretending. */
-  const view = LINEUP_VIEWS[lineupView] || LINEUP_VIEWS.default;
+  const view = LINEUP_VIEWS[cardView("tv")] || LINEUP_VIEWS.default;
   let h = shown.slice(0, view.cap).map(view.row).join("");
   if (shown.length > view.cap)
     h += '<div class="empty">' + (shown.length - view.cap) + ' more — narrow the search to see them.</div>';
@@ -2445,8 +2582,8 @@ function renderLineup() {
 }
 
 async function pinTvChannel(id, name) {
-  if (!confirm("Restream \"" + name + "\" from this server?\n\nThis starts an ffmpeg job that runs "
-    + "continuously, so the channel gets its own local HLS stream that phones, TVs and VLC can play.")) return;
+  if (!confirm("Save \"" + name + "\" as a local channel?\n\nIt is added to Live channels without "
+    + "starting anything. Press ▶ Start there when you want it restreaming for phones, TVs and VLC.")) return;
   try {
     const r = await fetch("/api/tv/pin", {
       method: "POST",
@@ -2709,6 +2846,8 @@ document.addEventListener("click", e => {
     case "session-kill": killSession(arg); break;
     case "hls-remove":  removeHlsStream(arg); break;
     case "ch-restart":  restartChannel(arg); break;
+    case "ch-start":    startChannel(arg); break;
+    case "ch-stop":     stopChannel(arg); break;
     case "ch-remove":   removeChannel(arg); break;
     case "tv-play":     clearQueueState(); playHls(arg); break;
     case "tv-pin":      pinTvChannel(arg, el.dataset.name); break;

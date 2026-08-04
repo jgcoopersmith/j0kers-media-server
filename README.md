@@ -176,9 +176,20 @@ remove the channel instead).
 The **Free TV** card browses free ad-supported (FAST) lineups and plays
 them here. **Pluto TV** is built in and needs no account or configuration —
 around 400 channels, searchable and grouped by category. ▶ **Watch** plays
-one in the dashboard; 📌 **pin** turns it into a permanent local channel
-(an ffmpeg restream) so phones, TVs and VLC can play it off this server
-like any other stream.
+one in the dashboard; 📌 **pin** saves it to *Live channels* as a local
+channel.
+
+Pinning only saves it. A restream is an ffmpeg process pulling and
+transcoding around the clock, so starting one is a separate, deliberate
+press: a pinned channel sits **idle** until you press ▶ **Start** on its
+row, and ■ **Stop** puts it back without forgetting it. That state is
+persisted, so a restart brings back the ones that were actually running and
+leaves the rest alone. Once started it has its own local HLS stream that
+phones, TVs and VLC can play like any other.
+
+The **group** filter appears only for providers that publish categories.
+Pluto does; most playlist-backed ones carry no `group-title` at all, and a
+filter whose only option is "all" is furniture.
 
 Three view modes, remembered per browser:
 
@@ -199,6 +210,13 @@ Each mode caps how many it draws — 240, 60 and 25 — because what makes a
 list unwieldy is its height rather than its length, and laying out several
 hundred is slower than narrowing the search. Whatever is over the cap is
 counted at the bottom rather than silently dropped.
+
+The **HLS streams** and **RTSP mounts** cards carry the same three modes,
+each remembered separately. Condensed is a grid — poster and title for a
+stream, the mount path for a mount; info adds the playlist URL and source
+for a stream, and the source, description and origin for a mount. Switching
+view re-renders from what was already fetched rather than re-hitting the
+API.
 
 Only the playlists go through the server — a few KB of text every few
 seconds. The video segments are fetched by the player straight from the
@@ -365,7 +383,9 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `GET /api/tv/providers` | free-TV providers available (built-in Pluto TV + `providers.json`) |
 | `GET /api/tv/lineup?provider=&q=&group=` | a provider's channels, optionally filtered |
 | `GET /api/tv/watch?provider=&id=&s=` | freshly authorized HLS for one channel (signature or account) |
-| `POST /api/tv/pin` `{provider,id,name}` | restream a provider channel as a permanent local channel |
+| `POST /api/tv/pin` `{provider,id,name}` | save a provider channel as a local channel (idle; start it separately) |
+| `POST /api/channels/start?name=` | start a saved channel's restream (remembered across restarts) |
+| `POST /api/channels/stop?name=` | stop the restream, keeping the channel |
 | `GET http://<host>:<hlsPort>/watch/<stream>` | universal player page for a stream (works on phones; links the raw m3u8 for VLC) |
 | `GET http://<host>:<hlsPort>/<stream>/subs.json` | subtitle tracks for a stream |
 | `GET http://<host>:<hlsPort>/<stream>/subs/<id>.vtt` | a track as WebVTT (converted and cached on first request) |

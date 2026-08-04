@@ -20,6 +20,18 @@ public sealed class FfmpegManager : IDisposable
     {
         public string Name { get; set; } = "";
         public string Url { get; set; } = "";
+
+        /// <summary>
+        /// Whether this channel should be restreaming. A restream is a
+        /// permanent ffmpeg process pulling and transcoding around the clock,
+        /// so it is started deliberately rather than by the act of saving the
+        /// channel. Persisted, so the ones actually in use come back after a
+        /// restart and the rest stay idle.
+        ///
+        /// Defaults to true: channels saved before this field existed were
+        /// all running, and absent must not silently stop them.
+        /// </summary>
+        public bool Started { get; set; } = true;
     }
 
     private readonly FfmpegConfig _config;
@@ -704,9 +716,12 @@ public sealed class FfmpegManager : IDisposable
                 return _channels.Select(c =>
                 {
                     var stream = ChannelStream(c.Name);
+                    // "idle" is saved but deliberately not restreaming, which
+                    // is what a freshly pinned channel is — distinct from one
+                    // that was running and fell over.
                     var status = _liveJobs.TryGetValue(stream, out var p)
                         ? (p.HasExited ? $"stopped (exit {p.ExitCode})" : "running")
-                        : "stopped";
+                        : c.Started ? "stopped" : "idle";
                     return (c, stream, status);
                 }).ToList();
             }
@@ -716,7 +731,12 @@ public sealed class FfmpegManager : IDisposable
     public static string ChannelStream(string name) =>
         "ch-" + string.Concat(name.ToLowerInvariant().Select(ch => char.IsLetterOrDigit(ch) ? ch : '-')).Trim('-');
 
-    public string AddChannel(string name, string url)
+    /// <summary>
+    /// Saves a channel. <paramref name="start"/> false records it without
+    /// spawning ffmpeg — what pinning wants, since saving a channel to watch
+    /// later shouldn't put a transcode on the machine straight away.
+    /// </summary>
+    public string AddChannel(string name, string url, bool start = true)
     {
         if (!Available) throw new InvalidOperationException("ffmpeg is not available");
         var stream = ChannelStream(name);
@@ -726,11 +746,41 @@ public sealed class FfmpegManager : IDisposable
         {
             if (_channels.Any(c => ChannelStream(c.Name) == stream))
                 throw new InvalidOperationException($"a channel named '{name}' already exists");
-            _channels.Add(new ChannelDef { Name = name, Url = url });
+            _channels.Add(new ChannelDef { Name = name, Url = url, Started = start });
             SaveChannels();
-            StartLiveJob(name, url);
+            if (start) StartLiveJob(name, url);
         }
         return stream;
+    }
+
+    /// <summary>Starts a saved channel's restream and remembers that it should be running.</summary>
+    public bool StartChannel(string name)
+    {
+        lock (_lock)
+        {
+            var def = _channels.FirstOrDefault(c => ChannelStream(c.Name) == ChannelStream(name));
+            if (def is null) return false;
+            var stream = ChannelStream(def.Name);
+            StopJob(_liveJobs, stream);      // no-op when it isn't running
+            StartLiveJob(def.Name, def.Url);
+            def.Started = true;
+            SaveChannels();
+            return true;
+        }
+    }
+
+    /// <summary>Stops the restream but keeps the channel, so it can be started again.</summary>
+    public bool StopChannel(string name)
+    {
+        lock (_lock)
+        {
+            var def = _channels.FirstOrDefault(c => ChannelStream(c.Name) == ChannelStream(name));
+            if (def is null) return false;
+            StopJob(_liveJobs, ChannelStream(def.Name));
+            def.Started = false;
+            SaveChannels();
+            return true;
+        }
     }
 
     public bool RemoveChannel(string name)
@@ -757,6 +807,7 @@ public sealed class FfmpegManager : IDisposable
             if (def is null) return false;
             StopJob(_liveJobs, ChannelStream(def.Name));
             StartLiveJob(def.Name, def.Url);
+            if (!def.Started) { def.Started = true; SaveChannels(); }
             return true;
         }
     }
@@ -888,11 +939,15 @@ public sealed class FfmpegManager : IDisposable
             var defs = JsonSerializer.Deserialize<List<ChannelDef>>(File.ReadAllText(_channelsFile)) ?? new();
             _channels.AddRange(defs);
             if (!Available) return;
-            foreach (var c in defs)
+            // only the ones that were actually running: a pinned-but-idle
+            // channel must not wake up a transcode just because we rebooted
+            foreach (var c in defs.Where(c => c.Started))
             {
                 Log.Info("ffmpeg", $"restoring channel: {c.Name}");
                 StartLiveJob(c.Name, c.Url);
             }
+            var idle = defs.Count(c => !c.Started);
+            if (idle > 0) Log.Info("ffmpeg", $"{idle} saved channel(s) idle — start them from the dashboard");
         }
         catch (Exception ex)
         {
