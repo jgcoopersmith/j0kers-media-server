@@ -379,6 +379,7 @@ public sealed class FfmpegManager : IDisposable
         var dir = Path.Combine(_mediaRoot, stream);
         var playlist = Path.Combine(dir, "index.m3u8");
 
+        string started;
         lock (_lock)
         {
             var running = _vodJobs.TryGetValue(stream, out var proc) && !proc.HasExited;
@@ -390,7 +391,13 @@ public sealed class FfmpegManager : IDisposable
             if (running)
                 return (stream, File.Exists(playlist));
 
-            EvictVodCache(keep: stream);
+            // Eviction is deliberately not done here. Sizing the cache means
+            // stat-ing every file in it, and going over budget means deleting
+            // directories of segments — seconds of work on a full cache. Under
+            // this lock that stalls /api/status, /api/channels and every
+            // playlist request behind a click, so the whole dashboard freezes
+            // just as someone starts a film. It has nothing to do with
+            // starting this conversion, so it runs after, off the lock.
             Directory.CreateDirectory(dir);
             // remember the source so subtitles can be found for this stream
             try { File.WriteAllText(Path.Combine(dir, "source.txt"), info.FullName); } catch { }
@@ -443,8 +450,40 @@ public sealed class FfmpegManager : IDisposable
                     lock (_progressLock) _vodProgress.Remove(stream);
                 });
             _vodJobs[stream] = job;
-            return (stream, false);
+            started = stream;
         }
+
+        // Off the lock, and off the request: the caller is waiting to be told
+        // playback can begin, and trimming the cache is not part of that.
+        ScheduleEviction(started);
+        return (started, false);
+    }
+
+    /// <summary>
+    /// Trims the conversion cache in the background, one at a time. Serialized
+    /// because two sweeps would size the same directories against each other
+    /// and could both decide to delete the same one.
+    /// </summary>
+    private int _evicting;
+
+    private void ScheduleEviction(string keep)
+    {
+        if (Interlocked.Exchange(ref _evicting, 1) == 1) return;   // one already queued
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                lock (_lock) EvictVodCache(keep);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("ffmpeg", $"cache eviction failed: {ex.Message}");
+            }
+            finally
+            {
+                Volatile.Write(ref _evicting, 0);
+            }
+        });
     }
 
     /// <summary>

@@ -352,6 +352,17 @@
     cursor: pointer; display: block;
   }
   .hls-thumb:hover { border-color: var(--series-1); }
+  /* progress for a file still being converted, in the HLS card. The tile's
+     own .bar is scoped to .tile and sized for a 3px strip, so this is its
+     own thing rather than a reuse that only half applies. */
+  .conv-bar {
+    height: 4px; border-radius: 2px; margin-top: 5px; overflow: hidden;
+    background: var(--surface-2);
+  }
+  .conv-bar > div {
+    height: 100%; background: var(--series-1); border-radius: 2px;
+    transition: width .4s ease;
+  }
   /* poster for a condensed tile — the tile is the click target, not the image */
   .hls-thumb-sm {
     width: 34px; height: 20px; flex: none; border-radius: 4px;
@@ -1200,7 +1211,11 @@ async function tick() {
   lastBytes = served; lastTime = now;
 
   activeTranscodes = status.transcodes || [];
-  renderTranscodes(status.transcoding || []);
+  transcodingNow = status.transcoding || [];
+  renderTranscodes(transcodingNow);
+  // the HLS card shows conversions in progress too — see renderHls
+  if (transcodingNow.length || hadTranscodes) renderHls();
+  hadTranscodes = transcodingNow.length > 0;
   renderSessions(sessions.sessions);
   refreshMounts();   // cheap, cached-ish
   refreshHls();
@@ -1523,6 +1538,12 @@ function interfaceLinks(streamName) {
 
 let lastHls = null;
 
+/* Conversions running right now, from the last status poll: {stream, title,
+   percent, doneSeconds, durationSeconds}. Kept so the HLS card can show a
+   file that is being converted but has no playlist on disk yet. */
+let transcodingNow = [];
+let hadTranscodes = false;
+
 async function refreshHls() {
   try {
     const r = await fetch(mediaUrl("/"));
@@ -1538,26 +1559,65 @@ async function refreshHls() {
   }
 }
 
+/* One row for a file still being converted: no playlist to play yet, so it
+   reports how far along it is instead. A source whose length couldn't be
+   probed has no percentage to give, and says how much it has produced
+   rather than inventing one. */
+function convertingRow(t) {
+  const pct = typeof t.percent === "number" ? t.percent : null;
+  const label = pct !== null ? pct + "%" : fmtClock(t.doneSeconds || 0) + " done";
+  return '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
+    + '<span class="hls-thumb hls-thumb-fallback" style="display:flex">⏳</span>'
+    + '<div style="flex:1;min-width:0">'
+    + '<div style="color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+    + esc(t.title || t.stream) + '</div>'
+    + '<div style="color:var(--muted);font-size:11.5px">Converting · ' + esc(label)
+    + ' — playable as soon as the first part is ready</div>'
+    + '<div class="conv-bar"><div style="width:' + (pct !== null ? pct : 0) + '%"></div></div>'
+    + '</div></div>';
+}
+
 /* Kept apart from the fetch so switching view doesn't re-hit the media port. */
 function renderHls() {
   if (!lastHls) return;
   const box = $("hls");
-  if (!lastHls.streams.length) {
+
+  /* Files being converted that have not reached the disk yet.
+     Clicking a video scrolls this card into view, and until ffmpeg writes
+     the first playlist there is nothing here to see — while the Transcodes
+     tile that does know about it is thousands of pixels back up the page.
+     So the conversion is shown here as well, where the click left you. */
+  const listed = new Set(lastHls.streams.map(s => s.name.toLowerCase()));
+  const pending = transcodingNow.filter(t => t && t.stream && !listed.has(t.stream.toLowerCase()));
+
+  if (!lastHls.streams.length && !pending.length) {
     box.className = "";
     box.innerHTML = '<div class="empty">No HLS streams. Drop segment files in a subfolder of the media root.</div>';
     return;
   }
 
   const view = cardView("hls");
-  let h = "";
+  let h = pending.map(convertingRow).join("");
 
   for (const s of lastHls.streams) {
     const url = mediaUrl(s.playlist);
     // the watch page plays in any browser (phones included); the raw
     // m3u8 is linked from that page for VLC users
     const watchUrl = mediaUrl("/watch/" + encodeURIComponent(s.name));
-    const transcoding = activeTranscodes.includes(s.name)
-      ? '<span title="Transcode in progress — playable now, growing as it converts">⏳</span> ' : "";
+    // A conversion in progress: the hourglass alone said something was
+    // happening but not how much, which after being scrolled down here from
+    // the tiles is the whole question. Carry the figure the Transcodes tile
+    // has, so it is answered where the click actually left you.
+    const job = transcodingNow.find(t => t.stream === s.name);
+    const converting = activeTranscodes.includes(s.name);
+    const pct = job && typeof job.percent === "number" ? job.percent : null;
+    const transcoding = converting
+      ? '<span title="Converting — playable now, growing as it goes">⏳</span> ' : "";
+    const convNote = converting
+      ? '<div style="color:var(--muted);font-size:11.5px">Converting · '
+        + (pct !== null ? pct + "%" : (job ? esc(fmtClock(job.doneSeconds || 0)) + " done" : "starting"))
+        + '</div><div class="conv-bar"><div style="width:' + (pct !== null ? pct : 0) + '%"></div></div>'
+      : "";
     // small poster frame taken from the stream's own media; click to play.
     // Falls back to an icon if a frame can't be grabbed.
     const posterUrl = mediaUrl("/" + encodeURIComponent(s.name) + "/thumb.jpg");
@@ -1584,6 +1644,7 @@ function renderHls() {
       + esc(s.title || s.name) + '</a>'
       + '<div class="mono" style="color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
       + esc(s.name) + '</div>'
+      + convNote
       + (view === "info"
           ? '<div class="mono" style="color:var(--muted);font-size:11px;margin-top:2px;word-break:break-all">'
             + esc(url) + '</div>'
@@ -2468,6 +2529,12 @@ let currentMediaPath = null; // file behind the inline player (for quality switc
    and the stream appears in the HLS Streams list) WITHOUT playing it. */
 async function prepareMedia(path) {
   const height = mediaKind(path) === "video" ? parseInt($("pc-res").value, 10) || 0 : 0;
+  // Say something before the request, not after it. Preparing a file it has
+  // not seen before can hold this call for a second or more — sizing the
+  // conversion cache, probing the source — and until now the page did
+  // nothing at all in that time, which reads as a click that missed.
+  const started = path.split(/[\\/]/).pop();
+  flashPlayerMsg("Preparing " + started + "…");
   try {
     const r = await fetch("/api/play", {
       method: "POST",
@@ -2476,6 +2543,18 @@ async function prepareMedia(path) {
     });
     const data = await r.json();
     if (!r.ok) { alert(data.error || "could not prepare stream"); return; }
+    // Show it as converting straight away. The status poll is two seconds
+    // apart, and this card is where the scroll below is about to put them —
+    // an empty card in the meantime is what reads as nothing happening.
+    if (data.stream && !data.ready
+        && !transcodingNow.some(t => t.stream === data.stream)) {
+      transcodingNow = transcodingNow.concat([{
+        stream: data.stream,
+        title: path.split(/[\\/]/).pop(),
+        percent: 0, doneSeconds: 0, durationSeconds: 0,
+      }]);
+      renderHls();   // draw it now; refreshHls below only resolves later
+    }
     refreshHls();
     document.getElementById("hls").scrollIntoView({ behavior: "smooth", block: "center" });
   } catch (e) {
