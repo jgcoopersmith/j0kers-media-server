@@ -1764,6 +1764,31 @@ $("pc-subadd").addEventListener("click", async () => {
   applySubtitleChoice();
 });
 
+/* Puts the player where it can actually be watched.
+   The player sits underneath the stream list, which on a server with a few
+   streams is well over a thousand pixels tall — so picking a film scrolled
+   the list into view and left the video that far below the fold, playing
+   to nobody. Called whenever playback starts, whatever started it.
+
+   It only scrolls when the player is genuinely not on screen. A playlist
+   advancing to its next track calls this too, and someone already watching
+   should not have the page tugged out from under them each time. */
+function bringPlayerIntoView() {
+  const box = $("hlsplayer");
+  // A timeout rather than requestAnimationFrame: rAF does not run in a
+  // background tab, so starting something there and switching to it would
+  // arrive with the player still out of sight. Either way this waits a beat
+  // for the display change above to be laid out before measuring.
+  setTimeout(() => {
+    const r = box.getBoundingClientRect();
+    const h = window.innerHeight || document.documentElement.clientHeight;
+    if (!h || !r.height) return;                       // not laid out yet
+    const visible = Math.min(r.bottom, h) - Math.max(r.top, 0);
+    if (visible >= Math.min(r.height, h) * 0.5) return; // already watchable
+    box.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, 0);
+}
+
 /* Stop button for HLS/mount video playback: ends whatever the inline
    player is doing (single stream or playlist) and hides it. */
 function stopHlsVideo() {
@@ -1856,6 +1881,7 @@ if (localStorage.getItem("j0kers-res")) $("pc-res").value = localStorage.getItem
 async function playHls(url, startAt) {
   const box = $("hlsplayer"), video = $("hlsvideo"), msg = $("hlsmsg");
   box.style.display = "block";
+  bringPlayerIntoView();
   msg.textContent = "";
   if (window._hls) { window._hls.destroy(); window._hls = null; }
 
