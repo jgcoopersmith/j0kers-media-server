@@ -7,7 +7,7 @@
     <Nullable>enable</Nullable>
     <RootNamespace>J0kersMediaServer</RootNamespace>
     <AssemblyName>j0kers-media-server</AssemblyName>
-    <Version>0.1.30</Version>
+    <Version>0.1.31</Version>
     <ApplicationIcon>assets\j0kers.ico</ApplicationIcon>
     <!-- Protocol text (HLS EXTINF, RTSP dates) must never be locale-formatted:
          a de-DE machine would otherwise emit "#EXTINF:6,000," and break playback. -->

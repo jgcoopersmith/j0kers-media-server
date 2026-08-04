@@ -1714,6 +1714,18 @@ let pendingStart = null;
    this a usable signal of intent. */
 function viewerTookControl() { pendingStart = null; }
 
+/* How far into this stream playback can actually go right now.
+   duration is the wrong bound while a file is still being converted: the
+   playlist grows as ffmpeg writes it, so duration reports only what exists
+   so far and keeps moving. Seeking to it lands on a fragment that has not
+   been written, which the player answers with an error and a recovery that
+   restarts the stream — the film jumping back to the beginning after enough
+   presses to reach the converted edge. seekable is the honest bound. */
+function playableEnd(v) {
+  if (v.seekable && v.seekable.length) return v.seekable.end(v.seekable.length - 1);
+  return isFinite(v.duration) ? v.duration : Infinity;
+}
+
 $("pc-back").addEventListener("click", () => {
   viewerTookControl();
   const v = $("hlsvideo");
@@ -1722,9 +1734,32 @@ $("pc-back").addEventListener("click", () => {
 $("pc-fwd").addEventListener("click", () => {
   viewerTookControl();
   const v = $("hlsvideo");
-  if (isFinite(v.duration)) v.currentTime = Math.min(v.duration, v.currentTime + 10);
-  else v.currentTime += 10;
+  // stay a moment short of the edge: landing exactly on it is what a player
+  // reads as "past the end", and on a growing playlist the edge moves anyway
+  const limit = playableEnd(v) - 0.5;
+  const wanted = v.currentTime + 10;
+  if (!isFinite(limit)) { v.currentTime = wanted; return; }
+  if (wanted > limit) {
+    // already as far as the conversion has got — say so rather than
+    // silently doing nothing or throwing playback back to the start
+    if (v.currentTime >= limit - 1) {
+      flashPlayerMsg("That's as far as this file has been converted so far.");
+      return;
+    }
+    v.currentTime = limit;
+    return;
+  }
+  v.currentTime = wanted;
 });
+
+/* A brief note under the player, cleared after a few seconds. */
+let playerMsgTimer = 0;
+function flashPlayerMsg(text) {
+  const el = $("hlsmsg");
+  el.textContent = text;
+  clearTimeout(playerMsgTimer);
+  playerMsgTimer = setTimeout(() => { if (el.textContent === text) el.textContent = ""; }, 4000);
+}
 // the native control bar: scrubbing, arrow keys, tapping the timeline
 ["pointerdown", "keydown"].forEach(ev =>
   $("hlsvideo").addEventListener(ev, viewerTookControl));
@@ -1815,6 +1850,30 @@ async function playHls(url, startAt) {
       opts.backBufferLength = 1800;
     }
     window._hls = new Hls(opts);
+
+    // Recover in place. A fragment that fails to load — most often one the
+    // conversion has not written yet — is fatal to hls.js, and its recovery
+    // reloads the stream from startPosition, which for a recording is zero.
+    // That is the jump back to the beginning: the error is momentary, but
+    // being returned to the start is not. Remember where the viewer was and
+    // put them back.
+    window._hls.on(Hls.Events.ERROR, (_, data) => {
+      if (!data || !data.fatal) return;                 // non-fatal: hls.js copes
+      const was = video.currentTime;
+      try {
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) window._hls.startLoad();
+        else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) window._hls.recoverMediaError();
+        else return;                                    // unrecoverable; leave it
+      } catch { return; }
+      if (was > 1) {
+        const restore = () => {
+          video.removeEventListener("canplay", restore);
+          if (Math.abs(video.currentTime - was) > 2) { try { video.currentTime = was; } catch {} }
+        };
+        video.addEventListener("canplay", restore);
+      }
+    });
+
     window._hls.loadSource(url);
     window._hls.attachMedia(video);
     video.play().catch(() => {});
