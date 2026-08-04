@@ -67,7 +67,7 @@ single address nothing extra is drawn.
 VLC, Kodi and anything else that plays a URL want. For a browser, click the
 stream's *name* instead: that opens the `/watch/` page, an HTML player that
 works on phones. (The per-network row offers both per address: **🎬 VLC**
-for the stream, **⧉ page** for the browser page.) Every link carries the
+for the stream, **🌐 Browser** for the browser page.) Every link carries the
 signed token, and the playlist's segments carry it too, so a player follows
 them without needing an account.
 
@@ -81,7 +81,7 @@ the network the phone is on, and nothing here can know the other device's
 network. A PC on both Ethernet `10.0.0.x` and Wi-Fi `192.168.8.x` hands out
 the Ethernet address by default, and a phone on the Wi-Fi cannot route to
 it: the link works on the PC and fails on the phone. The per-network row
-lists every address with its own **⧉ page** and **🎬 VLC** buttons — pick the
+lists every address with its own **🌐 Browser** and **🎬 VLC** buttons — pick the
 one matching the network the other device is on. The main buttons' tooltips
 name the address they contain, so it is never a guess.
 

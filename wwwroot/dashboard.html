@@ -738,7 +738,7 @@ function shareUrl(pathAndQuery) { return mediaUrlOn(shareHost(), pathAndQuery); 
 function shareHostNote() {
   const host = shareHost();
   return hlsAddresses.length > 1
-    ? " — uses " + host + ". On another network, use the 🎬 / ⧉ buttons beside that address instead."
+    ? " — uses " + host + ". On another network, use the 🎬 / 🌐 buttons beside that address instead."
     : " — uses " + host + ".";
 }
 
@@ -1503,7 +1503,7 @@ function interfaceLinks(streamName) {
         return '<a href="' + esc(url) + '" target="_blank" rel="noopener"'
           + (here ? ' class="here"' : '') + ' title="' + esc(tip) + '">' + esc(label) + '</a>'
           + '<button data-act="copy" data-arg="' + esc(url)
-          + '" title="' + esc("Copy the browser link on " + i.address) + '">⧉ page</button>'
+          + '" title="' + esc("Copy the browser link on " + i.address) + '">🌐 Browser</button>'
           // VLC and friends need the playlist itself; the page above is HTML
           // and a player handed it has nothing to play
           + '<button data-act="copy" data-arg="' + esc(mediaUrlOn(i.address, raw))
