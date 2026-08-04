@@ -738,7 +738,7 @@ function shareUrl(pathAndQuery) { return mediaUrlOn(shareHost(), pathAndQuery); 
 function shareHostNote() {
   const host = shareHost();
   return hlsAddresses.length > 1
-    ? " — uses " + host + ". On another network, use the 🎬 / 🌐 buttons beside that address instead."
+    ? " — uses " + host + ". On another network, use the 🎬 Link button beside that address instead."
     : " — uses " + host + ".";
 }
 
@@ -1500,15 +1500,15 @@ function interfaceLinks(streamName) {
         const label = (i.kind === "wi-fi" ? "📶" : "🔌") + " " + i.address;
         const tip = (i.name || i.address) + (i.primary ? " · default route" : "")
           + (here ? " · the network you're on" : "");
+        // One copy per address: the stream URL, which plays in VLC and in
+        // any browser with HLS. The watch page (subtitle menu, hls.js for
+        // browsers without HLS) stays reachable through the address link
+        // itself and the stream's title.
         return '<a href="' + esc(url) + '" target="_blank" rel="noopener"'
           + (here ? ' class="here"' : '') + ' title="' + esc(tip) + '">' + esc(label) + '</a>'
-          + '<button data-act="copy" data-arg="' + esc(url)
-          + '" title="' + esc("Copy the browser link on " + i.address) + '">🌐 Browser</button>'
-          // VLC and friends need the playlist itself; the page above is HTML
-          // and a player handed it has nothing to play
           + '<button data-act="copy" data-arg="' + esc(mediaUrlOn(i.address, raw))
-          + '" title="' + esc("Copy the stream URL for VLC and other players on " + i.address)
-          + '">🎬 VLC</button>';
+          + '" title="' + esc("Copy the stream URL on " + i.address)
+          + '">🎬 Link</button>';
       }).join("")
     + "</div>";
 }
