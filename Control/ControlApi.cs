@@ -127,7 +127,7 @@ public sealed partial class ControlApi : IDisposable
             try { ctx = await _listener!.GetContextAsync(); }
             catch (Exception) when (_cts.IsCancellationRequested) { break; }
             catch (Exception ex) { Log.Warn("control", $"accept failed: {ex.Message}"); continue; }
-            _ = Task.Run(() => Handle(ctx));
+            _ = Task.Run(() => HandleAsync(ctx));
         }
     }
 
@@ -245,7 +245,14 @@ public sealed partial class ControlApi : IDisposable
         return true;
     }
 
-    private void Handle(HttpListenerContext ctx)
+    /// <summary>
+    /// Serves one request. Async only for the free-TV endpoints, which wait on
+    /// a remote service — blocking a thread-pool thread on that call meant one
+    /// tied-up thread per playlist fetch, and a live player refetches every few
+    /// seconds per viewer. Everything else here is synchronous file and memory
+    /// work and stays that way.
+    /// </summary>
+    private async Task HandleAsync(HttpListenerContext ctx)
     {
         var res = ctx.Response;
         try
@@ -336,7 +343,7 @@ public sealed partial class ControlApi : IDisposable
             // it names exactly one channel or one upstream URL.
             if (method == "GET" && path is "/api/tv/watch" or "/api/tv/r" && IsSignedTvRequest(ctx, path))
             {
-                TvProxy(ctx, entry: path == "/api/tv/watch").GetAwaiter().GetResult();
+                await TvProxy(ctx, entry: path == "/api/tv/watch");
                 return;
             }
 
@@ -687,19 +694,19 @@ public sealed partial class ControlApi : IDisposable
 
             if (method == "GET" && path == "/api/tv/lineup")
             {
-                TvLineup(ctx).GetAwaiter().GetResult();
+                await TvLineup(ctx);
                 return;
             }
 
             if (method == "GET" && (path == "/api/tv/watch" || path == "/api/tv/r"))
             {
-                TvProxy(ctx, entry: path == "/api/tv/watch").GetAwaiter().GetResult();
+                await TvProxy(ctx, entry: path == "/api/tv/watch");
                 return;
             }
 
             if (method == "POST" && path == "/api/tv/pin")
             {
-                TvPin(ctx).GetAwaiter().GetResult();
+                await TvPin(ctx);
                 return;
             }
 

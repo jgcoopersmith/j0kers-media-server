@@ -429,18 +429,20 @@ public sealed class FfmpegManager : IDisposable
             lock (_progressLock) _vodProgress[stream] = new VodProgress(stream, title, 0, duration);
 
             var job = Spawn(args, $"vod {info.Name}", dir,
-                onProgressLine: line => NoteVodProgress(stream, title, duration, line));
-            _vodJobs[stream] = job;
-            job.Exited += (_, _) =>
-            {
-                // keep the job table from accumulating finished processes
-                lock (_lock)
+                onProgressLine: line => NoteVodProgress(stream, title, duration, line),
+                onExited: p =>
                 {
-                    if (_vodJobs.TryGetValue(stream, out var q) && ReferenceEquals(q, job))
-                        _vodJobs.Remove(stream);
-                }
-                lock (_progressLock) _vodProgress.Remove(stream);
-            };
+                    // keep the job table from accumulating finished processes.
+                    // Matched by reference so a rerun that has already taken
+                    // the slot isn't evicted by its predecessor's exit.
+                    lock (_lock)
+                    {
+                        if (_vodJobs.TryGetValue(stream, out var q) && ReferenceEquals(q, p))
+                            _vodJobs.Remove(stream);
+                    }
+                    lock (_progressLock) _vodProgress.Remove(stream);
+                });
+            _vodJobs[stream] = job;
             return (stream, false);
         }
     }
@@ -862,8 +864,15 @@ public sealed class FfmpegManager : IDisposable
 
     // ---- plumbing -------------------------------------------------------
 
+    /// <summary>
+    /// Starts ffmpeg. <paramref name="onExited"/> is wired before the process
+    /// launches: attaching it afterwards races a job that dies immediately —
+    /// a bad input fails in milliseconds — and a handler added after the event
+    /// has already fired is never called, which would strand the job's entry
+    /// in the tables it was meant to clean up.
+    /// </summary>
     private Process Spawn(IEnumerable<string> args, string label, string? workingDir = null,
-        Action<string>? onProgressLine = null)
+        Action<string>? onProgressLine = null, Action<Process>? onExited = null)
     {
         var psi = new ProcessStartInfo(FfmpegPath)
         {
@@ -906,6 +915,10 @@ public sealed class FfmpegManager : IDisposable
                     Log.Warn("ffmpeg", $"{label}: exited with code {code}{(tail.Length > 0 ? " — " + tail : "")}");
             }
             catch { /* process already reaped/disposed — nothing to report */ }
+
+            // caller's cleanup, guarded for the same reason
+            try { onExited?.Invoke(p); }
+            catch (Exception ex) { Log.Warn("ffmpeg", $"{label}: exit handler failed: {ex.Message}"); }
         };
         p.Start();
         p.BeginErrorReadLine();
@@ -933,10 +946,10 @@ public sealed class FfmpegManager : IDisposable
 
     private void LoadChannels()
     {
-        if (!File.Exists(_channelsFile)) return;
         try
         {
-            var defs = JsonSerializer.Deserialize<List<ChannelDef>>(File.ReadAllText(_channelsFile)) ?? new();
+            var defs = JsonSidecar.Load<List<ChannelDef>>(_channelsFile, "ffmpeg");
+            if (defs is null) return;
             _channels.AddRange(defs);
             if (!Available) return;
             // only the ones that were actually running: a pinned-but-idle
@@ -955,8 +968,7 @@ public sealed class FfmpegManager : IDisposable
         }
     }
 
-    private void SaveChannels() =>
-        File.WriteAllText(_channelsFile, JsonSerializer.Serialize(_channels, new JsonSerializerOptions { WriteIndented = true }));
+    private void SaveChannels() => JsonSidecar.Save(_channelsFile, _channels, "ffmpeg");
 
     public void Dispose()
     {

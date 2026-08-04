@@ -23,16 +23,7 @@ public sealed class PlaylistStore
     public PlaylistStore(string baseDirectory)
     {
         _file = Path.Combine(baseDirectory, "playlists.json");
-        if (!File.Exists(_file)) return;
-        try
-        {
-            _playlists = JsonSerializer.Deserialize<List<PlaylistDef>>(File.ReadAllText(_file))
-                         ?? new List<PlaylistDef>();
-        }
-        catch (Exception ex)
-        {
-            Log.Warn("playlists", $"could not load playlists.json: {ex.Message}");
-        }
+        _playlists = JsonSidecar.Load<List<PlaylistDef>>(_file, "playlists") ?? new List<PlaylistDef>();
     }
 
     public IReadOnlyList<PlaylistDef> All
@@ -63,7 +54,5 @@ public sealed class PlaylistStore
         }
     }
 
-    private void Persist() =>
-        File.WriteAllText(_file, JsonSerializer.Serialize(_playlists,
-            new JsonSerializerOptions { WriteIndented = true }));
+    private void Persist() => JsonSidecar.Save(_file, _playlists, "playlists");
 }

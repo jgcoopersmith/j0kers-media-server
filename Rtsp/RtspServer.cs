@@ -253,14 +253,46 @@ public sealed class RtspServer : IDisposable
         if (transport is null)
             return new RtspResponse(461, request.CSeq); // Unsupported Transport
 
-        IMediaSource source;
+        // Claim the slot before spending anything on the session. Allocating
+        // an RTP port pair first meant a request that was about to be refused
+        // still took a pair from a bounded range, and exhausting that range
+        // throws where a 503 was the right answer.
+        if (!_sessions.TryReserve())
+            return new RtspResponse(503, request.CSeq).With("Retry-After", "30");
+
+        var admitted = false;
         try
         {
-            source = mount.Value.factory();
+            return SetupAdmitted(request, remote, interleavedWriter, sessionsOnConnection, mount.Value, ref admitted);
         }
         catch (Exception ex)
         {
-            Log.Error("rtsp", $"cannot open source for {mount.Value.name}: {ex.Message}");
+            // most likely the RTP port range is exhausted; answer properly
+            // rather than letting the connection die
+            Log.Error("rtsp", $"SETUP for {mount.Value.name} failed: {ex.Message}");
+            return new RtspResponse(500, request.CSeq);
+        }
+        finally
+        {
+            if (!admitted) _sessions.Release();
+        }
+    }
+
+    private RtspResponse SetupAdmitted(RtspRequest request, IPEndPoint remote,
+        Func<byte, byte[], Task> interleavedWriter, List<string> sessionsOnConnection,
+        (string name, Func<IMediaSource> factory) mount, ref bool admitted)
+    {
+        var transportHeader = request.Header("Transport")!;
+        var transport = TransportSpec.Parse(transportHeader, _config.Rtsp.AllowInterleavedTcp)!;
+
+        IMediaSource source;
+        try
+        {
+            source = mount.factory();
+        }
+        catch (Exception ex)
+        {
+            Log.Error("rtsp", $"cannot open source for {mount.name}: {ex.Message}");
             return new RtspResponse(404, request.CSeq);
         }
 
@@ -285,7 +317,7 @@ public sealed class RtspServer : IDisposable
 
         var session = new RtspSession
         {
-            MountPath = mount.Value.name,
+            MountPath = mount.name,
             Sender = sender,
             ClientAddress = remote.Address.ToString(),
         };
@@ -295,13 +327,14 @@ public sealed class RtspServer : IDisposable
 
         if (!_sessions.TryAdd(session))
         {
+            // TryAdd consumed the reservation; only a duplicate id gets here
             sender.Dispose();
-            return new RtspResponse(503, request.CSeq)
-                .With("Retry-After", "30"); // at session cap
+            return new RtspResponse(500, request.CSeq);
         }
+        admitted = true;   // the slot is now the session's; don't release it
 
         sessionsOnConnection.Add(session.Id);
-        Log.Info("rtsp", $"session {session.Id}: SETUP {mount.Value.name} for {remote} ({(transport.IsTcpInterleaved ? "TCP interleaved" : "UDP")})");
+        Log.Info("rtsp", $"session {session.Id}: SETUP {mount.name} for {remote} ({(transport.IsTcpInterleaved ? "TCP interleaved" : "UDP")})");
 
         return new RtspResponse(200, request.CSeq)
             .With("Transport", transportResponse)

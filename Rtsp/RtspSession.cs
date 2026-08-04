@@ -39,10 +39,47 @@ public sealed class SessionManager : IDisposable
     public int Count => _sessions.Count;
     public IReadOnlyCollection<RtspSession> All => _sessions.Values.ToArray();
 
+    /// <summary>
+    /// Live count, reserved and admitted alike. Kept separately from
+    /// _sessions.Count because a reservation exists before its session does.
+    /// </summary>
+    private int _reserved;
+
+    /// <summary>
+    /// Claims a slot under the cap, or returns false if there is none.
+    ///
+    /// Testing _sessions.Count and then adding is two steps, and concurrent
+    /// SETUPs can all pass the test before any of them adds — so the cap was
+    /// a limit only when requests arrived one at a time. The count is instead
+    /// moved up front, atomically, and given back if the caller doesn't use
+    /// it. Callers must Release() or TryAdd() exactly once per successful
+    /// reservation.
+    /// </summary>
+    public bool TryReserve()
+    {
+        // optimistic CAS: re-read and retry rather than lock, since this is
+        // on the SETUP path and contention is brief
+        while (true)
+        {
+            var current = Volatile.Read(ref _reserved);
+            if (current >= _maxSessions) return false;
+            if (Interlocked.CompareExchange(ref _reserved, current + 1, current) == current) return true;
+        }
+    }
+
+    /// <summary>Gives back a reservation that never became a session.</summary>
+    public void Release() => Interlocked.Decrement(ref _reserved);
+
+    /// <summary>
+    /// Adds a session against a slot already claimed by <see cref="TryReserve"/>.
+    /// The reservation is consumed either way — a duplicate id is a failure to
+    /// use the slot, not a reason to hold it.
+    /// </summary>
     public bool TryAdd(RtspSession session)
     {
-        if (_sessions.Count >= _maxSessions) return false;
-        return _sessions.TryAdd(session.Id, session);
+        if (_sessions.TryAdd(session.Id, session)) return true;
+        Release();
+        return false;
     }
 
     public RtspSession? Get(string? id) =>
@@ -50,8 +87,12 @@ public sealed class SessionManager : IDisposable
 
     public void Remove(string id)
     {
-        if (_sessions.TryRemove(id, out var session))
-            session.Dispose();
+        // TryRemove is the arbiter: two callers racing the same id (sweeper
+        // and TEARDOWN) means only one disposes, and only one gives the slot
+        // back, so the cap can neither leak nor drift below zero
+        if (!_sessions.TryRemove(id, out var session)) return;
+        Release();
+        session.Dispose();
     }
 
     private void Sweep()

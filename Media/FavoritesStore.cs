@@ -22,16 +22,7 @@ public sealed class FavoritesStore
     public FavoritesStore(string baseDirectory)
     {
         _file = System.IO.Path.Combine(baseDirectory, "favorites.json");
-        if (!File.Exists(_file)) return;
-        try
-        {
-            _favorites = JsonSerializer.Deserialize<List<Favorite>>(File.ReadAllText(_file))
-                         ?? new List<Favorite>();
-        }
-        catch (Exception ex)
-        {
-            Log.Warn("favorites", $"could not load favorites.json: {ex.Message}");
-        }
+        _favorites = JsonSidecar.Load<List<Favorite>>(_file, "favorites") ?? new List<Favorite>();
     }
 
     public IReadOnlyList<Favorite> All
@@ -62,7 +53,5 @@ public sealed class FavoritesStore
         }
     }
 
-    private void Persist() =>
-        File.WriteAllText(_file, JsonSerializer.Serialize(_favorites,
-            new JsonSerializerOptions { WriteIndented = true }));
+    private void Persist() => JsonSidecar.Save(_file, _favorites, "favorites");
 }

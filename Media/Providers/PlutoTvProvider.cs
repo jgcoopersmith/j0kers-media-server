@@ -119,10 +119,29 @@ public sealed class PlutoTvProvider : IChannelProvider, IDisposable
 
     // ---- lineup ----------------------------------------------------------
 
+    /// <summary>Separate from the session gate: this waits on the guide fetch, not the boot call.</summary>
+    private readonly SemaphoreSlim _lineupGate = new(1, 1);
+
     public async Task<IReadOnlyList<ProviderChannel>> LineupAsync(CancellationToken ct = default)
     {
-        if (_lineup.Count > 0 && DateTime.UtcNow - _lineupFetchedUtc < LineupTtl) return _lineup;
+        if (Fresh()) return _lineup;
 
+        // One fetch, however many callers. The guide is about a megabyte and
+        // the dashboard can ask several times over as it starts, so without
+        // this each of those pulls its own copy.
+        await _lineupGate.WaitAsync(ct);
+        try
+        {
+            if (Fresh()) return _lineup;
+            return await FetchLineupAsync(ct);
+        }
+        finally { _lineupGate.Release(); }
+    }
+
+    private bool Fresh() => _lineup.Count > 0 && DateTime.UtcNow - _lineupFetchedUtc < LineupTtl;
+
+    private async Task<IReadOnlyList<ProviderChannel>> FetchLineupAsync(CancellationToken ct)
+    {
         var session = await SessionAsync(ct);
         var url = "https://service-channels.clusters.pluto.tv/v2/guide/channels" +
                   "?limit=1000&offset=0&sort=number%3Aasc";
@@ -253,7 +272,11 @@ public sealed class PlutoTvProvider : IChannelProvider, IDisposable
         return u.GetLeftPart(UriPartial.Path) + "?" + rebuilt;
     }
 
-    public void Dispose() => _gate.Dispose();
+    public void Dispose()
+    {
+        _gate.Dispose();
+        _lineupGate.Dispose();
+    }
 
     // ---- wire types ------------------------------------------------------
 

@@ -440,6 +440,18 @@ serves a sign-in page, and the dashboard itself is never sent to a browser
 that hasn't signed in. Signing out, or a session that expires mid-visit,
 returns there.
 
+### If a settings file gets damaged
+
+The sidecars next to your config — `favorites.json`, `library.json`,
+`playlists.json`, `channels.json`, `settings.json`, `mounts.json` — are
+written through a temp file and moved into place, so losing power or
+force-quitting mid-save can't leave one half-written.
+
+If one is damaged anyway, the server moves it to `<name>.json.corrupt`,
+says so in the log, and starts that store empty rather than carrying on and
+overwriting it with the next change. The old contents stay in the
+`.corrupt` file: fix the JSON, rename it back, restart.
+
 ### First run
 
 With no accounts yet, that same page creates the first administrator
@@ -544,6 +556,7 @@ Rtp/            RTP packetization, RTCP sender reports, port allocator
 Hls/            RFC 8216 playlist generation + segment serving, viewer tracking
 Control/        HTTP/JSON control API
 Media/          G.711 sources (tone generator, file looper), ffmpeg engine
+                (JsonSidecar: atomic writes + quarantine for the .json stores)
 Media/Providers/ free-TV lineups (Pluto TV, M3U playlists) + the HLS proxy
 wwwroot/        dashboard single-page app + sign-in page (embedded into the binary)
 config/         sample/default server.json (runtime media/ and clips/ live here too)

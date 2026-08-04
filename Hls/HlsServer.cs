@@ -408,7 +408,16 @@ public sealed class HlsServer : IDisposable
         if (name.Contains("..") || name.Contains('\\') || name.Contains('/')) return null;
         if (name.StartsWith('.')) return null; // internal dirs (.thumbs) are never streams
         var full = Path.GetFullPath(Path.Combine(_mediaRoot, name));
-        return full.StartsWith(_mediaRoot, StringComparison.OrdinalIgnoreCase) ? full : null;
+        // The separator matters: a bare prefix test also accepts a sibling
+        // whose name merely starts with the root's — "…/media-old" passes a
+        // check meant for "…/media". The filters above already make that
+        // unreachable, so this is the guard being right on its own terms
+        // rather than by the grace of another one, and it matches how the
+        // segment path is checked further up.
+        // TrimEnd first: GetFullPath leaves a trailing separator on a drive
+        // root ("C:\"), and appending another would match nothing.
+        var prefix = _mediaRoot.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        return full.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? full : null;
     }
 
     private string BuildPlaylist(string streamDir)

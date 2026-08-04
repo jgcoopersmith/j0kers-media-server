@@ -152,7 +152,7 @@ public sealed class ServerConfig
         if (s.AuthToken is not null) _persistedSettings.AuthToken = s.AuthToken;
         if (s.MinimizeToTray is not null) _persistedSettings.MinimizeToTray = s.MinimizeToTray;
         if (s.LinkLifetimeHours is not null) _persistedSettings.LinkLifetimeHours = s.LinkLifetimeHours;
-        File.WriteAllText(SettingsFile, JsonSerializer.Serialize(_persistedSettings, JsonOpts));
+        WriteAtomic(SettingsFile, JsonSerializer.Serialize(_persistedSettings, JsonOpts), "settings");
     }
 
     /// <summary>Applies dashboard settings on top of the loaded config.</summary>
@@ -244,7 +244,29 @@ public sealed class ServerConfig
             Added = Mounts.Where(m => _dynamicMountPaths.Contains(m.Path)).ToList(),
             Removed = _removedMountPaths.ToList(),
         };
-        File.WriteAllText(DynamicMountsFile, JsonSerializer.Serialize(sidecar, JsonOpts));
+        WriteAtomic(DynamicMountsFile, JsonSerializer.Serialize(sidecar, JsonOpts), "mounts");
+    }
+
+    /// <summary>
+    /// Writes through a temp file so a crash partway cannot truncate what was
+    /// already saved. Config lives in Configuration/ rather than Media/, so it
+    /// keeps its own copy of the two lines rather than depending on the media
+    /// sidecar helper.
+    /// </summary>
+    private static void WriteAtomic(string file, string json, string label)
+    {
+        var tmp = file + ".tmp";
+        try
+        {
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, file, overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            // global:: — this class has a Logging property that shadows the namespace
+            global::J0kersMediaServer.Logging.Log.Error(label, $"could not save {Path.GetFileName(file)}: {ex.Message}");
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+        }
     }
 
     private void ApplyEnvironmentOverrides()

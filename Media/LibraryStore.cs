@@ -17,15 +17,7 @@ public sealed class LibraryStore
     public LibraryStore(string baseDirectory)
     {
         _file = Path.Combine(baseDirectory, "library.json");
-        if (!File.Exists(_file)) return;
-        try
-        {
-            _folders = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(_file)) ?? new List<string>();
-        }
-        catch (Exception ex)
-        {
-            Log.Warn("library", $"could not load library.json: {ex.Message}");
-        }
+        _folders = JsonSidecar.Load<List<string>>(_file, "library") ?? new List<string>();
     }
 
     public IReadOnlyList<string> All
@@ -56,7 +48,5 @@ public sealed class LibraryStore
         }
     }
 
-    private void Persist() =>
-        File.WriteAllText(_file, JsonSerializer.Serialize(_folders,
-            new JsonSerializerOptions { WriteIndented = true }));
+    private void Persist() => JsonSidecar.Save(_file, _folders, "library");
 }
