@@ -1704,11 +1704,6 @@ async function playHls(url, startAt) {
 
   loadSubtitles(url);
 
-  if (video.canPlayType("application/vnd.apple.mpegurl")) {
-    video.src = url;
-    video.play().catch(() => {});
-    return;
-  }
   if (!window.Hls) {
     msg.textContent = "loading player…";
     // hls.js is embedded in the server; CDN is only a fallback
@@ -1727,13 +1722,32 @@ async function playHls(url, startAt) {
   if (window.Hls && Hls.isSupported()) {
     // startPosition is the setting that actually pins where playback begins;
     // startLoad() alone still lets hls.js choose its own start point
-    window._hls = new Hls(target === null ? {} : { startPosition: target });
+    const opts = {};
+    if (target !== null) opts.startPosition = target;
+    if (isChannel) {
+      // hls.js keeps every played-out second by default, which on a channel
+      // left running all evening is a lot of memory for footage nobody is
+      // going back to. Half an hour is a generous DVR and a bound.
+      opts.backBufferLength = 1800;
+    }
+    window._hls = new Hls(opts);
     window._hls.loadSource(url);
     window._hls.attachMedia(video);
     video.play().catch(() => {});
-  } else {
-    msg.textContent = "hls.js failed to load — open the URL in VLC instead.";
+    return;
   }
+  // Native HLS is the fallback rather than the first choice. A browser that
+  // claims it can play HLS itself was taking this path and giving a live
+  // stream duration=Infinity with no seekable range at all — the control bar
+  // drew, but there was nothing to drag. Through hls.js the same stream
+  // reports a real window that grows as it plays, so the scrubber works.
+  // Kept for iOS, where there is no MSE and this is the only way to play.
+  if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    video.src = url;
+    video.play().catch(() => {});
+    return;
+  }
+  msg.textContent = "hls.js failed to load — open the URL in VLC instead.";
 }
 
 /* ---- power button: start/stop the streaming services ---- */
