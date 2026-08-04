@@ -1702,16 +1702,32 @@ function stopHlsVideo() {
   $("hlsmsg").textContent = "";
 }
 
-/* ---- player controls: seek, speed, quality ---- */
+/* ---- player controls: seek, speed, quality ----
+   The position playHls still intends to enforce once playback begins, or
+   null once the viewer has picked a spot themselves. See playHls: the
+   correction that keeps a live-looking transcode from starting at its edge
+   must never override a deliberate seek. */
+let pendingStart = null;
+
+/* Anything the viewer does to choose a position. A player's own jump to the
+   live edge never comes with a click or a keypress, which is what makes
+   this a usable signal of intent. */
+function viewerTookControl() { pendingStart = null; }
+
 $("pc-back").addEventListener("click", () => {
+  viewerTookControl();
   const v = $("hlsvideo");
   v.currentTime = Math.max(0, v.currentTime - 10);
 });
 $("pc-fwd").addEventListener("click", () => {
+  viewerTookControl();
   const v = $("hlsvideo");
   if (isFinite(v.duration)) v.currentTime = Math.min(v.duration, v.currentTime + 10);
   else v.currentTime += 10;
 });
+// the native control bar: scrubbing, arrow keys, tapping the timeline
+["pointerdown", "keydown"].forEach(ev =>
+  $("hlsvideo").addEventListener(ev, viewerTookControl));
 $("pc-speed").addEventListener("change", () => {
   $("hlsvideo").playbackRate = parseFloat($("pc-speed").value) || 1;
   localStorage.setItem("j0kers-speed", $("pc-speed").value);
@@ -1747,13 +1763,26 @@ async function playHls(url, startAt) {
     video.playbackRate = parseFloat($("pc-speed").value) || 1;
   });
   // An in-progress transcode has no ENDLIST, so the player treats it as live
-  // and seeks to the edge after loading. Pull it to `target` once, after any
-  // such seek. A single guard (not two) avoids racing the resume position.
+  // and seeks to the edge after loading. Pull it back to `target` once, after
+  // any such seek.
+  //
+  // It has to yield to the viewer, though. A big film starts playing seconds
+  // after it is clicked, and anyone who skips ahead in the meantime used to
+  // be dragged back to the start the moment the first `playing` landed —
+  // which reads as "the 10s button restarted the film", since tapping it a
+  // few times is what puts you in that window. The correction cannot tell a
+  // player's own jump from a deliberate seek, so any sign of the viewer
+  // choosing a position cancels it. hls.js is given startPosition regardless,
+  // which handles the same thing properly on that path.
+  pendingStart = target;
   if (target !== null) {
-    const enforce = () => { if (Math.abs(video.currentTime - target) > 2) { try { video.currentTime = target; } catch {} } };
     video.addEventListener("playing", function once3() {
       video.removeEventListener("playing", once3);
-      enforce();
+      if (pendingStart === null) return;               // the viewer moved; leave them there
+      if (Math.abs(video.currentTime - pendingStart) > 2) {
+        try { video.currentTime = pendingStart; } catch {}
+      }
+      pendingStart = null;
     });
   }
 
