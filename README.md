@@ -137,7 +137,11 @@ set `ffmpeg.path`), the dashboard becomes a full media center:
   counts; videos and pictures render as thumbnail tiles (ffmpeg frame
   grabs, cached under the media root) with icon fallbacks. Movies and
   music transcode to HLS on the fly and play inline; pictures open in a
-  lightbox viewer.
+  lightbox viewer. **🔄 Refresh** re-reads the open folder from disk —
+  files added, removed or replaced since you opened it. Listings are read
+  per request rather than cached, so this is a real rescan; it also forces
+  poster frames to be re-fetched, which a replaced file otherwise wouldn't
+  get, since the browser caches those for a day under an unchanged URL.
 - **Codecs** — transcode output codecs are configurable:
   `ffmpeg.videoCodec` (h264 default, h265/hevc, vp9, av1, mpeg2, mpeg4,
   `copy`, or any raw ffmpeg encoder name) and `ffmpeg.audioCodec` (aac

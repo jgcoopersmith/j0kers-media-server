@@ -521,6 +521,7 @@
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Media library</span>
       <button id="lib-playall" style="display:none">▶ Play folder</button>
       <button id="lib-save" class="edit-only" style="display:none">☆ Save playlist</button>
+      <button id="lib-refresh" onclick="rescanLibrary()" title="Re-read this folder from disk — picks up files added, removed or replaced since it was opened">🔄 Refresh</button>
       <button onclick="pinMediaViaPicker()" class="edit-only">⭐ Pin media</button>
       <button onclick="addLibraryRoot()" class="edit-only">➕ Add folder</button></h2>
     <div id="favorites" style="margin-bottom:6px"></div>
@@ -2078,8 +2079,40 @@ async function removeLibraryRoot(folder) {
 /* ---- library browsing: grouped sections with thumbnails ---- */
 /* Same-origin, so the session cookie rides along on its own — putting a
    long-lived key in an <img> URL would only leak it into history and logs. */
+/* Bumped by an explicit Refresh. Poster frames are served with a day's
+   cache, so a file replaced at the same path keeps showing the old frame in
+   the browser even though the server regenerates it — its cache key carries
+   the file's size and timestamp. Changing the URL is what makes the browser
+   ask again. */
+let thumbVersion = 0;
+
 function thumbUrl(path) {
-  return "/api/thumb?path=" + encodeURIComponent(path);
+  return "/api/thumb?path=" + encodeURIComponent(path)
+    + (thumbVersion ? "&v=" + thumbVersion : "");
+}
+
+/* Re-reads what is on screen from disk: new files appear, deleted ones go,
+   replaced ones get a fresh poster. Nothing is cached server-side — the
+   listing is read per request — so this is a genuine rescan rather than a
+   redraw of what the page already had. */
+async function rescanLibrary() {
+  const btn = $("lib-refresh");
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Rescanning…";
+  thumbVersion = Date.now();
+  try {
+    // the chips first: a root may have been added or removed elsewhere
+    await refreshLibraryRoots(true);
+    refreshFavorites(true);
+    refreshPlaylists(true);
+    if (currentLibPath) await loadLibrary(currentLibPath);
+  } catch (e) {
+    $("lib-path").textContent = "rescan failed: " + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
 }
 
 async function loadLibrary(path) {
