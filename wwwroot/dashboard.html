@@ -718,11 +718,28 @@ const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
  * builds say localhost, and pasted into VLC on a phone that resolves to the
  * phone itself. So a copied link falls back to an address the server
  * actually answers on: the default route where one is known.
+ *
+ * That fallback is a guess, and on a machine with more than one network it
+ * is often the wrong one — the default route is where this PC reaches the
+ * internet, not necessarily the network a phone is on. Nothing here can
+ * know the other device's network, so where there is a choice the page
+ * shows it (see interfaceLinks) rather than deciding silently, and
+ * shareHost() names whatever this picked so the button isn't a mystery.
  */
-function shareUrl(pathAndQuery) {
-  if (!LOOPBACK.has(location.hostname)) return mediaUrl(pathAndQuery);
+function shareHost() {
+  if (!LOOPBACK.has(location.hostname)) return location.hostname;
   const routable = hlsAddresses.find(a => a.primary) || hlsAddresses[0];
-  return mediaUrlOn(routable ? routable.address : location.hostname, pathAndQuery);
+  return routable ? routable.address : location.hostname;
+}
+
+function shareUrl(pathAndQuery) { return mediaUrlOn(shareHost(), pathAndQuery); }
+
+/** "(10.0.0.191)", plus a nudge to the per-network buttons when there are more. */
+function shareHostNote() {
+  const host = shareHost();
+  return hlsAddresses.length > 1
+    ? " — uses " + host + ". On another network, use the 🎬 / ⧉ buttons beside that address instead."
+    : " — uses " + host + ".";
 }
 
 /* Addresses the media port answers on, from /api/status. More than one
@@ -1485,11 +1502,13 @@ function interfaceLinks(streamName) {
           + (here ? " · the network you're on" : "");
         return '<a href="' + esc(url) + '" target="_blank" rel="noopener"'
           + (here ? ' class="here"' : '') + ' title="' + esc(tip) + '">' + esc(label) + '</a>'
-          + '<button data-act="copy" data-arg="' + esc(url) + '" title="Copy the browser link for this network">⧉</button>'
+          + '<button data-act="copy" data-arg="' + esc(url)
+          + '" title="' + esc("Copy the browser link on " + i.address) + '">⧉ page</button>'
           // VLC and friends need the playlist itself; the page above is HTML
           // and a player handed it has nothing to play
           + '<button data-act="copy" data-arg="' + esc(mediaUrlOn(i.address, raw))
-          + '" title="Copy the stream URL for VLC and other players">🎬</button>';
+          + '" title="' + esc("Copy the stream URL for VLC and other players on " + i.address)
+          + '">🎬 VLC</button>';
       }).join("")
     + "</div>";
 }
@@ -1568,11 +1587,11 @@ function renderHls() {
       // both copies go out through shareUrl, so a dashboard opened on
       // localhost still hands out something another device can reach
       + '<button data-act="copy" data-arg="' + esc(shareUrl("/watch/" + encodeURIComponent(s.name)))
-      + '" title="Copy a link that plays in any browser">Copy</button>'
+      + '" title="' + esc("Copy a link that plays in any browser" + shareHostNote()) + '">Copy</button>'
       // the watch link is an HTML page; a player given that has nothing to
       // play, so the playlist itself gets its own button
       + '<button data-act="copy" data-arg="' + esc(shareUrl(s.playlist))
-      + '" title="Copy the stream URL for VLC and other players">Copy for VLC</button>'
+      + '" title="' + esc("Copy the stream URL for VLC and other players" + shareHostNote()) + '">Copy for VLC</button>'
       + '<button class="danger" title="Delete this stream\'s playlist and segments" data-act="hls-remove" data-arg="' + esc(s.name) + '">✕</button></div>';
   }
 

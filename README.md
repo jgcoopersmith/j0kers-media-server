@@ -75,6 +75,16 @@ Copied links also avoid `localhost`: browsing the dashboard on the machine
 itself would otherwise put `localhost` in every link, which on a phone means
 the phone. A copied link falls back to the server's default-route address.
 
+**On a machine with more than one network, use the per-network buttons.**
+The default route is where *this PC* reaches the internet — not necessarily
+the network the phone is on, and nothing here can know the other device's
+network. A PC on both Ethernet `10.0.0.x` and Wi-Fi `192.168.8.x` hands out
+the Ethernet address by default, and a phone on the Wi-Fi cannot route to
+it: the link works on the PC and fails on the phone. The per-network row
+lists every address with its own **⧉ page** and **🎬 VLC** buttons — pick the
+one matching the network the other device is on. The main buttons' tooltips
+name the address they contain, so it is never a guess.
+
 The **Transcodes** tile counts the conversions running and how far each has
 got, read from ffmpeg's own `-progress` stream against the source duration.
 The bar tracks the least-advanced job, since that's the one that decides
