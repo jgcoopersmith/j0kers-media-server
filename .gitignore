@@ -24,6 +24,10 @@ publish/
 # it's whichever playlists this install trusts
 /config/providers.json
 /providers.json
+# this install's UPnP identity — sharing one would make two servers the same
+# device to anything browsing the network
+/config/discovery-id
+/discovery-id
 # accounts: password hashes and key digests — never commit these
 /config/users.json
 /users.json
