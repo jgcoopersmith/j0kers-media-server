@@ -1687,10 +1687,20 @@ async function loadSubtitles(url) {
   currentStreamName = streamNameFromUrl(url);
   if (!currentStreamName) return;
 
-  const base = url.slice(0, url.lastIndexOf("/"));
+  // Keep the signed token. Slicing the playlist URL at its last "/" also
+  // cuts off "?exp=…&sig=…", which left this asking the media port for a
+  // track list with nothing to authorize it — and the media port is a
+  // different origin from the dashboard, so fetch withholds the cookie that
+  // would otherwise have covered it. The request was refused every time, and
+  // the only sign was an "unauthorized … subs.json" line in the log while
+  // the film itself played normally.
+  const q = url.indexOf("?");
+  const pathOnly = q === -1 ? url : url.slice(0, q);
+  const query = q === -1 ? "" : url.slice(q);
+  const base = pathOnly.slice(0, pathOnly.lastIndexOf("/"));
   let data;
   try {
-    const r = await fetch(base + "/subs.json");
+    const r = await fetch(base + "/subs.json" + query);
     if (!r.ok) return;
     data = await r.json();
   } catch { return; }
