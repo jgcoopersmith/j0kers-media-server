@@ -95,6 +95,13 @@ public sealed partial class ControlApi : IDisposable
     public Func<bool, bool>? SetTrayMode { get; set; }
 
     /// <summary>
+    /// Network announcement, set by Program. Held here so the dashboard can
+    /// switch it on and off, and so /description.xml — which whatever found
+    /// us over SSDP fetches next — can be served.
+    /// </summary>
+    public Discovery.DiscoveryService? Discovery { get; set; }
+
+    /// <summary>
     /// Cancels a pending shutdown-on-close. Called for dashboard polls and
     /// for any HLS request, so navigating to a watch page — or a phone
     /// streaming a movie — keeps the server alive.
@@ -286,6 +293,22 @@ public sealed partial class ControlApi : IDisposable
                 res.Headers["Cache-Control"] = "no-store";
                 res.ContentLength64 = page.Length;
                 res.OutputStream.Write(page);
+                return;
+            }
+
+            // The UPnP description, fetched by whatever found us over SSDP.
+            // Unauthenticated of necessity: the fetcher is a device browser,
+            // not an account holder, and it has to read this to list us at
+            // all. It carries only what the announcement already broadcast —
+            // a name, a port and an id — and grants nothing.
+            if (method == "GET" && path == "/description.xml" && Discovery is not null)
+            {
+                var host = ctx.Request.Url?.Host ?? BoundHost;
+                var xml = Encoding.UTF8.GetBytes(Discovery.DescriptionXml(host));
+                res.StatusCode = 200;
+                res.ContentType = "text/xml; charset=utf-8";
+                res.ContentLength64 = xml.Length;
+                res.OutputStream.Write(xml);
                 return;
             }
 
@@ -585,6 +608,10 @@ public sealed partial class ControlApi : IDisposable
                     linkLifetimeHours = _serverConfig.Hls.LinkLifetimeHours,
                     // the tray lives in the Windows notification area
                     traySupported = OperatingSystem.IsWindows(),
+                    // network announcement, and the name it publishes, so the
+                    // dialog can show the .local address the switch produces
+                    discoveryEnabled = _serverConfig.Discovery.Enabled,
+                    discoveryHostName = Discovery?.HostName ?? _serverConfig.Discovery.HostName,
                     // what "0.0.0.0" actually resolves to right now, so the
                     // Config dialog can show which addresses are reachable
                     interfaces = Services.NetworkInfo.Active().Select(i => new
@@ -1059,6 +1086,26 @@ public sealed partial class ControlApi : IDisposable
                 return;
             }
             s.MinimizeToTray = trayNow; // persist what actually happened
+        }
+
+        // Network announcement toggles live too. Applied before the config is
+        // saved so a responder that can't take its ports — another Bonjour
+        // stack already holding them — is reported rather than persisted as
+        // on while nothing is actually announcing.
+        if (s.DiscoveryEnabled is bool wantAnnounce && Discovery is not null
+            && wantAnnounce != _serverConfig.Discovery.Enabled)
+        {
+            _serverConfig.Discovery.Enabled = wantAnnounce;
+            try
+            {
+                Discovery.Restart();
+            }
+            catch (Exception ex)
+            {
+                _serverConfig.Discovery.Enabled = !wantAnnounce;   // put it back
+                WriteJson(res, 500, new { error = "could not change network announcement: " + ex.Message });
+                return;
+            }
         }
 
         _serverConfig.UpdateSettings(s);

@@ -655,6 +655,13 @@
     </label>
     <div id="cfg-tray-note" style="color:var(--muted);font-size:11.5px;margin-top:3px"></div>
 
+    <label style="margin-top:12px">Network announcement</label>
+    <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;color:var(--ink);font-size:13px;cursor:pointer;margin:0">
+      <input id="cfg-announce" type="checkbox" style="width:16px;height:16px">
+      <span>Announce this server on the local network</span>
+    </label>
+    <div id="cfg-announce-note" style="color:var(--muted);font-size:11.5px;margin-top:3px"></div>
+
     <div id="cfg-msg" style="color:var(--critical);font-size:12px;margin-top:10px;min-height:16px"></div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
       <button onclick="closeConfig()">Cancel</button>
@@ -1831,6 +1838,13 @@ async function openConfig() {
     $("cfg-tray-note").textContent = s.traySupported
       ? "Applies immediately. The icon starts in the taskbar's hidden ^ area — drag it out to pin it."
       : "Windows only — on macOS/Linux run the server under systemd, launchd, or nohup.";
+
+    $("cfg-announce").checked = !!s.discoveryEnabled;
+    $("cfg-announce-note").textContent = s.discoveryHostName
+      ? "Applies immediately. Lets devices find the server by name (http://"
+        + s.discoveryHostName + ".local:" + s.controlPort + "/) instead of by IP, and lists it "
+        + "in Windows' Network folder. Announcing says only that the server exists — signing in is still required."
+      : "Applies immediately. Announcing says only that the server exists — signing in is still required.";
   } catch (e) {
     $("cfg-msg").textContent = "could not load settings: " + e.message;
   }
@@ -1899,6 +1913,7 @@ async function saveConfig() {
     controlPort: parseInt($("cfg-ctl").value, 10),
     linkLifetimeHours: parseInt($("cfg-link").value, 10),
     minimizeToTray: $("cfg-tray").checked,
+    discoveryEnabled: $("cfg-announce").checked,
   };
   // only send fields the user actually changed, so untouched settings
   // keep following server.json instead of being frozen in settings.json

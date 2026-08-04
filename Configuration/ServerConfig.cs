@@ -37,6 +37,9 @@ public sealed class ServerConfig
     [JsonPropertyName("logging")]
     public LoggingConfig Logging { get; set; } = new();
 
+    [JsonPropertyName("discovery")]
+    public DiscoveryConfig Discovery { get; set; } = new();
+
     /// <summary>
     /// Run in the background with a notification-area (tray) icon and the
     /// console hidden — double-click the icon for the dashboard, right-click
@@ -117,6 +120,7 @@ public sealed class ServerConfig
         [JsonPropertyName("authToken")] public string? AuthToken { get; set; }
         [JsonPropertyName("minimizeToTray")] public bool? MinimizeToTray { get; set; }
         [JsonPropertyName("linkLifetimeHours")] public int? LinkLifetimeHours { get; set; }
+        [JsonPropertyName("discoveryEnabled")] public bool? DiscoveryEnabled { get; set; }
     }
 
     private SettingsOverrides _persistedSettings = new();
@@ -152,6 +156,7 @@ public sealed class ServerConfig
         if (s.AuthToken is not null) _persistedSettings.AuthToken = s.AuthToken;
         if (s.MinimizeToTray is not null) _persistedSettings.MinimizeToTray = s.MinimizeToTray;
         if (s.LinkLifetimeHours is not null) _persistedSettings.LinkLifetimeHours = s.LinkLifetimeHours;
+        if (s.DiscoveryEnabled is not null) _persistedSettings.DiscoveryEnabled = s.DiscoveryEnabled;
         WriteAtomic(SettingsFile, JsonSerializer.Serialize(_persistedSettings, JsonOpts), "settings");
     }
 
@@ -171,6 +176,7 @@ public sealed class ServerConfig
         if (!string.IsNullOrWhiteSpace(s.AuthToken)) Control.AuthToken = s.AuthToken;
         if (s.MinimizeToTray is bool tray) MinimizeToTray = tray;
         if (s.LinkLifetimeHours is int hours) Hls.LinkLifetimeHours = hours;
+        if (s.DiscoveryEnabled is bool announce) Discovery.Enabled = announce;
     }
 
     private sealed class MountSidecar
@@ -483,4 +489,30 @@ public sealed class LoggingConfig
     /// <summary>trace | debug | info | warn | error</summary>
     [JsonPropertyName("level")] public string Level { get; set; } = "info";
     [JsonPropertyName("logRtspMessages")] public bool LogRtspMessages { get; set; } = false;
+}
+
+/// <summary>
+/// Announcing the server on the local network, so devices can find it
+/// without being told an IP. Off would mean typing an address on every
+/// device; on means it appears by name.
+/// </summary>
+public sealed class DiscoveryConfig
+{
+    /// <summary>Master switch — false silences all three mechanisms.</summary>
+    [JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
+
+    /// <summary>The .local name: "j0kers" publishes j0kers.local.</summary>
+    [JsonPropertyName("hostName")] public string HostName { get; set; } = "j0kers";
+
+    /// <summary>Bonjour/Avahi-style naming and browsing (RFC 6762/6763).</summary>
+    [JsonPropertyName("mdns")] public bool Mdns { get; set; } = true;
+
+    /// <summary>UPnP discovery — Windows Explorer's Network folder, smart TVs.</summary>
+    [JsonPropertyName("ssdp")] public bool Ssdp { get; set; } = true;
+
+    /// <summary>One-packet JSON answer for scripts and apps.</summary>
+    [JsonPropertyName("udpProbe")] public bool UdpProbe { get; set; } = true;
+
+    /// <summary>Jellyfin uses 7359; sharing it means their clients find this too.</summary>
+    [JsonPropertyName("udpProbePort")] public int UdpProbePort { get; set; } = 7359;
 }

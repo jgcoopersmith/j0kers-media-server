@@ -87,5 +87,18 @@
   "logging": {
     "level": "info",                  // trace | debug | info | warn | error
     "logRtspMessages": false
+  },
+
+  // Announcing the server on the local network, so devices find it by name
+  // instead of being told an IP. The ⚙ Config dialog toggles "enabled";
+  // the rest are here. Announcing advertises only that the server exists —
+  // the dashboard still requires an account.
+  "discovery": {
+    "enabled": true,
+    "hostName": "j0kers",             // publishes j0kers.local
+    "mdns": true,                     // .local names + browsing (phones, Macs, Linux)
+    "ssdp": true,                     // Windows' Network folder, smart TVs
+    "udpProbe": true,                 // one-packet JSON answer, for scripts
+    "udpProbePort": 7359              // the port Jellyfin uses, so its clients find this too
   }
 }

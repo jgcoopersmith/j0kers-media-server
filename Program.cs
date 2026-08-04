@@ -163,6 +163,7 @@ if (config.Mounts.Count == 0)
 
 J0kersMediaServer.Services.ServiceController? services = null;
 ControlApi? control = null;
+J0kersMediaServer.Discovery.DiscoveryService? discovery = null;
 J0kersMediaServer.Media.FfmpegManager? ffmpeg = null;
 J0kersMediaServer.Services.TrayIcon? tray = null;
 var shutdown = new TaskCompletionSource();
@@ -225,6 +226,14 @@ try
             requestShutdown: () => shutdown.TrySetResult());
         services.OnHlsActivity = control.NoteActivity; // streaming keeps the server up
         control.Start();
+
+        // Announce on the network. Started after the control API is listening,
+        // since everything advertised points at it — a client that found us
+        // first and knocked immediately would otherwise get nothing.
+        discovery = new J0kersMediaServer.Discovery.DiscoveryService(
+            config.Discovery, config.ServerName, config.Control.Port, baseDirectory);
+        discovery.Start();
+        control.Discovery = discovery;
 
         var urls = DashboardUrls(control.BoundHost, config.Control.Port);
         var dashboardUrl = urls[0];
@@ -302,7 +311,7 @@ try
 catch (Exception ex)
 {
     Console.Error.WriteLine($"Startup failed: {ex.Message}");
-    tray?.Dispose(); services?.Dispose(); control?.Dispose(); ffmpeg?.Dispose();
+    tray?.Dispose(); discovery?.Dispose(); services?.Dispose(); control?.Dispose(); ffmpeg?.Dispose();
     return 1;
 }
 
@@ -379,6 +388,9 @@ using var watchdog = new Timer(_ =>
     Environment.Exit(0);
 }, null, dueTime: 5000, period: Timeout.Infinite);
 
+// before the services it advertises, so listeners get the goodbye while
+// there is still something to say goodbye about
+discovery?.Dispose();
 services?.Dispose();
 control?.Dispose();
 ffmpeg?.Dispose();

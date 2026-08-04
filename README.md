@@ -10,6 +10,7 @@ A highly configurable media server in C# / .NET 10 implementing:
 | Streaming operations knobs (caching headers, CORS, port ranges, session caps, DSCP) | RFC 9317 |
 | HTTP/JSON control API (session audit + forced teardown) | RFC 5167 (requirements) |
 | Announcement service `rtsp://host/annc?play=clip` | RFC 4240 (adapted to RTSP) |
+| Network discovery — `.local` naming and service browsing | RFC 6762 (mDNS), RFC 6763 (DNS-SD) |
 
 See [docs/RFC-COMPLIANCE.md](docs/RFC-COMPLIANCE.md) for exactly what is and
 isn't covered from each document.
@@ -462,6 +463,38 @@ serves a sign-in page, and the dashboard itself is never sent to a browser
 that hasn't signed in. Signing out, or a session that expires mid-visit,
 returns there.
 
+### Finding the server without typing an IP
+
+The server announces itself on the local network, so devices can find it by
+name. Three mechanisms, because no single one reaches everything:
+
+| Mechanism | Port | Who uses it |
+|---|---|---|
+| **mDNS / DNS-SD** (RFC 6762/6763) | udp/5353 | `.local` names on phones, Macs, Linux |
+| **SSDP** (UPnP discovery) | udp/1900 | Windows Explorer's Network folder, smart TVs |
+| **UDP probe** | udp/7359 | scripts and apps; the port Jellyfin uses |
+
+The one that matters day to day is mDNS: **http://j0kers.local:9090/**
+works from any device on the network, and it resolves to *whichever address
+that device can reach*. A PC on both Ethernet `10.0.0.x` and Wi-Fi
+`192.168.8.x` answers a phone with the Wi-Fi address and a wired machine
+with the wired one — the thing a copied link can't do, since a link has to
+name one address up front. It also survives a DHCP lease changing.
+
+Announcing says only that the server exists and where. It grants nothing:
+the dashboard still wants an account and media still wants a signed link.
+
+Turn it off with the **Announce this server on the local network** switch in
+the ⚙ Config dialog — applies immediately, and the responders send their
+goodbyes and release the ports, so listeners drop the entry rather than
+keeping a dead one. `discovery` in the config has the finer switches
+(`mdns`, `ssdp`, `udpProbe`) and sets the published name via `hostName`.
+
+Other software on the machine may already hold these ports — Bonjour ships
+with a lot of things, and Windows runs its own SSDP service. That is
+expected and shared rather than exclusive; a mechanism that cannot start
+logs it and the others carry on.
+
 ### If a settings file gets damaged
 
 The sidecars next to your config — `favorites.json`, `library.json`,
@@ -580,6 +613,7 @@ Control/        HTTP/JSON control API
 Media/          G.711 sources (tone generator, file looper), ffmpeg engine
                 (JsonSidecar: atomic writes + quarantine for the .json stores)
 Media/Providers/ free-TV lineups (Pluto TV, M3U playlists) + the HLS proxy
+Discovery/      mDNS/DNS-SD, SSDP and UDP-probe responders (announcing on the LAN)
 wwwroot/        dashboard single-page app + sign-in page (embedded into the binary)
 config/         sample/default server.json (runtime media/ and clips/ live here too)
 ```
