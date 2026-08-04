@@ -1584,14 +1584,13 @@ function renderHls() {
       + interfaceLinks(s.name) + '</div>'
       + '<button data-act="hls-play" data-arg="' + esc(url) + '">▶ Play</button>'
       + '<button data-act="hls-stop" data-arg="' + esc(url) + '">■ Stop</button>'
-      // both copies go out through shareUrl, so a dashboard opened on
-      // localhost still hands out something another device can reach
-      + '<button data-act="copy" data-arg="' + esc(shareUrl("/watch/" + encodeURIComponent(s.name)))
-      + '" title="' + esc("Copy a link that plays in any browser" + shareHostNote()) + '">Copy</button>'
-      // the watch link is an HTML page; a player given that has nothing to
-      // play, so the playlist itself gets its own button
+      // Copy gives the playlist itself — what VLC, Kodi and every other
+      // player wants, and what this button always gave until the watch
+      // pages briefly took it over. The watch page hasn't lost its way in:
+      // the stream's title links to it, and the per-network row carries a
+      // page button per address. shareUrl keeps localhost out of it.
       + '<button data-act="copy" data-arg="' + esc(shareUrl(s.playlist))
-      + '" title="' + esc("Copy the stream URL for VLC and other players" + shareHostNote()) + '">Copy for VLC</button>'
+      + '" title="' + esc("Copy the stream URL for VLC and other players — for a browser page, click the stream's name" + shareHostNote()) + '">Copy</button>'
       + '<button class="danger" title="Delete this stream\'s playlist and segments" data-act="hls-remove" data-arg="' + esc(s.name) + '">✕</button></div>';
   }
 

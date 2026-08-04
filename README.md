@@ -63,13 +63,13 @@ on. A link built from whichever address you happen to have the dashboard
 open on is the wrong one to hand to a phone on a different subnet. With a
 single address nothing extra is drawn.
 
-**Two kinds of link, and they are not interchangeable.** *Copy* (⧉ per
-network) gives the `/watch/` page: HTML, with a player in it, for opening in
-a browser. *Copy for VLC* (🎬 per network) gives the `.m3u8` playlist
-itself, which is what VLC, Kodi and anything else that plays a URL actually
-want — hand one of those the watch page and it has a web page and nothing to
-play. Both carry the signed token, and the playlist's segments carry it too,
-so a player follows them without needing an account.
+**Copy gives the stream URL** — the `.m3u8` playlist itself, which is what
+VLC, Kodi and anything else that plays a URL want. For a browser, click the
+stream's *name* instead: that opens the `/watch/` page, an HTML player that
+works on phones. (The per-network row offers both per address: **🎬 VLC**
+for the stream, **⧉ page** for the browser page.) Every link carries the
+signed token, and the playlist's segments carry it too, so a player follows
+them without needing an account.
 
 Copied links also avoid `localhost`: browsing the dashboard on the machine
 itself would otherwise put `localhost` in every link, which on a phone means
