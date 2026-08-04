@@ -321,6 +321,16 @@
   .tiles-grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px;
   }
+  /* info view: fewer, larger posters, with the size/duration under the name */
+  .tiles-grid.tiles-lg { grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; }
+  .tile-det {
+    padding: 0 7px 6px; color: var(--muted); font-size: 11px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* condensed view: no posters, and the rows pulled in so a long folder fits */
+  .lib-condensed .pick-row { padding: 2px 6px; font-size: 12.5px; }
+  .lib-condensed .pick-row .icon { width: 16px; }
+  .lib-condensed .lib-h { margin: 10px 0 3px; }
   .tile-item {
     cursor: pointer; border: 1px solid var(--border); border-radius: 10px;
     overflow: hidden; background: var(--surface-2);
@@ -521,6 +531,12 @@
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Media library</span>
       <button id="lib-playall" style="display:none">▶ Play folder</button>
       <button id="lib-save" class="edit-only" style="display:none">☆ Save playlist</button>
+      <select id="library-view" onchange="setCardView('library', this.value, renderLibrary)" class="am-in" style="width:auto"
+              title="How much to show for each item">
+        <option value="condensed">Condensed</option>
+        <option value="default">Default</option>
+        <option value="info">Info</option>
+      </select>
       <button onclick="pinMediaViaPicker()" class="edit-only">⭐ Pin media</button>
       <button onclick="addLibraryRoot()" class="edit-only">➕ Add folder</button></h2>
     <div id="favorites" style="margin-bottom:6px"></div>
@@ -1134,6 +1150,7 @@ async function tick() {
     viewsBooted = true;
     loadCardView("hls");
     loadCardView("mounts");
+    loadCardView("library");
   }
 
   // both kinds of viewing count: RTSP sessions and people watching over HLS
@@ -2005,7 +2022,9 @@ async function removeLibraryRoot(folder) {
   await fetch("/api/library?folder=" + encodeURIComponent(folder), { method: "DELETE", headers: headers() });
   if (currentLibPath && currentLibPath.toLowerCase().startsWith(folder.toLowerCase())) {
     currentLibPath = null;
+    lastLibrary = null;   // nothing on screen to re-render into another view
     $("lib-path").textContent = "";
+    $("library").className = "";
     $("library").innerHTML = '<div class="empty">Add a library folder — movies, music, and pictures inside it become playable here.</div>';
     $("lib-playall").style.display = "none";
     $("lib-save").style.display = "none";
@@ -2023,6 +2042,8 @@ function thumbUrl(path) {
 async function loadLibrary(path) {
   const box = $("library");
   $("lib-path").textContent = path;
+  // the density class belongs to a rendered listing, not to these states
+  box.className = "";
   box.innerHTML = '<div class="empty">loading…</div>';
   let data;
   try {
@@ -2038,6 +2059,20 @@ async function loadLibrary(path) {
   $("lib-playall").style.display = ffmpegOk ? "" : "none";
   $("lib-save").style.display = "";
   refreshLibraryRoots(true); // update active chip highlight
+
+  lastLibrary = data;
+  renderLibrary();
+}
+
+/* The folder currently on screen. Kept so switching view redraws it instead
+   of asking the server to list the folder again. */
+let lastLibrary = null;
+
+function renderLibrary() {
+  const data = lastLibrary;
+  if (!data) return;
+  const box = $("library");
+  const view = cardView("library");
 
   const join = n => joinPath(data.path, n);
   const folders = [], videos = [], music = [], pictures = [];
@@ -2065,9 +2100,16 @@ async function loadLibrary(path) {
     }
   }
 
+  // Condensed drops the thumbnails and lists everything as tight rows: a
+  // folder of two hundred films is quicker to read as names than as a wall
+  // of posters. Info keeps the posters and grows them, and puts the detail
+  // (size, duration) on every kind rather than only the ones in rows.
   if (videos.length) {
     h += '<div class="lib-h">🎬 Videos <span class="cnt">' + videos.length + '</span></div>';
-    h += tileGrid(videos, join, "lib-play", "🎬");
+    h += view === "condensed"
+      ? videos.map(e => libRow("🎬", e.title || e.name, "", ffmpegOk ? "lib-play" : "",
+                               join(e.name), pinButton(join(e.name)), e.name)).join("")
+      : tileGrid(videos, join, "lib-play", "🎬", view);
   }
 
   if (music.length) {
@@ -2075,20 +2117,26 @@ async function loadLibrary(path) {
     for (const e of music) {
       const full = join(e.name);
       // show the readable title; the path still comes from e.name
-      h += libRow("🎵", e.title || e.name, e.detail, ffmpegOk ? "lib-play" : "", full, pinButton(full), e.name);
+      h += libRow("🎵", e.title || e.name, view === "condensed" ? "" : e.detail,
+                  ffmpegOk ? "lib-play" : "", full, pinButton(full), e.name);
     }
   }
 
   if (pictures.length) {
     h += '<div class="lib-h">🖼 Pictures <span class="cnt">' + pictures.length + '</span></div>';
-    h += tileGrid(pictures, join, "lib-img", "🖼");
+    h += view === "condensed"
+      ? pictures.map(e => libRow("🖼", e.title || e.name, "", "lib-img",
+                                 join(e.name), pinButton(join(e.name)), e.name)).join("")
+      : tileGrid(pictures, join, "lib-img", "🖼", view);
   }
 
+  box.className = view === "condensed" ? "lib-condensed" : "";
   box.innerHTML = h || '<div class="empty">nothing playable in this folder</div>';
 }
 
-function tileGrid(entries, join, act, fallbackIcon) {
-  let h = '<div class="tiles-grid">';
+function tileGrid(entries, join, act, fallbackIcon, view) {
+  // info widens the columns, so the same folder draws fewer, larger posters
+  let h = '<div class="tiles-grid' + (view === "info" ? " tiles-lg" : "") + '">';
   for (const e of entries) {
     const full = join(e.name);
     const clickable = act === "lib-img" || ffmpegOk;
@@ -2102,6 +2150,8 @@ function tileGrid(entries, join, act, fallbackIcon) {
       + '<div class="tile-fallback">' + fallbackIcon + '</div>'
       // readable title on the tile; the real file name is the tooltip above
       + '<div class="tile-name">' + esc(e.title || e.name) + '</div>'
+      + (view === "info" && e.detail
+          ? '<div class="tile-det">' + esc(e.detail) + '</div>' : "")
       + '</div>';
   }
   return h + '</div>';
