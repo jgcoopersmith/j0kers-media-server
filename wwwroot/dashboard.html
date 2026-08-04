@@ -174,8 +174,30 @@
   .copied { color: var(--good) !important; }
   button.playing { color: var(--good); border-color: color-mix(in srgb, var(--good) 45%, transparent); }
   #hlsplayer { display: none; margin-top: 12px; }
-  #hlsvideo { width: 100%; border-radius: 10px; background: #000; max-height: 320px; }
+  #hlsvideo { width: 100%; border-radius: 10px; background: #000; max-height: 320px; display: block; }
   #hlsmsg { color: var(--muted); font-size: 12px; margin-top: 6px; }
+
+  /* The title, over the picture. Wrapper is only here to position it —
+     the video keeps its own sizing. */
+  #videowrap { position: relative; }
+  #vtitle {
+    position: absolute; top: 0; left: 0; right: 0;
+    padding: 8px 12px 20px;
+    border-radius: 10px 10px 0 0;
+    /* a scrim rather than a solid bar: readable over a bright frame without
+       boxing off the top of the picture */
+    background: linear-gradient(to bottom, rgba(0,0,0,.72), rgba(0,0,0,0));
+    color: #fff; font-size: 13px; font-weight: 500;
+    text-shadow: 0 1px 3px rgba(0,0,0,.9);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    pointer-events: none;             /* never eats a click meant for the video */
+    opacity: 1; transition: opacity .35s ease;
+  }
+  /* Fades out of the way once you have read it, and comes back whenever the
+     pointer is over the player — the same manners as the control bar. */
+  #vtitle.faded { opacity: 0; }
+  #videowrap:hover #vtitle { opacity: 1; }
+  #vtitle:empty, #vtitle.hidden { display: none; }
 
 
   details summary { cursor: pointer; color: var(--ink-2); font-size: 13px; user-select: none; }
@@ -458,7 +480,10 @@
         <button id="np-next" title="Next">⏭</button>
         <button id="np-stop" class="danger" title="Stop playlist">✕</button>
       </div>
-      <video id="hlsvideo" controls playsinline crossorigin="anonymous"></video>
+      <div id="videowrap">
+        <video id="hlsvideo" controls playsinline crossorigin="anonymous"></video>
+        <div id="vtitle"><span id="vtitle-text"></span></div>
+      </div>
       <div id="pctl" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px">
         <button id="pc-back" title="Back 10 seconds">⏪ 10s</button>
         <button id="pc-fwd" title="Forward 10 seconds">10s ⏩</button>
@@ -1679,6 +1704,38 @@ function streamNameFromUrl(url) {
   return m ? decodeURIComponent(m[1]) : null;
 }
 
+/* The name to show over the picture.
+   Prefers the readable title the server already derived for the stream list
+   over the stream id, which is a slug with a hash on the end. A free-TV
+   channel has no stream of its own — it is proxied — so its name comes from
+   the lineup instead. */
+function playerTitleFor(url) {
+  const tv = url.match(/[?&]id=([^&]+)/);
+  if (url.startsWith("/api/tv/") && tv) {
+    const id = decodeURIComponent(tv[1]);
+    const ch = (typeof lineup !== "undefined" ? lineup : []).find(c => c.id === id);
+    if (ch) return ch.name;
+  }
+  const name = streamNameFromUrl(url);
+  if (!name) return "";
+  const known = lastHls && lastHls.streams
+    ? lastHls.streams.find(s => s.name === name) : null;
+  return (known && known.title) || name;
+}
+
+/* Shows it, then lets it fade so it isn't sitting on the picture all film.
+   Hovering the player brings it back — that part is CSS. */
+let vtitleTimer = 0;
+function setPlayerTitle(text) {
+  const box = $("vtitle"), span = $("vtitle-text");
+  span.textContent = text || "";
+  box.classList.toggle("hidden", !text);
+  if (!text) return;
+  box.classList.remove("faded");
+  clearTimeout(vtitleTimer);
+  vtitleTimer = setTimeout(() => box.classList.add("faded"), 3500);
+}
+
 async function loadSubtitles(url) {
   const video = $("hlsvideo"), sel = $("pc-subs");
   // clear previous tracks
@@ -1793,6 +1850,7 @@ function bringPlayerIntoView() {
    player is doing (single stream or playlist) and hides it. */
 function stopHlsVideo() {
   stopQueue(); // tears down the video element and any playlist state
+  setPlayerTitle("");   // nothing playing, nothing to name
   currentMediaPath = null;
   $("hlsplayer").style.display = "none";
   $("hlsmsg").textContent = "";
@@ -1882,6 +1940,7 @@ async function playHls(url, startAt) {
   const box = $("hlsplayer"), video = $("hlsvideo"), msg = $("hlsmsg");
   box.style.display = "block";
   bringPlayerIntoView();
+  setPlayerTitle(playerTitleFor(url));
   msg.textContent = "";
   if (window._hls) { window._hls.destroy(); window._hls = null; }
 
