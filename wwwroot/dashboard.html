@@ -1946,9 +1946,9 @@ $("cfg-overlay").addEventListener("mousedown", e => { if (e.target.id === "cfg-o
 /* ---- media library: browse a folder; play movies/music, view pictures ---- */
 const EXT = {
   video: ["mp4","m4v","mkv","avi","mov","webm","ts","m2ts","mts","wmv","flv","f4v","mpg","mpeg","mpe","m1v","m2v",
-          "vob","3gp","3g2","ogv","mxf","asf","rm","rmvb","divx","dv","y4m","hevc","h264","264","265","av1","ivf","nut"],
+          "vob","3gp","3g2","ogv","ogm","mxf","asf","rm","rmvb","divx","dv","y4m","hevc","h264","264","265","av1","ivf","nut"],
   audio: ["mp3","flac","wav","m4a","m4b","ogg","oga","aac","wma","opus","aiff","aif","ape","wv","mka","ac3","eac3",
-          "dts","amr","au","caf","mp2","mpa","ra","spx","tta","mid","ulaw","alaw","gsm"],
+          "dts","amr","au","caf","mp2","mpa","mpga","ra","spx","tta","mid","ulaw","alaw","gsm"],
   image: ["jpg","jpeg","png","gif","webp","bmp","svg","avif","tif","tiff","ico","heic","heif","jxl","tga","dds","exr"],
 };
 function mediaKind(name) {
@@ -2149,17 +2149,11 @@ async function loadLibrary(path) {
   if (data.parent && !isRoot)
     h += libRow("⬆️", ".. up", "", "lib-open", data.parent);
 
-  if (folders.length) {
-    h += '<div class="lib-h">📁 Folders <span class="cnt">' + folders.length + '</span></div>';
-    for (const e of folders) {
-      const full = join(e.name);
-      let extra = pinButton(full);
-      if (ffmpegOk)
-        extra = '<button data-act="lib-playfolder" data-arg="' + esc(full) + '" title="Play everything in this folder">▶ All</button>' + extra;
-      h += libRow("📁", e.name, "", "lib-open", full, extra);
-    }
-  }
-
+  // Playable things first, folders after. A folder holding a handful of
+  // films beside seventy-odd subfolders used to put those films below about
+  // two thousand pixels of folder rows, which reads as "it didn't pick up
+  // the files" — they were listed, just past the fold. Folders are
+  // navigation; in a media library the media is the point.
   if (videos.length) {
     h += '<div class="lib-h">🎬 Videos <span class="cnt">' + videos.length + '</span></div>';
     h += tileGrid(videos, join, "lib-play", "🎬");
@@ -2177,6 +2171,17 @@ async function loadLibrary(path) {
   if (pictures.length) {
     h += '<div class="lib-h">🖼 Pictures <span class="cnt">' + pictures.length + '</span></div>';
     h += tileGrid(pictures, join, "lib-img", "🖼");
+  }
+
+  if (folders.length) {
+    h += '<div class="lib-h">📁 Folders <span class="cnt">' + folders.length + '</span></div>';
+    for (const e of folders) {
+      const full = join(e.name);
+      let extra = pinButton(full);
+      if (ffmpegOk)
+        extra = '<button data-act="lib-playfolder" data-arg="' + esc(full) + '" title="Play everything in this folder">▶ All</button>' + extra;
+      h += libRow("📁", e.name, "", "lib-open", full, extra);
+    }
   }
 
   box.innerHTML = h || '<div class="empty">nothing playable in this folder</div>';
