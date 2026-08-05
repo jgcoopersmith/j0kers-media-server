@@ -589,18 +589,51 @@ public sealed class HlsServer : IDisposable
             <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🃏</text></svg>">
             <style>
               body { margin: 0; background: #0d0d0d; color: #c3c2b7; font-family: system-ui, sans-serif; }
-              video { display: block; width: 100vw; max-height: 88vh; background: #000; }
+              video { display: block; width: 100vw; max-height: 82vh; background: #000; }
               .bar { padding: 10px 14px; font-size: 13px; }
               a { color: #3987e5; }
+              .ctl { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 14px 0; }
+              .ctl button {
+                font: inherit; font-size: 12.5px; border-radius: 8px; cursor: pointer;
+                border: 1px solid rgba(255,255,255,0.10); background: #222221; color: #c3c2b7;
+                padding: 4px 10px;
+              }
+              .ctl button:hover { border-color: #898781; color: #fff; }
+              .ctl label { color: #898781; font-size: 12px; }
+              .ctl select {
+                font: inherit; font-size: 12.5px; padding: 3px 6px; border-radius: 8px;
+                border: 1px solid rgba(255,255,255,0.10); background: #222221; color: #c3c2b7;
+              }
+              .ctl select:disabled { opacity: 0.5; cursor: not-allowed; }
+              #msg { color: #898781; font-size: 12px; padding: 4px 14px 0; min-height: 1em; }
             </style>
             <script src="/hls.min.js"></script>
             </head>
             <body>
             <video id="v" controls playsinline></video>
+            <div class="ctl">
+              <button id="back" title="Back 10 seconds (← arrow)">⏪ 10s</button>
+              <button id="fwd" title="Forward 10 seconds (→ arrow)">10s ⏩</button>
+              <span style="flex:1"></span>
+              <label>Speed
+                <select id="speed">
+                  <option value="0.5">0.5×</option><option value="0.75">0.75×</option>
+                  <option value="1" selected>1×</option><option value="1.25">1.25×</option>
+                  <option value="1.5">1.5×</option><option value="2">2×</option>
+                </select></label>
+              <label>Quality
+                <select id="quality" disabled title="Reading the stream…">
+                  <option value="-1">Auto</option>
+                </select></label>
+            </div>
+            <div id="msg"></div>
             <div class="bar">🃏 {{pretty}} · <a href="{{src}}">raw playlist</a> (for VLC etc.)
               <div style="color:#6f6e69;font-size:11px;margin-top:2px">{{name}}</div></div>
             <script>
               const v = document.getElementById("v");
+              const speed = document.getElementById("speed");
+              const quality = document.getElementById("quality");
+              const msg = document.getElementById("msg");
               const src = "{{src}}";
               const stream = {{nameJs}};
               // recordings start at the beginning; live channels join the edge
@@ -611,17 +644,41 @@ public sealed class HlsServer : IDisposable
                   if (v.currentTime > 2) { try { v.currentTime = 0; } catch (e) {} }
                 });
               }
+              let hls = null;
               if (window.Hls && Hls.isSupported()) {
                 // startPosition is what actually pins the initial seek;
                 // startLoad(0) alone still lets hls.js pick its own spot
-                const h = new Hls(live ? {} : { startPosition: 0 });
-                h.loadSource(src);
-                h.attachMedia(v);
+                hls = new Hls(live ? {} : { startPosition: 0 });
+                hls.loadSource(src);
+                hls.attachMedia(v);
+                // A stream's renditions are only known once the playlist is
+                // read. Most streams here are a single rendition, so the
+                // control stays disabled rather than offering a choice of one.
+                hls.on(Hls.Events.MANIFEST_PARSED, function () {
+                  const levels = hls.levels || [];
+                  if (levels.length < 2) {
+                    quality.title = "This stream has one quality only";
+                    return;
+                  }
+                  levels.forEach(function (l, i) {
+                    const o = document.createElement("option");
+                    o.value = String(i);
+                    o.textContent = l.height ? l.height + "p" : Math.round((l.bitrate || 0) / 1000) + "k";
+                    quality.appendChild(o);
+                  });
+                  quality.disabled = false;
+                  quality.title = "Pick a rendition, or let the player choose";
+                });
               } else if (v.canPlayType("application/vnd.apple.mpegurl")) {
                 v.src = src;
+                // native HLS picks its own rendition and offers no way in
+                quality.title = "This browser chooses the quality itself";
               } else {
                 document.querySelector(".bar").textContent = "This browser cannot play HLS — open the raw playlist in VLC.";
               }
+              quality.addEventListener("change", function () {
+                if (hls) hls.currentLevel = parseInt(quality.value, 10);
+              });
               // subtitles: same-origin tracks, exposed through the native CC menu
               fetch("/" + encodeURIComponent(stream) + "/subs.json" + {{tokenJs}})
                 .then(r => r.ok ? r.json() : null)
@@ -637,6 +694,69 @@ public sealed class HlsServer : IDisposable
                   }
                 })
                 .catch(() => {});
+              // ---- seek, speed, keyboard ----
+              // How far playback can actually go right now. duration is the
+              // wrong bound while a file is still being converted: the playlist
+              // grows as ffmpeg writes it, so duration reports only what exists
+              // so far. Seeking past that lands on a fragment nobody has
+              // written, which the player answers by restarting the stream.
+              function playableEnd() {
+                if (v.seekable && v.seekable.length) return v.seekable.end(v.seekable.length - 1);
+                return isFinite(v.duration) ? v.duration : Infinity;
+              }
+              let msgTimer = 0;
+              function say(text) {
+                msg.textContent = text;
+                clearTimeout(msgTimer);
+                msgTimer = setTimeout(function () { if (msg.textContent === text) msg.textContent = ""; }, 4000);
+              }
+              function seekBy(delta) {
+                if (delta < 0) { v.currentTime = Math.max(0, v.currentTime + delta); return; }
+                // stay a moment short of the edge: landing exactly on it is
+                // what a player reads as "past the end", and on a growing
+                // playlist the edge moves anyway
+                const limit = playableEnd() - 0.5;
+                const wanted = v.currentTime + delta;
+                if (!isFinite(limit)) { v.currentTime = wanted; return; }
+                if (wanted > limit) {
+                  if (v.currentTime >= limit - 1) {
+                    say("That's as far as this stream goes right now.");
+                    return;
+                  }
+                  v.currentTime = limit;
+                  return;
+                }
+                v.currentTime = wanted;
+              }
+              document.getElementById("back").addEventListener("click", function () { seekBy(-10); });
+              document.getElementById("fwd").addEventListener("click", function () { seekBy(10); });
+
+              speed.addEventListener("change", function () {
+                v.playbackRate = parseFloat(speed.value) || 1;
+                try { localStorage.setItem("j0kers-speed", speed.value); } catch (e) {}
+              });
+              try {
+                const saved = localStorage.getItem("j0kers-speed");
+                if (saved) speed.value = saved;
+              } catch (e) {}
+              // a rate set before the stream loads does not survive it
+              v.addEventListener("loadedmetadata", function () {
+                v.playbackRate = parseFloat(speed.value) || 1;
+              });
+
+              // Arrow keys jump. The browser only does this while its own
+              // control bar has focus, which after clicking anywhere on the
+              // page it does not — so the whole document listens instead.
+              // The dropdowns keep their arrows: that is how a select is
+              // operated from the keyboard.
+              document.addEventListener("keydown", function (e) {
+                if (e.altKey || e.ctrlKey || e.metaKey) return;
+                const t = e.target;
+                if (t && (t.tagName === "SELECT" || t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+                if (e.key === "ArrowRight") { seekBy(10); e.preventDefault(); }
+                else if (e.key === "ArrowLeft") { seekBy(-10); e.preventDefault(); }
+              });
+
               v.play().catch(() => {}); // autoplay may need a tap; controls are visible
             </script>
             </body>
