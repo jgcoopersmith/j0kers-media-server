@@ -455,12 +455,12 @@
   </div>
 
   <div class="card">
-    <h2>Sessions</h2>
+    <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Sessions</span>
+      <select id="recent" class="am-in" style="width:auto;max-width:60%" onchange="playFromHistory(this)"
+              title="The last ten things you watched — pick one to play it again">
+        <option value="">Recently watched…</option>
+      </select></h2>
     <div id="sessions"></div>
-    <details id="recent" style="margin-top:10px">
-      <summary onclick="setTimeout(refreshHistory,0)">Recently watched <span id="recent-count" style="color:var(--muted)"></span></summary>
-      <div id="recent-list" style="margin-top:8px"></div>
-    </details>
   </div>
 
   <div class="card">
@@ -1283,8 +1283,7 @@ async function tick() {
   if (transcodingNow.length || hadTranscodes) renderHls();
   hadTranscodes = transcodingNow.length > 0;
   renderSessions(sessions.sessions);
-  // only worth fetching while the panel is open
-  if ($("recent").open) refreshHistory();
+  refreshHistory();
   refreshMounts();   // cheap, cached-ish
   refreshHls();
   await refreshChannels(false);
@@ -1412,38 +1411,36 @@ async function refreshHistory(force) {
 }
 
 function renderHistory() {
-  $("recent-count").textContent = lastHistory.length ? "· " + lastHistory.length : "";
-  if (!lastHistory.length) {
-    $("recent-list").innerHTML = '<div style="color:var(--muted);font-size:12px">'
-      + "Nothing yet — what you play from the library shows up here.</div>";
-    return;
-  }
-  let h = "<table>";
+  const sel = $("recent");
+  // don't yank the list out from under an open dropdown
+  if (document.activeElement === sel) return;
+
+  let h = '<option value="">Recently watched'
+        + (lastHistory.length ? " · " + lastHistory.length : "") + "…</option>";
   for (const e of lastHistory) {
+    // everything in this list has been watched — the one still on screen is
+    // the exception, so mark that rather than repeating "viewed" ten times
     const playing = currentMediaPath && e.path === currentMediaPath;
-    // everything in this list has been watched; the one still on screen is
-    // the exception, so mark that rather than repeating "viewed" eleven times
-    const mark = playing
-      ? '<span class="state playing"><span class="dot"></span>playing now</span>'
-      : '<span style="color:var(--muted)" title="You have already watched this">✓ viewed'
-        + (e.plays > 1 ? " ×" + e.plays : "") + "</span>";
-    h += '<tr><td style="width:1px">' + mark + "</td>"
-      + '<td><span title="' + esc(e.path) + '">' + esc(e.name) + "</span>"
-      + (e.missing ? '<div style="color:var(--muted);font-size:11px">no longer on disk</div>' : "")
-      + "</td>"
-      + '<td style="color:var(--muted)">' + esc(fmtSince(e.startedUtc)) + " ago</td>"
-      + '<td style="text-align:right;white-space:nowrap">'
-      + (e.missing || e.kind !== "file" ? ""
-          : '<button data-act="history-play" data-arg="' + esc(e.path) + '">Play again</button> ')
-      + '<button data-act="history-forget" data-arg="' + esc(e.path) + '" title="Forget this">✕</button>'
-      + "</td></tr>";
+    const mark = playing ? "▶" : "✓";
+    const note = e.missing ? " · gone from disk"
+      : e.plays > 1 ? " · watched ×" + e.plays
+      : "";
+    h += '<option value="' + esc(e.path) + '"' + (e.missing || e.kind !== "file" ? " disabled" : "") + ">"
+      + esc(mark + " " + e.name + " · " + fmtSince(e.startedUtc) + " ago" + note) + "</option>";
   }
-  $("recent-list").innerHTML = h + "</table>";
+  if (!lastHistory.length)
+    h += '<option value="" disabled>nothing watched yet</option>';
+  sel.innerHTML = h;
 }
 
-async function historyForget(path) {
-  await fetch("/api/history?path=" + encodeURIComponent(path), { method: "DELETE", headers: headers() });
-  await refreshHistory(true);
+/* Picking a title plays it again; the box drops back to its label so it
+   reads as an action rather than a setting that is now "on". */
+function playFromHistory(sel) {
+  const path = sel.value;
+  sel.selectedIndex = 0;
+  if (!path) return;
+  clearQueueState();
+  prepareMedia(path);
 }
 
 async function killSession(id) {
@@ -2835,8 +2832,8 @@ async function playMedia(path, startAt) {
     });
     const data = await r.json();
     if (!r.ok) { alert(data.error || "playback failed"); return; }
-    // the server has just recorded this play — don't show a stale list
-    if ($("recent").open) refreshHistory(true);
+    // the server has just recorded this play — don't leave a stale list
+    refreshHistory(true);
 
     const url = mediaUrl(data.playlist);
     $("hlsmsg") && ($("hlsmsg").textContent = "preparing " + name + "…");
@@ -3394,8 +3391,6 @@ document.addEventListener("click", e => {
     case "hls-play":    clearQueueState(); playHls(arg); break;
     case "hls-stop":    stopHlsVideo(); break;
     case "session-kill": killSession(arg); break;
-    case "history-play":   clearQueueState(); prepareMedia(arg); break;
-    case "history-forget": historyForget(arg); break;
     case "hls-remove":  removeHlsStream(arg); break;
     case "ch-restart":  restartChannel(arg); break;
     case "ch-start":    startChannel(arg); break;

@@ -354,11 +354,12 @@ Config dialog) → `J0KERS_*` env vars → command-line flags.
 ### Recently watched
 
 The Sessions card only ever shows what is *live*, so a **Recently watched**
-dropdown sits under it with the last ten things you played, each marked
-`✓ viewed` (the one still on screen says `playing now` instead), with a
-**Play again** button and an ✕ to forget it. Watching something a second
-time moves it back to the top and counts the plays rather than repeating
-the title.
+dropdown sits at the top of it with the last ten things you played. Pick one
+to play it again. Each is marked `✓` for already watched — the one still on
+screen is `▶` instead — with how long ago it was and how many times it has
+been played. Titles whose file has since been deleted are shown as
+`gone from disk` and can't be picked. Watching something a second time moves
+it back to the top and counts the plays rather than repeating the title.
 
 History is per account — you see yours and nobody else's — and is kept in
 a `history.json` sidecar next to the config, fifty entries deep.
