@@ -1382,7 +1382,10 @@ function renderSessions(list) {
         + (s.user ? " · " + esc(s.user) : "") + "</div>"
       : esc(s.client) + '<div style="color:var(--muted);font-size:11px">' + esc(s.id) + "</div>";
     h += '<tr><td><span class="badge' + (hls ? "" : " admin") + '">' + (hls ? "hls" : "rtsp") + "</span></td>"
-      + '<td class="mono">' + esc(s.mount) + '</td>'
+      // the readable title, with the stream id a hover away for when the
+      // exact directory is what you actually need
+      + '<td' + (hls ? '' : ' class="mono"') + ' title="' + esc(s.mount) + '">'
+      + esc(s.title || s.mount) + '</td>'
       + '<td><span class="state ' + esc(s.state) + '"><span class="dot"></span>' + esc(s.state) + '</span></td>'
       + '<td class="mono">' + who + '</td>'
       + '<td>' + esc(fmtSince(s.startedUtc)) + '</td>'
@@ -1417,15 +1420,19 @@ function renderHistory() {
 
   let h = '<option value="">Recently watched'
         + (lastHistory.length ? " · " + lastHistory.length : "") + "…</option>";
-  for (const e of lastHistory) {
+  for (const i in lastHistory) {
+    const e = lastHistory[i];
     // everything in this list has been watched — the one still on screen is
     // the exception, so mark that rather than repeating "viewed" ten times
-    const playing = currentMediaPath && e.path === currentMediaPath;
+    const playing = (currentMediaPath && e.path === currentMediaPath)
+      || (e.stream && currentHlsStream === e.stream);
     const mark = playing ? "▶" : "✓";
-    const note = e.missing ? " · gone from disk"
+    const note = e.missing ? " · no longer available"
       : e.plays > 1 ? " · watched ×" + e.plays
       : "";
-    h += '<option value="' + esc(e.path) + '"' + (e.missing || e.kind !== "file" ? " disabled" : "") + ">"
+    // the index, not the path: an entry may be replayable by file or by
+    // stream, and the row itself knows which
+    h += '<option value="' + i + '"' + (e.missing ? " disabled" : "") + ">"
       + esc(mark + " " + e.name + " · " + fmtSince(e.startedUtc) + " ago" + note) + "</option>";
   }
   if (!lastHistory.length)
@@ -1436,11 +1443,14 @@ function renderHistory() {
 /* Picking a title plays it again; the box drops back to its label so it
    reads as an action rather than a setting that is now "on". */
 function playFromHistory(sel) {
-  const path = sel.value;
+  const e = lastHistory[sel.value];
   sel.selectedIndex = 0;
-  if (!path) return;
+  if (!e) return;
   clearQueueState();
-  prepareMedia(path);
+  // a file goes back through the transcoder (quality may have changed since);
+  // a stream that was never a local file is simply played again
+  if (e.kind === "file" && e.path) prepareMedia(e.path);
+  else if (e.stream) playHls("/" + encodeURIComponent(e.stream) + "/index.m3u8");
 }
 
 async function killSession(id) {
@@ -2032,8 +2042,11 @@ if (localStorage.getItem("j0kers-res")) $("pc-res").value = localStorage.getItem
 /* ---- inline HLS player: native where supported, else hls.js from CDN ----
    startAt: 0 = beginning (recordings), null = live edge (channels), or a
    specific second to resume at (quality switch). */
+let currentHlsStream = null; // what the player is on, for the history marks
+
 async function playHls(url, startAt) {
   const box = $("hlsplayer"), video = $("hlsvideo"), msg = $("hlsmsg");
+  currentHlsStream = streamNameFromUrl(url);
   box.style.display = "block";
   bringPlayerIntoView();
   setPlayerTitle(playerTitleFor(url));

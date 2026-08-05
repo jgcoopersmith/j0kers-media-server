@@ -50,6 +50,14 @@ public sealed class HlsViewers
     private readonly ConcurrentDictionary<string, Entry> _entries = new(StringComparer.Ordinal);
 
     /// <summary>
+    /// Raised the moment a new viewing begins — the first request of a
+    /// client/stream/player combination. This is the only place that knows a
+    /// session *started*, as opposed to that one exists: everything else here
+    /// is a running count. (stream, user)
+    /// </summary>
+    public event Action<string, string>? ViewingStarted;
+
+    /// <summary>
     /// Records a request against a viewing. <paramref name="bytes"/> is the
     /// response body size — 0 for a playlist, the segment size for media.
     /// </summary>
@@ -62,19 +70,32 @@ public sealed class HlsViewers
         // deliberately count as one
         var id = Id(client, stream, player);
 
-        var entry = _entries.GetOrAdd(id, _ => new Entry
+        var started = false;
+        var entry = _entries.GetOrAdd(id, _ =>
         {
-            Stream = stream,
-            Client = client,
-            Player = player,
-            StartedUtc = DateTime.UtcNow,
-            LastSeenUtc = DateTime.UtcNow,
+            started = true;
+            return new Entry
+            {
+                Stream = stream,
+                Client = client,
+                Player = player,
+                StartedUtc = DateTime.UtcNow,
+                LastSeenUtc = DateTime.UtcNow,
+            };
         });
 
         entry.LastSeenUtc = DateTime.UtcNow;
         if (!string.IsNullOrEmpty(user)) entry.User = user;
         Interlocked.Add(ref entry.Bytes, bytes);
         Interlocked.Increment(ref entry.Requests);
+
+        // after the entry is complete, and never inside GetOrAdd's factory —
+        // that can run more than once under contention
+        if (started)
+        {
+            try { ViewingStarted?.Invoke(stream, user ?? ""); }
+            catch { /* a subscriber must never break the media path */ }
+        }
 
         MaybePrune();
     }

@@ -75,6 +75,13 @@ public sealed partial class ControlApi : IDisposable
         _library = new Media.LibraryStore(baseDirectory);
         _favorites = new Media.FavoritesStore(baseDirectory);
         _history = new Media.WatchHistory(baseDirectory);
+        // The moment somebody starts watching anything — dashboard, phone,
+        // VLC, a shared link — it goes in the history. Preparing a file
+        // through /api/play records it too, but most playback never touches
+        // that endpoint: an existing stream is simply requested.
+        _services.Viewers.ViewingStarted += (stream, user) =>
+            _history.Record(Media.StreamTitle.Prettify(stream), "", stream, "stream",
+                            user.Length > 0 ? user : "share link");
 
         _providerHttp = new HttpClient(new SocketsHttpHandler
         {
@@ -512,6 +519,8 @@ public sealed partial class ControlApi : IDisposable
                             protocol = "rtsp",
                             id = s.Id,
                             mount = s.MountPath,
+                            // an RTSP mount path is already the readable name
+                            title = s.MountPath,
                             state = s.State.ToString().ToLowerInvariant(),
                             client = s.ClientAddress,
                             player = "",
@@ -528,6 +537,9 @@ public sealed partial class ControlApi : IDisposable
                             protocol = "hls",
                             id = v.Id,
                             mount = v.Stream,
+                            // "vod-skyfall-2012-1080p-brrip-df019bf7" tells
+                            // you nothing at a glance; "Skyfall (2012)" does
+                            title = Media.StreamTitle.Prettify(v.Stream),
                             state = v.State,
                             client = v.Client,
                             player = v.Player,
@@ -654,11 +666,16 @@ public sealed partial class ControlApi : IDisposable
                     {
                         name = e.Name,
                         path = e.Path,
+                        stream = e.Stream,
                         kind = e.Kind,
                         plays = e.Plays,
                         startedUtc = e.StartedUtc,
-                        // gone from disk since — replaying it would only 404
-                        missing = e.Kind == "file" && !File.Exists(e.Path),
+                        // a file that has been deleted, or a stream that has
+                        // since been evicted from the cache: either way there
+                        // is nothing left to replay
+                        missing = e.Kind == "file"
+                            ? !File.Exists(e.Path)
+                            : !StreamExists(e.Stream),
                     }),
                 });
                 return;
@@ -1550,9 +1567,9 @@ public sealed partial class ControlApi : IDisposable
             }
             if (DenyUnshared(ctx, auth, file)) return;
             var (stream, ready) = _ffmpeg.StartVod(file, height);
-            // every library play funnels through here, so this is the one
-            // place that knows what was watched and by whom
-            _history.Record(Path.GetFileName(file), file, "file", auth.Name);
+            // this is the one place that knows the file behind a stream, so
+            // it is what makes the entry replayable from disk later
+            _history.Record(Media.StreamTitle.PrettifyFile(Path.GetFileName(file)), file, stream, "file", auth.Name);
             WriteJson(res, 200, new { stream, ready, playlist = $"/{stream}/index.m3u8" });
         }
         catch (FileNotFoundException)
@@ -2032,6 +2049,28 @@ public sealed partial class ControlApi : IDisposable
         catch (Exception ex)
         {
             WriteJson(res, 400, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Whether a stream still has a playlist under the media root. History
+    /// outlives the transcode cache, so an entry can name a stream that was
+    /// evicted weeks ago.
+    /// </summary>
+    private bool StreamExists(string stream)
+    {
+        if (string.IsNullOrWhiteSpace(stream) || stream.Contains("..")
+            || stream.Contains('/') || stream.Contains('\\')) return false;
+        try
+        {
+            var root = Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
+                ? _serverConfig.Hls.MediaRoot
+                : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
+            return File.Exists(Path.Combine(root, stream, "index.m3u8"));
+        }
+        catch
+        {
+            return false;
         }
     }
 
