@@ -1401,22 +1401,42 @@ function renderSessions(list) {
 
 /* ---- recently watched: the last ten, since the table above only ever
    shows what is live. Marked as viewed, and re-playable with a click. ---- */
-let historyLoaded = 0, lastHistory = [];
+let historyLoaded = 0, lastHistory = [], historySig = "";
 
 async function refreshHistory(force) {
-  if (!force && Date.now() - historyLoaded < 10000) return;
+  if (!force && Date.now() - historyLoaded < 4000) return;
+  historyLoaded = Date.now(); // stamp first: overlapping ticks shouldn't pile up
   try {
     const data = await api("/api/history?count=10");
-    historyLoaded = Date.now();
     lastHistory = data.history || [];
-  } catch { return; }
+  } catch {
+    historyLoaded = 0; // failed, so don't sit out the next tick as well
+    return;
+  }
   renderHistory();
+}
+
+/* Starting something is recorded server-side twice over: the file is
+   prepared now, and the viewing itself lands a moment later when the player
+   makes its first request. Ask again after that, or the list stays a step
+   behind whatever was just launched. */
+function noteWatched() {
+  refreshHistory(true);
+  setTimeout(() => refreshHistory(true), 2500);
+  setTimeout(() => refreshHistory(true), 7000);
 }
 
 function renderHistory() {
   const sel = $("recent");
-  // don't yank the list out from under an open dropdown
-  if (document.activeElement === sel) return;
+  // Rewriting the options drops any highlighted row, so only do it when
+  // something actually changed. (This used to skip the render whenever the
+  // box had focus — which meant that once it was clicked, it never updated
+  // again until the page was reloaded.)
+  // the rendered "ago" text, not the timestamp — it changes on its own
+  const sig = JSON.stringify(lastHistory.map(e =>
+    [e.name, fmtSince(e.startedUtc), e.plays, e.missing])) + "|" + currentMediaPath + "|" + currentHlsStream;
+  if (sig === historySig) return;
+  historySig = sig;
 
   let h = '<option value="">Recently watched'
         + (lastHistory.length ? " · " + lastHistory.length : "") + "…</option>";
@@ -2047,6 +2067,9 @@ let currentHlsStream = null; // what the player is on, for the history marks
 async function playHls(url, startAt) {
   const box = $("hlsplayer"), video = $("hlsvideo"), msg = $("hlsmsg");
   currentHlsStream = streamNameFromUrl(url);
+  // playing an existing stream never touches /api/play — this is the only
+  // notice the recently-watched list gets
+  noteWatched();
   box.style.display = "block";
   bringPlayerIntoView();
   setPlayerTitle(playerTitleFor(url));
@@ -2823,6 +2846,7 @@ async function prepareMedia(path) {
       renderHls();   // draw it now; refreshHls below only resolves later
     }
     refreshHls();
+    noteWatched();
     document.getElementById("hls").scrollIntoView({ behavior: "smooth", block: "center" });
   } catch (e) {
     alert("request failed: " + e.message);
@@ -2846,7 +2870,7 @@ async function playMedia(path, startAt) {
     const data = await r.json();
     if (!r.ok) { alert(data.error || "playback failed"); return; }
     // the server has just recorded this play — don't leave a stale list
-    refreshHistory(true);
+    noteWatched();
 
     const url = mediaUrl(data.playlist);
     $("hlsmsg") && ($("hlsmsg").textContent = "preparing " + name + "…");
