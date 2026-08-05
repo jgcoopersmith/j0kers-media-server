@@ -45,6 +45,7 @@ public sealed partial class ControlApi : IDisposable
     private readonly Media.PlaylistStore _playlists;
     private readonly Media.LibraryStore _library;
     private readonly Media.FavoritesStore _favorites;
+    private readonly Media.WatchHistory _history;
 
     /// <summary>
     /// Free ad-supported TV: the provider lineups and the proxy that makes
@@ -73,6 +74,7 @@ public sealed partial class ControlApi : IDisposable
         _playlists = new Media.PlaylistStore(baseDirectory);
         _library = new Media.LibraryStore(baseDirectory);
         _favorites = new Media.FavoritesStore(baseDirectory);
+        _history = new Media.WatchHistory(baseDirectory);
 
         _providerHttp = new HttpClient(new SocketsHttpHandler
         {
@@ -639,6 +641,34 @@ public sealed partial class ControlApi : IDisposable
             if (method == "POST" && path == "/api/settings")
             {
                 SaveSettings(ctx);
+                return;
+            }
+
+            // ---- what has been watched lately ----
+            if (method == "GET" && path == "/api/history")
+            {
+                var take = int.TryParse(ctx.Request.QueryString["count"], out var n) ? Math.Clamp(n, 1, 50) : 10;
+                WriteJson(res, 200, new
+                {
+                    history = _history.Recent(auth.Name, take).Select(e => new
+                    {
+                        name = e.Name,
+                        path = e.Path,
+                        kind = e.Kind,
+                        plays = e.Plays,
+                        startedUtc = e.StartedUtc,
+                        // gone from disk since — replaying it would only 404
+                        missing = e.Kind == "file" && !File.Exists(e.Path),
+                    }),
+                });
+                return;
+            }
+
+            if (method == "DELETE" && path == "/api/history")
+            {
+                // no path clears the caller's whole history
+                var target = ctx.Request.QueryString["path"] ?? "";
+                WriteJson(res, 200, new { removed = _history.Forget(auth.Name, target) });
                 return;
             }
 
@@ -1520,6 +1550,9 @@ public sealed partial class ControlApi : IDisposable
             }
             if (DenyUnshared(ctx, auth, file)) return;
             var (stream, ready) = _ffmpeg.StartVod(file, height);
+            // every library play funnels through here, so this is the one
+            // place that knows what was watched and by whom
+            _history.Record(Path.GetFileName(file), file, "file", auth.Name);
             WriteJson(res, 200, new { stream, ready, playlist = $"/{stream}/index.m3u8" });
         }
         catch (FileNotFoundException)

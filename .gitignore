@@ -23,6 +23,9 @@ publish/
 /library.json
 /config/favorites.json
 /favorites.json
+# what each account has watched — personal, and per-install
+/config/history.json
+/history.json
 # free-TV providers: written with a commented template on first run, then
 # it's whichever playlists this install trusts
 /config/providers.json

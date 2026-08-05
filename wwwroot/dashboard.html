@@ -457,6 +457,10 @@
   <div class="card">
     <h2>Sessions</h2>
     <div id="sessions"></div>
+    <details id="recent" style="margin-top:10px">
+      <summary onclick="setTimeout(refreshHistory,0)">Recently watched <span id="recent-count" style="color:var(--muted)"></span></summary>
+      <div id="recent-list" style="margin-top:8px"></div>
+    </details>
   </div>
 
   <div class="card">
@@ -1279,6 +1283,8 @@ async function tick() {
   if (transcodingNow.length || hadTranscodes) renderHls();
   hadTranscodes = transcodingNow.length > 0;
   renderSessions(sessions.sessions);
+  // only worth fetching while the panel is open
+  if ($("recent").open) refreshHistory();
   refreshMounts();   // cheap, cached-ish
   refreshHls();
   await refreshChannels(false);
@@ -1389,6 +1395,55 @@ function renderSessions(list) {
       + "</td></tr>";
   }
   $("sessions").innerHTML = h + '</table>';
+}
+
+/* ---- recently watched: the last ten, since the table above only ever
+   shows what is live. Marked as viewed, and re-playable with a click. ---- */
+let historyLoaded = 0, lastHistory = [];
+
+async function refreshHistory(force) {
+  if (!force && Date.now() - historyLoaded < 10000) return;
+  try {
+    const data = await api("/api/history?count=10");
+    historyLoaded = Date.now();
+    lastHistory = data.history || [];
+  } catch { return; }
+  renderHistory();
+}
+
+function renderHistory() {
+  $("recent-count").textContent = lastHistory.length ? "· " + lastHistory.length : "";
+  if (!lastHistory.length) {
+    $("recent-list").innerHTML = '<div style="color:var(--muted);font-size:12px">'
+      + "Nothing yet — what you play from the library shows up here.</div>";
+    return;
+  }
+  let h = "<table>";
+  for (const e of lastHistory) {
+    const playing = currentMediaPath && e.path === currentMediaPath;
+    // everything in this list has been watched; the one still on screen is
+    // the exception, so mark that rather than repeating "viewed" eleven times
+    const mark = playing
+      ? '<span class="state playing"><span class="dot"></span>playing now</span>'
+      : '<span style="color:var(--muted)" title="You have already watched this">✓ viewed'
+        + (e.plays > 1 ? " ×" + e.plays : "") + "</span>";
+    h += '<tr><td style="width:1px">' + mark + "</td>"
+      + '<td><span title="' + esc(e.path) + '">' + esc(e.name) + "</span>"
+      + (e.missing ? '<div style="color:var(--muted);font-size:11px">no longer on disk</div>' : "")
+      + "</td>"
+      + '<td style="color:var(--muted)">' + esc(fmtSince(e.startedUtc)) + " ago</td>"
+      + '<td style="text-align:right;white-space:nowrap">'
+      + (e.missing || e.kind !== "file" ? ""
+          : '<button data-act="history-play" data-arg="' + esc(e.path) + '">Play again</button> ')
+      + '<button data-act="history-forget" data-arg="' + esc(e.path) + '" title="Forget this">✕</button>'
+      + "</td></tr>";
+  }
+  $("recent-list").innerHTML = h + "</table>";
+}
+
+async function historyForget(path) {
+  await fetch("/api/history?path=" + encodeURIComponent(path), { method: "DELETE", headers: headers() });
+  await refreshHistory(true);
 }
 
 async function killSession(id) {
@@ -2780,6 +2835,8 @@ async function playMedia(path, startAt) {
     });
     const data = await r.json();
     if (!r.ok) { alert(data.error || "playback failed"); return; }
+    // the server has just recorded this play — don't show a stale list
+    if ($("recent").open) refreshHistory(true);
 
     const url = mediaUrl(data.playlist);
     $("hlsmsg") && ($("hlsmsg").textContent = "preparing " + name + "…");
@@ -3337,6 +3394,8 @@ document.addEventListener("click", e => {
     case "hls-play":    clearQueueState(); playHls(arg); break;
     case "hls-stop":    stopHlsVideo(); break;
     case "session-kill": killSession(arg); break;
+    case "history-play":   clearQueueState(); prepareMedia(arg); break;
+    case "history-forget": historyForget(arg); break;
     case "hls-remove":  removeHlsStream(arg); break;
     case "ch-restart":  restartChannel(arg); break;
     case "ch-start":    startChannel(arg); break;

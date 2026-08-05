@@ -351,6 +351,18 @@ dotnet run -- -h 0.0.0.0 -r 8554 -H 8080 -c 9090
 Precedence, lowest to highest: `server.json` → `settings.json` (dashboard
 Config dialog) → `J0KERS_*` env vars → command-line flags.
 
+### Recently watched
+
+The Sessions card only ever shows what is *live*, so a **Recently watched**
+dropdown sits under it with the last ten things you played, each marked
+`✓ viewed` (the one still on screen says `playing now` instead), with a
+**Play again** button and an ✕ to forget it. Watching something a second
+time moves it back to the top and counts the plays rather than repeating
+the title.
+
+History is per account — you see yours and nobody else's — and is kept in
+a `history.json` sidecar next to the config, fifty entries deep.
+
 ### Logging
 
 The server logs to the console and, unless you turn it off, to a rotating
@@ -419,6 +431,7 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `GET /api/config` | effective config (token redacted) |
 | `GET /api/mounts` | configured mounts + announcement URI |
 | `GET /api/sessions` | who is watching: RTSP sessions and HLS viewers |
+| `GET/DELETE /api/history` | the caller's last watched items (`?count=`, default 10); DELETE forgets one `?path=` or all of them |
 | `DELETE /api/sessions/{id}` | force-terminate a session |
 | `GET /api/preview?mount=/x` | live WAV audio of a mount (dashboard player) |
 | `GET /api/browse?path=C:\x` | drive / folder / file listing (dashboard picker; no `path` = drives) |
