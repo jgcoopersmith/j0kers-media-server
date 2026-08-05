@@ -153,6 +153,11 @@ var baseDirectory = File.Exists(configPath)
     ? Path.GetDirectoryName(Path.GetFullPath(configPath))!
     : Directory.GetCurrentDirectory();
 
+// the file sink comes up before anything else is logged, so a tray-mode
+// start (no console) still leaves a record of it
+Log.ConfigureFile(config.Logging.ToFile, config.Logging.ResolveDirectory(baseDirectory),
+                  config.Logging.RotateSizeMb, config.Logging.RotatePeriod, config.Logging.MaxFiles);
+
 Log.Info("main", $"{config.ServerName} starting (config: {(File.Exists(configPath) ? configPath : "built-in defaults")})");
 
 if (config.Mounts.Count == 0)
@@ -395,4 +400,5 @@ services?.Dispose();
 control?.Dispose();
 ffmpeg?.Dispose();
 Log.Info("main", "bye");
+Log.CloseFile();
 return 0;

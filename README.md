@@ -351,6 +351,31 @@ dotnet run -- -h 0.0.0.0 -r 8554 -H 8080 -c 9090
 Precedence, lowest to highest: `server.json` → `settings.json` (dashboard
 Config dialog) → `J0KERS_*` env vars → command-line flags.
 
+### Logging
+
+The server logs to the console and, unless you turn it off, to a rotating
+file — tray mode hides the console entirely, so without the file nothing
+survives the session. Everything below is in the dashboard's ⚙ Config
+dialog and applies immediately, no restart:
+
+```json
+"logging": {
+  "level": "info",          // trace | debug | info | warn | error
+  "toFile": true,
+  "directory": "logs",      // relative = next to server.json
+  "rotateSizeMb": 10,       // 0 = never rotate on size
+  "rotatePeriod": "daily",  // none | hourly | daily | weekly | monthly
+  "maxFiles": 7
+}
+```
+
+The current log is `<directory>/j0kers.log`. **Period and size combine** —
+whichever comes first starts a new file, and either can be switched off
+(`"none"` / `0`). Set both to off and you get one file that grows forever.
+Rotated files are named `j0kers-<date>-<time>.log`; the newest `maxFiles`
+of them are kept and older ones are deleted, so the log has a fixed
+ceiling of roughly `rotateSizeMb × (maxFiles + 1)`.
+
 ### RTSP mounts
 
 ```json

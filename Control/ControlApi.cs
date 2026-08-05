@@ -612,6 +612,17 @@ public sealed partial class ControlApi : IDisposable
                     // dialog can show the .local address the switch produces
                     discoveryEnabled = _serverConfig.Discovery.Enabled,
                     discoveryHostName = Discovery?.HostName ?? _serverConfig.Discovery.HostName,
+                    // logging: level, the rotating file sink, and what it has
+                    // written so far, so the dialog can show the real cost
+                    logLevel = _serverConfig.Logging.Level,
+                    logToFile = _serverConfig.Logging.ToFile,
+                    logDirectory = _serverConfig.Logging.Directory,
+                    logDirectoryResolved = _serverConfig.Logging.ResolveDirectory(_baseDirectory),
+                    logRotateSizeMb = _serverConfig.Logging.RotateSizeMb,
+                    logRotatePeriod = _serverConfig.Logging.RotatePeriod,
+                    logMaxFiles = _serverConfig.Logging.MaxFiles,
+                    logFiles = Log.Files(_serverConfig.Logging.ResolveDirectory(_baseDirectory))
+                        .Select(f => new { name = f.Name, bytes = f.Bytes, modified = f.Modified }),
                     // what "0.0.0.0" actually resolves to right now, so the
                     // Config dialog can show which addresses are reachable
                     interfaces = Services.NetworkInfo.Active().Select(i => new
@@ -1061,6 +1072,46 @@ public sealed partial class ControlApi : IDisposable
             return;
         }
 
+        // ---- logging ----
+        if (s.LogLevel is { Length: > 0 } lvl &&
+            lvl.ToLowerInvariant() is not ("trace" or "debug" or "info" or "warn" or "error"))
+        {
+            WriteJson(res, 400, new { error = "log level must be trace, debug, info, warn, or error" });
+            return;
+        }
+        if (s.LogRotatePeriod is { Length: > 0 } per &&
+            per.ToLowerInvariant() is not ("none" or "hourly" or "daily" or "weekly" or "monthly"))
+        {
+            WriteJson(res, 400, new { error = "rotation period must be none, hourly, daily, weekly, or monthly" });
+            return;
+        }
+        // 0 means "don't rotate on size"; 4 GB is past anything a text log
+        // should reach before the period or the file count catches it
+        if (s.LogRotateSizeMb is int mb and (< 0 or > 4096))
+        {
+            WriteJson(res, 400, new { error = "rotation size must be 0–4096 MB (0 = no size limit)" });
+            return;
+        }
+        if (s.LogMaxFiles is int keep and (< 0 or > 1000))
+        {
+            WriteJson(res, 400, new { error = "kept log files must be 0–1000" });
+            return;
+        }
+        // an unwritable directory has to fail here, not silently later
+        if (s.LogDirectory is { Length: > 0 })
+        {
+            try
+            {
+                var probe = new LoggingConfig { Directory = s.LogDirectory }.ResolveDirectory(_baseDirectory);
+                Directory.CreateDirectory(probe);
+            }
+            catch (Exception ex)
+            {
+                WriteJson(res, 400, new { error = "log directory unusable: " + ex.Message });
+                return;
+            }
+        }
+
         var ports = new[] { s.RtspPort ?? _serverConfig.Rtsp.Port, s.HlsPort ?? _serverConfig.Hls.Port, s.ControlPort ?? _serverConfig.Control.Port };
         if (ports.Distinct().Count() != 3)
         {
@@ -1109,6 +1160,20 @@ public sealed partial class ControlApi : IDisposable
         }
 
         _serverConfig.UpdateSettings(s);
+
+        // logging applies live — the level immediately, and the file sink
+        // reopened only when something about it actually changed, so saving
+        // an unrelated setting doesn't rotate the log out from under a viewer
+        Log.SetLevel(_serverConfig.Logging.Level);
+        if (s.LogToFile is not null || s.LogDirectory is not null || s.LogRotateSizeMb is not null
+            || s.LogRotatePeriod is not null || s.LogMaxFiles is not null)
+        {
+            Log.ConfigureFile(_serverConfig.Logging.ToFile,
+                              _serverConfig.Logging.ResolveDirectory(_baseDirectory),
+                              _serverConfig.Logging.RotateSizeMb,
+                              _serverConfig.Logging.RotatePeriod,
+                              _serverConfig.Logging.MaxFiles);
+        }
 
         // only a bind/port change needs the listeners rebuilt
         var needsRestart = s.BindAddress is not null || s.RtspPort is not null

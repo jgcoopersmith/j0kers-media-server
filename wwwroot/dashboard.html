@@ -685,6 +685,51 @@
     </label>
     <div id="cfg-announce-note" style="color:var(--muted);font-size:11.5px;margin-top:3px"></div>
 
+    <label style="margin-top:12px">Logging</label>
+    <div style="display:flex;gap:10px;align-items:flex-end">
+      <div style="flex:1">
+        <label>Detail</label>
+        <select id="cfg-loglevel" class="am-in">
+          <option value="error">Errors only</option>
+          <option value="warn">Warnings and errors</option>
+          <option value="info">Normal</option>
+          <option value="debug">Debug</option>
+          <option value="trace">Trace (everything)</option>
+        </select>
+      </div>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;color:var(--ink);font-size:13px;cursor:pointer;margin:8px 0 0">
+      <input id="cfg-logfile" type="checkbox" style="width:16px;height:16px">
+      <span>Keep a log file on disk</span>
+    </label>
+    <div id="cfg-log-box" style="margin-top:6px">
+      <label>Folder</label>
+      <input id="cfg-logdir" class="am-in" placeholder="logs">
+      <div style="color:var(--muted);font-size:11.5px;margin-top:3px" id="cfg-logdir-note"></div>
+      <div style="display:flex;gap:10px;margin-top:8px">
+        <div style="flex:1">
+          <label>Start a new file every</label>
+          <select id="cfg-logperiod" class="am-in">
+            <option value="none">— never on time —</option>
+            <option value="hourly">Hour</option>
+            <option value="daily">Day</option>
+            <option value="weekly">Week</option>
+            <option value="monthly">Month</option>
+          </select>
+        </div>
+        <div style="flex:1">
+          <label>…or at size (MB)</label>
+          <input id="cfg-logsize" class="am-in" type="number" min="0" max="4096" placeholder="0 = no limit">
+        </div>
+        <div style="flex:1">
+          <label>Old files to keep</label>
+          <input id="cfg-logkeep" class="am-in" type="number" min="0" max="1000">
+        </div>
+      </div>
+      <div style="color:var(--muted);font-size:11.5px;margin-top:3px" id="cfg-log-note"></div>
+      <div id="cfg-logfiles" style="color:var(--muted);font-size:11.5px;margin-top:6px"></div>
+    </div>
+
     <div id="cfg-msg" style="color:var(--critical);font-size:12px;margin-top:10px;min-height:16px"></div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
       <button onclick="closeConfig()">Cancel</button>
@@ -2076,6 +2121,16 @@ async function openConfig() {
         + s.discoveryHostName + ".local:" + s.controlPort + "/) instead of by IP, and lists it "
         + "in Windows' Network folder. Announcing says only that the server exists — signing in is still required."
       : "Applies immediately. Announcing says only that the server exists — signing in is still required.";
+
+    $("cfg-loglevel").value = (s.logLevel || "info").toLowerCase();
+    $("cfg-logfile").checked = !!s.logToFile;
+    $("cfg-logdir").value = s.logDirectory || "logs";
+    $("cfg-logperiod").value = (s.logRotatePeriod || "daily").toLowerCase();
+    $("cfg-logsize").value = s.logRotateSizeMb ?? 0;
+    $("cfg-logkeep").value = s.logMaxFiles ?? 7;
+    cfgLogResolved = s.logDirectoryResolved || "";
+    cfgLogFiles = s.logFiles || [];
+    renderLogging();
   } catch (e) {
     $("cfg-msg").textContent = "could not load settings: " + e.message;
   }
@@ -2114,6 +2169,41 @@ function renderCfgInterfaces() {
   box.innerHTML = h;
 }
 
+/* ---- logging section of the config dialog ---- */
+let cfgLogResolved = "", cfgLogFiles = [];
+
+function renderLogging() {
+  const on = $("cfg-logfile").checked;
+  $("cfg-log-box").style.opacity = on ? "1" : ".45";
+  for (const id of ["cfg-logdir", "cfg-logperiod", "cfg-logsize", "cfg-logkeep"])
+    $(id).disabled = !on;
+
+  $("cfg-logdir-note").textContent = cfgLogResolved
+    ? "Currently " + cfgLogResolved + " — a relative folder is inside the server's own directory."
+    : "A relative folder is inside the server's own directory.";
+
+  // spell the two rules back as one sentence: they combine, and either can be off
+  const period = $("cfg-logperiod").value;
+  const size = parseInt($("cfg-logsize").value, 10) || 0;
+  const keep = parseInt($("cfg-logkeep").value, 10) || 0;
+  const every = { hourly: "every hour", daily: "every day", weekly: "every week", monthly: "every month" }[period];
+  let when;
+  if (every && size) when = "A new file starts " + every + ", or sooner if it passes " + size + " MB.";
+  else if (every) when = "A new file starts " + every + ", whatever its size.";
+  else if (size) when = "A new file starts once the current one passes " + size + " MB.";
+  else when = "One file that grows forever — set a period or a size to rotate it.";
+  $("cfg-log-note").textContent = when + " " + (keep
+    ? "The newest " + keep + " older file" + (keep === 1 ? " is" : "s are") + " kept; the rest are deleted."
+    : "Older files are deleted straight away — only the current one is kept.");
+
+  if (!on || !cfgLogFiles.length) { $("cfg-logfiles").textContent = ""; return; }
+  const total = cfgLogFiles.reduce((a, f) => a + f.bytes, 0);
+  $("cfg-logfiles").textContent = cfgLogFiles.length + " file"
+    + (cfgLogFiles.length === 1 ? "" : "s") + " on disk, " + fmtBytes(total) + " in total.";
+}
+for (const id of ["cfg-logfile", "cfg-logperiod", "cfg-logsize", "cfg-logkeep"])
+  $(id).addEventListener("input", renderLogging);
+
 /* 168 means nothing at a glance; "7 days" does */
 function showLinkLifetime() {
   const h = parseInt($("cfg-link").value, 10);
@@ -2145,6 +2235,12 @@ async function saveConfig() {
     linkLifetimeHours: parseInt($("cfg-link").value, 10),
     minimizeToTray: $("cfg-tray").checked,
     discoveryEnabled: $("cfg-announce").checked,
+    logLevel: $("cfg-loglevel").value,
+    logToFile: $("cfg-logfile").checked,
+    logDirectory: $("cfg-logdir").value.trim() || "logs",
+    logRotateSizeMb: parseInt($("cfg-logsize").value, 10) || 0,
+    logRotatePeriod: $("cfg-logperiod").value,
+    logMaxFiles: parseInt($("cfg-logkeep").value, 10) || 0,
   };
   // only send fields the user actually changed, so untouched settings
   // keep following server.json instead of being frozen in settings.json

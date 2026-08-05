@@ -121,6 +121,12 @@ public sealed class ServerConfig
         [JsonPropertyName("minimizeToTray")] public bool? MinimizeToTray { get; set; }
         [JsonPropertyName("linkLifetimeHours")] public int? LinkLifetimeHours { get; set; }
         [JsonPropertyName("discoveryEnabled")] public bool? DiscoveryEnabled { get; set; }
+        [JsonPropertyName("logLevel")] public string? LogLevel { get; set; }
+        [JsonPropertyName("logToFile")] public bool? LogToFile { get; set; }
+        [JsonPropertyName("logDirectory")] public string? LogDirectory { get; set; }
+        [JsonPropertyName("logRotateSizeMb")] public int? LogRotateSizeMb { get; set; }
+        [JsonPropertyName("logRotatePeriod")] public string? LogRotatePeriod { get; set; }
+        [JsonPropertyName("logMaxFiles")] public int? LogMaxFiles { get; set; }
     }
 
     private SettingsOverrides _persistedSettings = new();
@@ -157,6 +163,12 @@ public sealed class ServerConfig
         if (s.MinimizeToTray is not null) _persistedSettings.MinimizeToTray = s.MinimizeToTray;
         if (s.LinkLifetimeHours is not null) _persistedSettings.LinkLifetimeHours = s.LinkLifetimeHours;
         if (s.DiscoveryEnabled is not null) _persistedSettings.DiscoveryEnabled = s.DiscoveryEnabled;
+        if (s.LogLevel is not null) _persistedSettings.LogLevel = s.LogLevel;
+        if (s.LogToFile is not null) _persistedSettings.LogToFile = s.LogToFile;
+        if (s.LogDirectory is not null) _persistedSettings.LogDirectory = s.LogDirectory;
+        if (s.LogRotateSizeMb is not null) _persistedSettings.LogRotateSizeMb = s.LogRotateSizeMb;
+        if (s.LogRotatePeriod is not null) _persistedSettings.LogRotatePeriod = s.LogRotatePeriod;
+        if (s.LogMaxFiles is not null) _persistedSettings.LogMaxFiles = s.LogMaxFiles;
         WriteAtomic(SettingsFile, JsonSerializer.Serialize(_persistedSettings, JsonOpts), "settings");
     }
 
@@ -177,6 +189,12 @@ public sealed class ServerConfig
         if (s.MinimizeToTray is bool tray) MinimizeToTray = tray;
         if (s.LinkLifetimeHours is int hours) Hls.LinkLifetimeHours = hours;
         if (s.DiscoveryEnabled is bool announce) Discovery.Enabled = announce;
+        if (!string.IsNullOrWhiteSpace(s.LogLevel)) Logging.Level = s.LogLevel;
+        if (s.LogToFile is bool toFile) Logging.ToFile = toFile;
+        if (!string.IsNullOrWhiteSpace(s.LogDirectory)) Logging.Directory = s.LogDirectory;
+        if (s.LogRotateSizeMb is int mb) Logging.RotateSizeMb = mb;
+        if (!string.IsNullOrWhiteSpace(s.LogRotatePeriod)) Logging.RotatePeriod = s.LogRotatePeriod;
+        if (s.LogMaxFiles is int keep) Logging.MaxFiles = keep;
     }
 
     private sealed class MountSidecar
@@ -489,6 +507,37 @@ public sealed class LoggingConfig
     /// <summary>trace | debug | info | warn | error</summary>
     [JsonPropertyName("level")] public string Level { get; set; } = "info";
     [JsonPropertyName("logRtspMessages")] public bool LogRtspMessages { get; set; } = false;
+
+    /// <summary>
+    /// Keep a copy of the log on disk. On by default: in tray mode there is
+    /// no console at all, so without this nothing survives the session.
+    /// </summary>
+    [JsonPropertyName("toFile")] public bool ToFile { get; set; } = true;
+
+    /// <summary>Where the log files live; relative paths are from the working directory.</summary>
+    [JsonPropertyName("directory")] public string Directory { get; set; } = "logs";
+
+    /// <summary>Start a new file once the current one passes this size. 0 = no size limit.</summary>
+    [JsonPropertyName("rotateSizeMb")] public int RotateSizeMb { get; set; } = 10;
+
+    /// <summary>none | hourly | daily | weekly | monthly. Combines with the size limit — whichever hits first.</summary>
+    [JsonPropertyName("rotatePeriod")] public string RotatePeriod { get; set; } = "daily";
+
+    /// <summary>How many rotated files to keep before the oldest are deleted.</summary>
+    [JsonPropertyName("maxFiles")] public int MaxFiles { get; set; } = 7;
+
+    /// <summary>
+    /// The log directory as an absolute path. A relative setting hangs off
+    /// the config directory, not the working directory — the desktop
+    /// shortcut and `dotnet run` start from different places.
+    /// </summary>
+    public string ResolveDirectory(string baseDirectory)
+    {
+        var dir = string.IsNullOrWhiteSpace(Directory) ? "logs" : Directory;
+        return System.IO.Path.GetFullPath(System.IO.Path.IsPathRooted(dir)
+            ? dir
+            : System.IO.Path.Combine(baseDirectory, dir));
+    }
 }
 
 /// <summary>

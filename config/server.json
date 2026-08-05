@@ -86,7 +86,17 @@
 
   "logging": {
     "level": "info",                  // trace | debug | info | warn | error
-    "logRtspMessages": false
+    "logRtspMessages": false,
+
+    // A copy on disk, since tray mode has no console to read. Rotation is by
+    // period and by size together — whichever comes first — and "maxFiles"
+    // older files are kept before the oldest is deleted. All of this is
+    // editable in the dashboard's ⚙ Config dialog.
+    "toFile": true,
+    "directory": "logs",              // relative paths sit next to this file
+    "rotateSizeMb": 10,               // 0 = never rotate on size
+    "rotatePeriod": "daily",          // none | hourly | daily | weekly | monthly
+    "maxFiles": 7
   },
 
   // Announcing the server on the local network, so devices find it by name
