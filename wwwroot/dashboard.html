@@ -196,7 +196,8 @@
 
   /* ---- pickPath() modal file browser ---- */
   #picker-overlay {
-    display: none; position: fixed; inset: 0; z-index: 50;
+    /* always a child modal — it has to sit above whatever opened it */
+    display: none; position: fixed; inset: 0; z-index: 80;
     background: rgba(0,0,0,0.55); align-items: center; justify-content: center;
   }
   #picker {
@@ -237,13 +238,22 @@
     background: rgba(0,0,0,0.55); align-items: center; justify-content: center;
   }
   #cfg {
-    width: min(420px, calc(100vw - 40px));
+    width: min(460px, calc(100vw - 40px));
+    /* the dialog outgrew short screens — scroll it rather than clip it */
+    max-height: calc(100vh - 40px); overflow-y: auto;
     background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
     padding: 18px; box-shadow: 0 18px 50px rgba(0,0,0,0.45);
   }
   #cfg h3 { margin: 0 0 14px; font-size: 15px; }
   #cfg label { display: block; color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; margin: 10px 0 4px; }
   #cfg .am-in { width: 100%; }
+
+  /* A row of fields whose captions run to different lengths: let the
+     captions take the height they need and line the inputs up underneath. */
+  .field-row { display: flex; gap: 10px; align-items: stretch; }
+  .field-row > div { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; }
+  .field-row > div > label { flex: 1; margin-bottom: 4px; }
+  .field-row > div > .am-in { margin-top: auto; }
 
   /* ---- accounts: sign-in gate, account panel, user administration ---- */
   .overlay {
@@ -704,10 +714,13 @@
     </label>
     <div id="cfg-log-box" style="margin-top:6px">
       <label>Folder</label>
-      <input id="cfg-logdir" class="am-in" placeholder="logs">
+      <div style="display:flex;gap:8px">
+        <input id="cfg-logdir" class="am-in" placeholder="logs" style="flex:1">
+        <button id="cfg-logdir-browse" onclick="browseLogDir()" style="white-space:nowrap">Browse…</button>
+      </div>
       <div style="color:var(--muted);font-size:11.5px;margin-top:3px" id="cfg-logdir-note"></div>
-      <div style="display:flex;gap:10px;margin-top:8px">
-        <div style="flex:1">
+      <div class="field-row" style="margin-top:8px">
+        <div>
           <label>Start a new file every</label>
           <select id="cfg-logperiod" class="am-in">
             <option value="none">— never on time —</option>
@@ -717,11 +730,11 @@
             <option value="monthly">Month</option>
           </select>
         </div>
-        <div style="flex:1">
+        <div>
           <label>…or at size (MB)</label>
           <input id="cfg-logsize" class="am-in" type="number" min="0" max="4096" placeholder="0 = no limit">
         </div>
-        <div style="flex:1">
+        <div>
           <label>Old files to keep</label>
           <input id="cfg-logkeep" class="am-in" type="number" min="0" max="1000">
         </div>
@@ -2124,11 +2137,16 @@ async function openConfig() {
 
     $("cfg-loglevel").value = (s.logLevel || "info").toLowerCase();
     $("cfg-logfile").checked = !!s.logToFile;
-    $("cfg-logdir").value = s.logDirectory || "logs";
+    // the full path, not "logs" — it's what Browse opens at, and it answers
+    // "where are they actually going?" without a second trip
+    $("cfg-logdir").value = s.logDirectoryResolved || s.logDirectory || "logs";
     $("cfg-logperiod").value = (s.logRotatePeriod || "daily").toLowerCase();
     $("cfg-logsize").value = s.logRotateSizeMb ?? 0;
     $("cfg-logkeep").value = s.logMaxFiles ?? 7;
     cfgLogResolved = s.logDirectoryResolved || "";
+    // the box shows the resolved path, so the "what changed?" baseline has to
+    // be that too — otherwise every save would look like a folder change
+    s.logDirectory = $("cfg-logdir").value;
     cfgLogFiles = s.logFiles || [];
     renderLogging();
   } catch (e) {
@@ -2175,12 +2193,11 @@ let cfgLogResolved = "", cfgLogFiles = [];
 function renderLogging() {
   const on = $("cfg-logfile").checked;
   $("cfg-log-box").style.opacity = on ? "1" : ".45";
-  for (const id of ["cfg-logdir", "cfg-logperiod", "cfg-logsize", "cfg-logkeep"])
+  for (const id of ["cfg-logdir", "cfg-logdir-browse", "cfg-logperiod", "cfg-logsize", "cfg-logkeep"])
     $(id).disabled = !on;
 
-  $("cfg-logdir-note").textContent = cfgLogResolved
-    ? "Currently " + cfgLogResolved + " — a relative folder is inside the server's own directory."
-    : "A relative folder is inside the server's own directory.";
+  $("cfg-logdir-note").textContent =
+    "Browse to any folder, or type a relative one to keep it inside the server's own directory.";
 
   // spell the two rules back as one sentence: they combine, and either can be off
   const period = $("cfg-logperiod").value;
@@ -2203,6 +2220,14 @@ function renderLogging() {
 }
 for (const id of ["cfg-logfile", "cfg-logperiod", "cfg-logsize", "cfg-logkeep"])
   $(id).addEventListener("input", renderLogging);
+
+/* Opens at the folder in the box, so Browse continues from where the logs
+   are now rather than from the drive list. */
+async function browseLogDir() {
+  const start = $("cfg-logdir").value.trim() || cfgLogResolved;
+  const p = await pickPath({ mode: "folder", title: "Folder for the log files", startPath: start });
+  if (p) { $("cfg-logdir").value = p; renderLogging(); }
+}
 
 /* 168 means nothing at a glance; "7 days" does */
 function showLinkLifetime() {
