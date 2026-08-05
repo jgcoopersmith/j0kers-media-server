@@ -454,7 +454,7 @@
       <select id="hls-view" onchange="setCardView('hls', this.value, renderHls)" class="am-in" style="width:auto"
               title="How much to show for each stream">
         <option value="condensed">Condensed</option>
-        <option value="default">Default</option>
+        <option value="default" selected>Default</option>
         <option value="info">Info</option>
       </select></h2>
     <div id="hls"></div>
@@ -501,7 +501,7 @@
       <select id="mounts-view" onchange="setCardView('mounts', this.value, renderMounts)" class="am-in" style="width:auto"
               title="How much to show for each mount">
         <option value="condensed">Condensed</option>
-        <option value="default">Default</option>
+        <option value="default" selected>Default</option>
         <option value="info">Info</option>
       </select>
       <button onclick="toggleAddMount()" id="am-toggle" class="edit-only">+ Add mount</button></h2>
@@ -580,7 +580,7 @@
       <select id="tv-view" onchange="setLineupView(this.value)" class="am-in" style="width:auto"
               title="How much to show for each channel">
         <option value="condensed">Condensed</option>
-        <option value="default">Default</option>
+        <option value="default" selected>Default</option>
         <option value="info">Info</option>
       </select>
     </h2>
@@ -1193,13 +1193,6 @@ async function tick() {
   rtspPort = status.rtsp.port; hlsPort = status.hls.port;
   hlsAddresses = status.hls.addresses || [];
 
-  // before anything draws, so the first paint is already the chosen view
-  if (!viewsBooted) {
-    viewsBooted = true;
-    loadCardView("hls");
-    loadCardView("mounts");
-  }
-
   // both kinds of viewing count: RTSP sessions and people watching over HLS
   const viewers = status.hls.viewers || 0;
   $("t-sessions").textContent = status.rtsp.sessions + viewers;
@@ -1249,7 +1242,6 @@ async function tick() {
 }
 let libraryBooted = false;
 let tvBooted = false;
-let viewsBooted = false;
 
 let activeTranscodes = [];
 
@@ -2796,7 +2788,6 @@ async function loadProviders() {
   }
   sel.innerHTML = data.providers.map(p =>
     '<option value="' + esc(p.id) + '">' + esc(p.name) + '</option>').join("");
-  loadCardView("tv");   // the remembered choice, not the markup's first option
   loadLineup(true);
 }
 
@@ -2858,6 +2849,17 @@ function loadCardView(key) {
   const sel = $(key + "-view");
   if (sel) sel.value = cardView(key);
 }
+
+/* Every remembered view, restored before the first fetch rather than as each
+   card wakes up. Doing it per-card meant the choice rode on that card's boot
+   path: the lineup's was read inside the providers fetch, so a provider list
+   that was slow, empty or unreachable left the control sitting on whatever
+   the markup happened to list first while the code used something else. This
+   runs off nothing but localStorage, so it cannot be missed. */
+function restoreCardViews() {
+  for (const key of ["hls", "mounts", "tv"]) loadCardView(key);
+}
+restoreCardViews();
 
 /* The three ways to look at a lineup. Each sets its own row cap, because
    what makes a list unwieldy is its height, not its length: a condensed row

@@ -588,24 +588,41 @@ public sealed class HlsServer : IDisposable
             <title>{{pretty}} — j0kers</title>
             <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🃏</text></svg>">
             <style>
-              body { margin: 0; background: #0d0d0d; color: #c3c2b7; font-family: system-ui, sans-serif; }
+              /* The dashboard's own light/dark pick lives in its localStorage,
+                 which this page cannot read: it is served from the HLS port,
+                 and that is a different origin. Following the system is the
+                 next best thing, and is what the dashboard does until the
+                 viewer overrides it. Same palette either way. */
+              :root {
+                color-scheme: dark;
+                --page: #0d0d0d; --surface: #222221; --ink: #ffffff;
+                --ink-2: #c3c2b7; --muted: #898781; --line: rgba(255,255,255,0.10);
+                --link: #3987e5;
+              }
+              @media (prefers-color-scheme: light) {
+                :root {
+                  color-scheme: light;
+                  --page: #f9f9f7; --surface: #f0efec; --ink: #0b0b0b;
+                  --ink-2: #52514e; --muted: #898781; --line: rgba(11,11,11,0.10);
+                  --link: #2a78d6;
+                }
+              }
+              body { margin: 0; background: var(--page); color: var(--ink-2); font-family: system-ui, sans-serif; }
               video { display: block; width: 100vw; max-height: 82vh; background: #000; }
               .bar { padding: 10px 14px; font-size: 13px; }
-              a { color: #3987e5; }
+              a { color: var(--link); }
               .ctl { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 14px 0; }
-              .ctl button {
-                font: inherit; font-size: 12.5px; border-radius: 8px; cursor: pointer;
-                border: 1px solid rgba(255,255,255,0.10); background: #222221; color: #c3c2b7;
-                padding: 4px 10px;
+              .ctl button, .ctl select {
+                font: inherit; font-size: 12.5px; border-radius: 8px;
+                border: 1px solid var(--line); background: var(--surface); color: var(--ink-2);
               }
-              .ctl button:hover { border-color: #898781; color: #fff; }
-              .ctl label { color: #898781; font-size: 12px; }
-              .ctl select {
-                font: inherit; font-size: 12.5px; padding: 3px 6px; border-radius: 8px;
-                border: 1px solid rgba(255,255,255,0.10); background: #222221; color: #c3c2b7;
-              }
+              .ctl button { padding: 4px 10px; cursor: pointer; }
+              .ctl select { padding: 3px 6px; }
+              .ctl button:hover { border-color: var(--muted); color: var(--ink); }
+              .ctl label { color: var(--muted); font-size: 12px; }
               .ctl select:disabled { opacity: 0.5; cursor: not-allowed; }
-              #msg { color: #898781; font-size: 12px; padding: 4px 14px 0; min-height: 1em; }
+              #msg { color: var(--muted); font-size: 12px; padding: 4px 14px 0; min-height: 1em; }
+              .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
             </style>
             <script src="/hls.min.js"></script>
             </head>
@@ -628,7 +645,7 @@ public sealed class HlsServer : IDisposable
             </div>
             <div id="msg"></div>
             <div class="bar">🃏 {{pretty}} · <a href="{{src}}">raw playlist</a> (for VLC etc.)
-              <div style="color:#6f6e69;font-size:11px;margin-top:2px">{{name}}</div></div>
+              <div class="sub">{{name}}</div></div>
             <script>
               const v = document.getElementById("v");
               const speed = document.getElementById("speed");
