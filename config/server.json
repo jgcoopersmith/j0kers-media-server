@@ -99,6 +99,12 @@
     "maxFiles": 7
   },
 
+  // "dlna": true (below) additionally serves the library folders to TVs and
+  // players that have no browser, from their own "Media Server" input.
+  // Off by default on purpose: DLNA carries no credential of any kind, so
+  // switching it on shares the library with every device on the network.
+  // Requests from outside the local network are refused regardless.
+  //
   // Announcing the server on the local network, so devices find it by name
   // instead of being told an IP. The ⚙ Config dialog toggles "enabled";
   // the rest are here. Announcing advertises only that the server exists —
@@ -109,6 +115,7 @@
     "mdns": true,                     // .local names + browsing (phones, Macs, Linux)
     "ssdp": true,                     // Windows' Network folder, smart TVs
     "udpProbe": true,                 // one-packet JSON answer, for scripts
-    "udpProbePort": 7359              // the port Jellyfin uses, so its clients find this too
+    "udpProbePort": 7359,             // the port Jellyfin uses, so its clients find this too
+    "dlna": false                     // serve the library to TVs — no sign-in; see the note above
   }
 }

@@ -48,6 +48,24 @@ public sealed partial class ControlApi : IDisposable
     private readonly Media.WatchHistory _history;
 
     /// <summary>
+    /// The DLNA server, or null when it is off — which is also the switch
+    /// the request path checks, so turning it off leaves nothing listening
+    /// rather than something that refuses politely.
+    /// </summary>
+    private Dlna.DlnaService? _dlna;
+
+    private Dlna.DlnaService NewDlna() => new(
+        _library, () => _serverConfig.ServerName,
+        Discovery?.Uuid ?? _serverConfig.Discovery.HostName);
+
+    /// <summary>Turns DLNA on or off while the server runs; returns what it now is.</summary>
+    public bool SetDlna(bool on)
+    {
+        _dlna = on ? (_dlna ?? NewDlna()) : null;
+        return _dlna is not null;
+    }
+
+    /// <summary>
     /// Free ad-supported TV: the provider lineups and the proxy that makes
     /// their playlists playable from here. One HttpClient for all of it —
     /// these talk to a handful of hosts continuously, so a per-call client
@@ -75,6 +93,7 @@ public sealed partial class ControlApi : IDisposable
         _library = new Media.LibraryStore(baseDirectory);
         _favorites = new Media.FavoritesStore(baseDirectory);
         _history = new Media.WatchHistory(baseDirectory);
+        if (serverConfig.Discovery.Dlna) _dlna = NewDlna();
         // The moment somebody starts watching anything — dashboard, phone,
         // VLC, a shared link — it goes in the history. Preparing a file
         // through /api/play records it too, but most playback never touches
@@ -322,6 +341,30 @@ public sealed partial class ControlApi : IDisposable
                 res.ContentType = "text/xml; charset=utf-8";
                 res.ContentLength64 = xml.Length;
                 res.OutputStream.Write(xml);
+                return;
+            }
+
+            // ---- DLNA ----
+            // Unauthenticated, because the protocol has no way to carry a
+            // credential: a TV browsing a media server sends SOAP and plain
+            // GETs and nothing else. The compensating controls are that it
+            // is off unless switched on, that only private LAN addresses are
+            // answered, and that every object id is checked against the
+            // library roots before it names a file.
+            if (path.StartsWith("/dlna/", StringComparison.OrdinalIgnoreCase))
+            {
+                if (_dlna is null)
+                {
+                    WriteJson(res, 404, new { error = "DLNA is off — enable discovery.dlna to serve the library to TVs" });
+                    return;
+                }
+                if (!Dlna.DlnaService.IsLocalClient(ctx.Request.RemoteEndPoint?.Address))
+                {
+                    Log.Warn("dlna", $"refused a non-local request from {ctx.Request.RemoteEndPoint?.Address}");
+                    WriteJson(res, 403, new { error = "DLNA is served to the local network only" });
+                    return;
+                }
+                ServeDlna(ctx, path, method);
                 return;
             }
 
@@ -630,6 +673,11 @@ public sealed partial class ControlApi : IDisposable
                     // dialog can show the .local address the switch produces
                     discoveryEnabled = _serverConfig.Discovery.Enabled,
                     discoveryHostName = Discovery?.HostName ?? _serverConfig.Discovery.HostName,
+                    dlnaEnabled = _serverConfig.Discovery.Dlna,
+                    // DLNA serves the library folders and nothing else, so an
+                    // empty library is worth saying before the switch is
+                    // thrown rather than after a TV shows an empty list
+                    dlnaFolders = _library.All.Count,
                     // logging: level, the rotating file sink, and what it has
                     // written so far, so the dialog can show the real cost
                     logLevel = _serverConfig.Logging.Level,
@@ -1223,6 +1271,25 @@ public sealed partial class ControlApi : IDisposable
             }
         }
 
+        // DLNA changes what the server announces itself as — a Basic device
+        // or a MediaServer — so the responders have to be rebuilt, same as
+        // the announcement switch itself.
+        var dlnaChanged = s.DlnaEnabled is bool wantDlna && wantDlna != _serverConfig.Discovery.Dlna;
+        if (s.DlnaEnabled is bool dlnaOn)
+        {
+            _serverConfig.Discovery.Dlna = dlnaOn;
+            SetDlna(dlnaOn);
+            if (dlnaChanged && Discovery is not null && _serverConfig.Discovery.Enabled)
+            {
+                try { Discovery.Restart(); }
+                catch (Exception ex) { Log.Warn("dlna", $"could not re-announce: {ex.Message}"); }
+            }
+            if (dlnaChanged)
+                Log.Info("dlna", dlnaOn
+                    ? $"serving {_library.All.Count} library folder(s) to the local network — DLNA has no sign-in"
+                    : "off");
+        }
+
         _serverConfig.UpdateSettings(s);
 
         // logging applies live — the level immediately, and the file sink
@@ -1775,6 +1842,89 @@ public sealed partial class ControlApi : IDisposable
     /// the provider, so the restream keeps working after the provider's
     /// session token has rolled over.
     /// </summary>
+    /// <summary>
+    /// The DLNA surface: two service descriptions, one SOAP control endpoint
+    /// for both services, an event subscription that is accepted and never
+    /// used, and the files themselves.
+    /// </summary>
+    private void ServeDlna(HttpListenerContext ctx, string path, string method)
+    {
+        var res = ctx.Response;
+        var dlna = _dlna!;
+
+        switch (path.ToLowerInvariant())
+        {
+            case "/dlna/cds.xml":
+                WriteXml(res, 200, Dlna.DlnaService.ContentDirectoryScpd);
+                return;
+
+            case "/dlna/cm.xml":
+                WriteXml(res, 200, Dlna.DlnaService.ConnectionManagerScpd);
+                return;
+
+            case "/dlna/control":
+            {
+                if (method != "POST") { res.StatusCode = 405; res.Close(); return; }
+                var action = ctx.Request.Headers["SOAPACTION"] ?? "";
+                var body = ReadBody(ctx);
+                var host = ctx.Request.Headers["Host"] ?? $"{BoundHost}:{_config.Port}";
+                var (status, xml) = dlna.HandleSoap(action, body, $"http://{host}");
+                WriteXml(res, status, xml);
+                return;
+            }
+
+            // Eventing (GENA). Nothing here changes under a client's feet
+            // mid-browse, so there is nothing to notify — but a subscription
+            // that is refused makes some clients abandon the device, so it
+            // is accepted and quietly never fires.
+            case "/dlna/events":
+                if (method is "SUBSCRIBE" or "UNSUBSCRIBE")
+                {
+                    res.StatusCode = 200;
+                    res.Headers["SID"] = "uuid:" + Guid.NewGuid();
+                    res.Headers["TIMEOUT"] = "Second-1800";
+                    res.Close();
+                    return;
+                }
+                res.StatusCode = 405;
+                res.Close();
+                return;
+
+            case "/dlna/file":
+            {
+                if (method is not ("GET" or "HEAD")) { res.StatusCode = 405; res.Close(); return; }
+                var id = ctx.Request.QueryString["id"] ?? "";
+                var file = dlna.ResolvePath(id);
+                if (file is null || !File.Exists(file))
+                {
+                    // an id outside the library is the interesting case: it is
+                    // either a stale bookmark or someone trying paths
+                    Log.Debug("dlna", $"no such object: {id}");
+                    res.StatusCode = 404;
+                    res.Close();
+                    return;
+                }
+                dlna.ServeFile(ctx, file);
+                return;
+            }
+
+            default:
+                res.StatusCode = 404;
+                res.Close();
+                return;
+        }
+    }
+
+    private static void WriteXml(HttpListenerResponse res, int status, string xml)
+    {
+        var bytes = Encoding.UTF8.GetBytes(xml);
+        res.StatusCode = status;
+        res.ContentType = "text/xml; charset=\"utf-8\"";
+        res.ContentLength64 = bytes.Length;
+        res.OutputStream.Write(bytes);
+        res.Close();
+    }
+
     /// <summary>
     /// GET /api/tuner?host=… — an HDHomeRun's identity and channel lineup,
     /// with each channel marked if it is already saved here, so the dashboard

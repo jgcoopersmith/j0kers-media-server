@@ -108,7 +108,7 @@ public sealed class DiscoveryService : IDisposable
         }
         if (_config.Ssdp)
         {
-            _ssdp = new SsdpResponder(_serverName, Uuid, _port);
+            _ssdp = new SsdpResponder(_serverName, Uuid, _port, _config.Dlna);
             _ssdp.Start();
         }
         if (_config.UdpProbe)
@@ -129,16 +129,19 @@ public sealed class DiscoveryService : IDisposable
     public string DescriptionXml(string host) =>
         $"""
         <?xml version="1.0" encoding="utf-8"?>
-        <root xmlns="urn:schemas-upnp-org:device-1-0">
+        <root xmlns="urn:schemas-upnp-org:device-1-0"{(_config.Dlna ? " xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\"" : "")}>
           <specVersion><major>1</major><minor>0</minor></specVersion>
           <URLBase>http://{host}:{_port}/</URLBase>
           <device>
-            <deviceType>urn:schemas-upnp-org:device:Basic:1</deviceType>
+            <deviceType>urn:schemas-upnp-org:device:{(_config.Dlna ? "MediaServer:1" : "Basic:1")}</deviceType>
             <friendlyName>{Escape(_serverName)}</friendlyName>
             <manufacturer>j0kers</manufacturer>
             <modelName>j0kers Media Server</modelName>
             <modelDescription>RTSP, HLS and free-TV streaming</modelDescription>
             <UDN>uuid:{Uuid}</UDN>
+        {(_config.Dlna ? """
+            <dlna:X_DLNADOC xmlns:dlna="urn:schemas-dlna-org:device-1-0">DMS-1.50</dlna:X_DLNADOC>
+        """ + Dlna.DlnaService.ServiceListXml : "")}
             <presentationURL>http://{host}:{_port}/</presentationURL>
           </device>
         </root>

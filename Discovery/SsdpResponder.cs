@@ -41,18 +41,28 @@ public sealed class SsdpResponder : IDisposable
     private bool _disposed;
 
     /// <summary>
-    /// The device type. A generic Basic device is deliberate: claiming
-    /// MediaServer:1 would have DLNA clients ask for a ContentDirectory
-    /// service that isn't implemented, and a device that answers a browse
-    /// request with nothing is worse than one that never claimed to.
+    /// What this device claims to be. A generic Basic device unless DLNA is
+    /// switched on: claiming MediaServer:1 has clients ask for a
+    /// ContentDirectory service, and a device that answers a browse request
+    /// with nothing is worse than one that never claimed to. With DLNA on,
+    /// that service exists, so the claim is honest — and necessary, because
+    /// a TV looks for MediaServer:1 specifically.
     /// </summary>
-    private const string DeviceType = "urn:schemas-upnp-org:device:Basic:1";
+    private readonly string _deviceType;
+    private const string BasicDevice = "urn:schemas-upnp-org:device:Basic:1";
+    private const string MediaServerDevice = "urn:schemas-upnp-org:device:MediaServer:1";
+    private const string ContentDirectory = "urn:schemas-upnp-org:service:ContentDirectory:1";
+    private const string ConnectionManager = "urn:schemas-upnp-org:service:ConnectionManager:1";
 
-    public SsdpResponder(string serverName, string uuid, int port)
+    private readonly bool _mediaServer;
+
+    public SsdpResponder(string serverName, string uuid, int port, bool mediaServer = false)
     {
         _serverName = serverName;
         _uuid = uuid;
         _port = port;
+        _mediaServer = mediaServer;
+        _deviceType = mediaServer ? MediaServerDevice : BasicDevice;
     }
 
     public void Start()
@@ -169,7 +179,7 @@ public sealed class SsdpResponder : IDisposable
                 if (mx > 0) await Task.Delay(Random.Shared.Next(0, mx * 500), ct);
 
                 var local = BestLocalFor(packet.RemoteEndPoint.Address);
-                var reply = SearchResponse(local, string.IsNullOrEmpty(st) ? DeviceType : st);
+                var reply = SearchResponse(local, string.IsNullOrEmpty(st) ? _deviceType : st);
                 var bytes = Encoding.UTF8.GetBytes(reply);
                 await socket.SendAsync(bytes, bytes.Length, packet.RemoteEndPoint);
             }
@@ -183,8 +193,11 @@ public sealed class SsdpResponder : IDisposable
         string.IsNullOrEmpty(st)
         || st == "ssdp:all"
         || st == "upnp:rootdevice"
-        || st == DeviceType
-        || st == "uuid:" + _uuid;
+        || st == _deviceType
+        || st == "uuid:" + _uuid
+        // a TV searching for a media server asks for the device or either
+        // service by name, never for ssdp:all
+        || (_mediaServer && st is ContentDirectory or ConnectionManager);
 
     private string Location(IPAddress local) => $"http://{local}:{_port}/description.xml";
 
@@ -239,7 +252,10 @@ public sealed class SsdpResponder : IDisposable
             }
             catch (Exception ex) { Log.Debug("ssdp", $"cannot select {local}: {ex.Message}"); continue; }
 
-            foreach (var nt in new[] { "upnp:rootdevice", DeviceType, "uuid:" + _uuid })
+            var targets = _mediaServer
+                ? new[] { "upnp:rootdevice", _deviceType, ContentDirectory, ConnectionManager, "uuid:" + _uuid }
+                : new[] { "upnp:rootdevice", _deviceType, "uuid:" + _uuid };
+            foreach (var nt in targets)
             {
                 var usn = nt == "uuid:" + _uuid ? $"uuid:{_uuid}" : $"uuid:{_uuid}::{nt}";
                 var msg =

@@ -121,6 +121,7 @@ public sealed class ServerConfig
         [JsonPropertyName("minimizeToTray")] public bool? MinimizeToTray { get; set; }
         [JsonPropertyName("linkLifetimeHours")] public int? LinkLifetimeHours { get; set; }
         [JsonPropertyName("discoveryEnabled")] public bool? DiscoveryEnabled { get; set; }
+        [JsonPropertyName("dlnaEnabled")] public bool? DlnaEnabled { get; set; }
         [JsonPropertyName("logLevel")] public string? LogLevel { get; set; }
         [JsonPropertyName("logToFile")] public bool? LogToFile { get; set; }
         [JsonPropertyName("logDirectory")] public string? LogDirectory { get; set; }
@@ -163,6 +164,7 @@ public sealed class ServerConfig
         if (s.MinimizeToTray is not null) _persistedSettings.MinimizeToTray = s.MinimizeToTray;
         if (s.LinkLifetimeHours is not null) _persistedSettings.LinkLifetimeHours = s.LinkLifetimeHours;
         if (s.DiscoveryEnabled is not null) _persistedSettings.DiscoveryEnabled = s.DiscoveryEnabled;
+        if (s.DlnaEnabled is not null) _persistedSettings.DlnaEnabled = s.DlnaEnabled;
         if (s.LogLevel is not null) _persistedSettings.LogLevel = s.LogLevel;
         if (s.LogToFile is not null) _persistedSettings.LogToFile = s.LogToFile;
         if (s.LogDirectory is not null) _persistedSettings.LogDirectory = s.LogDirectory;
@@ -189,6 +191,7 @@ public sealed class ServerConfig
         if (s.MinimizeToTray is bool tray) MinimizeToTray = tray;
         if (s.LinkLifetimeHours is int hours) Hls.LinkLifetimeHours = hours;
         if (s.DiscoveryEnabled is bool announce) Discovery.Enabled = announce;
+        if (s.DlnaEnabled is bool dlna) Discovery.Dlna = dlna;
         if (!string.IsNullOrWhiteSpace(s.LogLevel)) Logging.Level = s.LogLevel;
         if (s.LogToFile is bool toFile) Logging.ToFile = toFile;
         if (!string.IsNullOrWhiteSpace(s.LogDirectory)) Logging.Directory = s.LogDirectory;
@@ -564,4 +567,16 @@ public sealed class DiscoveryConfig
 
     /// <summary>Jellyfin uses 7359; sharing it means their clients find this too.</summary>
     [JsonPropertyName("udpProbePort")] public int UdpProbePort { get; set; } = 7359;
+
+    /// <summary>
+    /// Serve the library over DLNA, so TVs and players with no browser can
+    /// browse it from their own "Media Server" input.
+    ///
+    /// Off by default, and the default matters: DLNA has no authentication
+    /// of any kind — no account, no cookie, no token — so switching it on
+    /// shares every library folder with every device on the network. The
+    /// server refuses DLNA requests from anything that isn't a private LAN
+    /// address, which is the only boundary the protocol allows.
+    /// </summary>
+    [JsonPropertyName("dlna")] public bool Dlna { get; set; }
 }

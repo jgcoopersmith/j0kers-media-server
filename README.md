@@ -545,6 +545,7 @@ name. Three mechanisms, because no single one reaches everything:
 |---|---|---|
 | **mDNS / DNS-SD** (RFC 6762/6763) | udp/5353 | `.local` names on phones, Macs, Linux |
 | **SSDP** (UPnP discovery) | udp/1900 | Windows Explorer's Network folder, smart TVs |
+| **DLNA** (off by default) | control port | a TV's *Media Server* input — see below |
 | **UDP probe** | udp/7359 | scripts and apps; the port Jellyfin uses |
 
 The one that matters day to day is mDNS: **http://j0kers.local:9090/**
@@ -567,6 +568,39 @@ Other software on the machine may already hold these ports — Bonjour ships
 with a lot of things, and Windows runs its own SSDP service. That is
 expected and shared rather than exclusive; a mechanism that cannot start
 logs it and the others carry on.
+
+### DLNA — TVs and players with no browser
+
+Tick **Serve the library over DLNA** in the ⚙ Config dialog (or set
+`discovery.dlna: true`) and the server appears in a TV's *Media Server*
+input, where the library folders can be browsed with the remote. It applies
+immediately — the server re-announces itself as a UPnP `MediaServer:1`
+rather than a generic device.
+
+This is a different shape from everything else here. The client browses a
+tree over SOAP and then fetches **the whole file** over HTTP with byte
+ranges — no playlists, no segments, **no transcoding**. What plays is
+whatever the device itself can decode, so a TV that can't handle a codec
+will refuse the file rather than being handed a converted stream. Seeking
+works (`DLNA.ORG_OP=01`), so scrubbing through a film is fine.
+
+Only the **library folders** are served, arranged folders-first and
+alphabetically, with the same readable titles the dashboard shows. Live
+channels and HLS streams are deliberately absent: DLNA clients can't play
+a playlist.
+
+> **DLNA has no sign-in.** The protocol carries no account, cookie or
+> token — a TV that finds a media server expects to browse it. Switching
+> this on shares every library folder with every device on the network.
+> That is why it is off by default. The server refuses DLNA requests from
+> anything that is not a private LAN address, which is the only boundary
+> the protocol allows, and every object id is re-checked against the
+> library roots before it names a file.
+
+Endpoints, all unauthenticated by necessity and all LAN-only:
+`/dlna/cds.xml`, `/dlna/cm.xml` (service descriptions), `/dlna/control`
+(SOAP), `/dlna/events` (subscriptions accepted, never fired — nothing here
+changes mid-browse), `/dlna/file?id=` (the file, with ranges).
 
 ### If a settings file gets damaged
 

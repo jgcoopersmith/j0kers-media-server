@@ -714,6 +714,13 @@
     </label>
     <div id="cfg-announce-note" style="color:var(--muted);font-size:11.5px;margin-top:3px"></div>
 
+    <label style="margin-top:12px">DLNA (TVs and players with no browser)</label>
+    <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;color:var(--ink);font-size:13px;cursor:pointer;margin:0">
+      <input id="cfg-dlna" type="checkbox" style="width:16px;height:16px" onchange="renderDlnaNote()">
+      <span>Serve the library over DLNA</span>
+    </label>
+    <div id="cfg-dlna-note" style="color:var(--muted);font-size:11.5px;margin-top:3px"></div>
+
     <label style="margin-top:12px">Logging</label>
     <div style="display:flex;gap:10px;align-items:flex-end">
       <div style="flex:1">
@@ -2241,6 +2248,10 @@ async function openConfig() {
         + "in Windows' Network folder. Announcing says only that the server exists — signing in is still required."
       : "Applies immediately. Announcing says only that the server exists — signing in is still required.";
 
+    $("cfg-dlna").checked = !!s.dlnaEnabled;
+    cfgDlnaFolders = s.dlnaFolders || 0;
+    renderDlnaNote();
+
     $("cfg-loglevel").value = (s.logLevel || "info").toLowerCase();
     $("cfg-logfile").checked = !!s.logToFile;
     // the full path, not "logs" — it's what Browse opens at, and it answers
@@ -2291,6 +2302,23 @@ function renderCfgInterfaces() {
       + '</div>';
   }
   box.innerHTML = h;
+}
+
+/* DLNA is the one switch here that gives something away, so the note says
+   so plainly rather than describing a feature. */
+let cfgDlnaFolders = 0;
+
+function renderDlnaNote() {
+  const on = $("cfg-dlna").checked;
+  $("cfg-dlna-note").innerHTML = on
+    ? "Applies immediately. <b>DLNA has no sign-in</b> — every device on this network can browse and play "
+      + (cfgDlnaFolders
+          ? "your " + cfgDlnaFolders + " library folder" + (cfgDlnaFolders === 1 ? "" : "s")
+          : "your library folders")
+      + ", with no account. Requests from outside the local network are refused."
+      + (cfgDlnaFolders ? "" : " There are no library folders yet, so a TV would find nothing.")
+    : "Lets a TV browse the library from its own <i>Media Server</i> input, for devices with no browser "
+      + "and no VLC. Files are served whole, so what plays is whatever the device can decode itself.";
 }
 
 /* ---- logging section of the config dialog ---- */
@@ -2366,6 +2394,7 @@ async function saveConfig() {
     linkLifetimeHours: parseInt($("cfg-link").value, 10),
     minimizeToTray: $("cfg-tray").checked,
     discoveryEnabled: $("cfg-announce").checked,
+    dlnaEnabled: $("cfg-dlna").checked,
     logLevel: $("cfg-loglevel").value,
     logToFile: $("cfg-logfile").checked,
     logDirectory: $("cfg-logdir").value.trim() || "logs",
