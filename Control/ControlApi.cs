@@ -54,8 +54,14 @@ public sealed partial class ControlApi : IDisposable
     /// </summary>
     private Dlna.DlnaService? _dlna;
 
+    /// <summary>
+    /// Which library folders DLNA may show. Kept outside the service so the
+    /// choice survives switching DLNA off and on again.
+    /// </summary>
+    private readonly Dlna.DlnaShare _dlnaShare;
+
     private Dlna.DlnaService NewDlna() => new(
-        _library, () => _serverConfig.ServerName,
+        _library, _dlnaShare, () => _serverConfig.ServerName,
         Discovery?.Uuid ?? _serverConfig.Discovery.HostName);
 
     /// <summary>Turns DLNA on or off while the server runs; returns what it now is.</summary>
@@ -93,6 +99,7 @@ public sealed partial class ControlApi : IDisposable
         _library = new Media.LibraryStore(baseDirectory);
         _favorites = new Media.FavoritesStore(baseDirectory);
         _history = new Media.WatchHistory(baseDirectory);
+        _dlnaShare = new Dlna.DlnaShare(baseDirectory);
         if (serverConfig.Discovery.Dlna) _dlna = NewDlna();
         // The moment somebody starts watching anything — dashboard, phone,
         // VLC, a shared link — it goes in the history. Preparing a file
@@ -214,6 +221,9 @@ public sealed partial class ControlApi : IDisposable
 
         switch (path)
         {
+            // what an unauthenticated protocol is allowed to see is an
+            // administrator's decision, not an editor's
+            case "/api/dlna":
             case "/api/config":
             case "/api/settings":
             case "/api/server/start":
@@ -770,6 +780,32 @@ public sealed partial class ControlApi : IDisposable
             if (method == "POST" && path == "/api/channels")
             {
                 AddChannel(ctx);
+                return;
+            }
+
+            // ---- what DLNA is allowed to show ----
+            if (method == "GET" && path == "/api/dlna")
+            {
+                var roots = _library.All;
+                var shared = _dlnaShare.Shared(roots).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                WriteJson(res, 200, new
+                {
+                    enabled = _serverConfig.Discovery.Dlna,
+                    sharingAll = _dlnaShare.SharingAll(roots),
+                    folders = roots.Select(f => new
+                    {
+                        path = f,
+                        name = Path.GetFileName(Path.TrimEndingDirectorySeparator(f)) is { Length: > 0 } n ? n : f,
+                        shared = shared.Contains(f),
+                        missing = !Directory.Exists(f),
+                    }),
+                });
+                return;
+            }
+
+            if (method == "POST" && path == "/api/dlna")
+            {
+                SetDlnaShare(ctx);
                 return;
             }
 
@@ -1842,6 +1878,35 @@ public sealed partial class ControlApi : IDisposable
     /// the provider, so the restream keeps working after the provider's
     /// session token has rolled over.
     /// </summary>
+    /// <summary>
+    /// POST /api/dlna — sets which library folders DLNA may show. Takes the
+    /// whole list every time rather than add/remove: what is shared with an
+    /// unauthenticated network is exactly what was last confirmed, and an
+    /// empty list means nothing, not "unchanged".
+    /// </summary>
+    private void SetDlnaShare(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        DlnaShareRequest? req;
+        try { req = JsonSerializer.Deserialize<DlnaShareRequest>(ReadBody(ctx), BodyJson); }
+        catch (Exception ex) { WriteJson(res, 400, new { error = "bad JSON: " + ex.Message }); return; }
+        if (req?.folders is null)
+        {
+            WriteJson(res, 400, new { error = "body must be { \"folders\": [ \"C:\\\\path\", … ] }" });
+            return;
+        }
+
+        var roots = _library.All;
+        _dlnaShare.Set(req.folders, roots);
+        var shared = _dlnaShare.Shared(roots);
+        Log.Info("dlna", shared.Count == 0
+            ? "no library folders are shared — a client will find an empty server"
+            : $"sharing {shared.Count} of {roots.Count} library folder(s)");
+        WriteJson(res, 200, new { shared = shared.Count, of = roots.Count });
+    }
+
+    private sealed record DlnaShareRequest(List<string>? folders);
+
     /// <summary>
     /// The DLNA surface: two service descriptions, one SOAP control endpoint
     /// for both services, an event subscription that is accepted and never

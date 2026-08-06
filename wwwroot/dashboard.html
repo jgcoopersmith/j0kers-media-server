@@ -720,6 +720,7 @@
       <span>Serve the library over DLNA</span>
     </label>
     <div id="cfg-dlna-note" style="color:var(--muted);font-size:11.5px;margin-top:3px"></div>
+    <div id="cfg-dlna-folders" style="margin-top:6px"></div>
 
     <label style="margin-top:12px">Logging</label>
     <div style="display:flex;gap:10px;align-items:flex-end">
@@ -2250,6 +2251,10 @@ async function openConfig() {
 
     $("cfg-dlna").checked = !!s.dlnaEnabled;
     cfgDlnaFolders = s.dlnaFolders || 0;
+    try {
+      const d = await api("/api/dlna");
+      cfgDlnaShare = d.folders || [];
+    } catch { cfgDlnaShare = []; }
     renderDlnaNote();
 
     $("cfg-loglevel").value = (s.logLevel || "info").toLowerCase();
@@ -2305,20 +2310,62 @@ function renderCfgInterfaces() {
 }
 
 /* DLNA is the one switch here that gives something away, so the note says
-   so plainly rather than describing a feature. */
-let cfgDlnaFolders = 0;
+   so plainly rather than describing a feature — and names the folders that
+   would actually go out, since that is the decision being made. */
+let cfgDlnaFolders = 0, cfgDlnaShare = [];
 
 function renderDlnaNote() {
   const on = $("cfg-dlna").checked;
+  const box = $("cfg-dlna-folders");
+  const picked = cfgDlnaShare.filter(f => f.shared).length;
+
   $("cfg-dlna-note").innerHTML = on
     ? "Applies immediately. <b>DLNA has no sign-in</b> — every device on this network can browse and play "
-      + (cfgDlnaFolders
-          ? "your " + cfgDlnaFolders + " library folder" + (cfgDlnaFolders === 1 ? "" : "s")
-          : "your library folders")
-      + ", with no account. Requests from outside the local network are refused."
-      + (cfgDlnaFolders ? "" : " There are no library folders yet, so a TV would find nothing.")
+      + "whatever is ticked below, with no account. Requests from outside the local network are refused."
     : "Lets a TV browse the library from its own <i>Media Server</i> input, for devices with no browser "
       + "and no VLC. Files are served whole, so what plays is whatever the device can decode itself.";
+
+  if (!on) { box.innerHTML = ""; return; }
+  if (!cfgDlnaShare.length) {
+    box.innerHTML = '<div style="color:var(--muted);font-size:11.5px">'
+      + "No library folders yet — add one in the media library and a TV will find it here.</div>";
+    return;
+  }
+
+  let h = '<div style="color:var(--muted);font-size:11.5px;margin-bottom:3px">Shared over DLNA — '
+        + (picked ? picked + " of " + cfgDlnaShare.length : "<b>nothing yet</b>") + ":</div>";
+  h += '<div style="max-height:150px;overflow-y:auto;border:1px solid var(--grid);border-radius:8px;padding:4px 2px">';
+  for (const i in cfgDlnaShare) {
+    const f = cfgDlnaShare[i];
+    h += '<label style="display:flex;align-items:center;gap:8px;padding:3px 8px;font-size:12.5px;cursor:pointer;'
+      + 'text-transform:none;letter-spacing:0;color:var(--ink);margin:0">'
+      + '<input type="checkbox" data-dlna-folder="' + i + '"' + (f.shared ? " checked" : "")
+      + ' style="width:15px;height:15px">'
+      + "<span>" + esc(f.name) + "</span>"
+      + '<span class="mono" style="color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;'
+      + 'white-space:nowrap;flex:1" title="' + esc(f.path) + '">' + esc(f.path) + "</span>"
+      + (f.missing ? '<span style="color:var(--muted);font-size:11px">missing</span>' : "")
+      + "</label>";
+  }
+  box.innerHTML = h + "</div>";
+}
+
+/* Ticking a folder only marks it; Save & apply is what shares it — the
+   dialog's one Save has to mean this too, or a stray click would publish a
+   folder the moment it was made. */
+$("cfg-dlna-folders").addEventListener("change", e => {
+  const box = e.target.closest("[data-dlna-folder]");
+  if (!box) return;
+  cfgDlnaShare[box.dataset.dlnaFolder].shared = box.checked;
+  renderDlnaNote();
+});
+
+async function saveDlnaShare() {
+  await fetch("/api/dlna", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...headers() },
+    body: JSON.stringify({ folders: cfgDlnaShare.filter(f => f.shared).map(f => f.path) }),
+  });
 }
 
 /* ---- logging section of the config dialog ---- */
@@ -2407,6 +2454,12 @@ async function saveConfig() {
   const body = {};
   for (const k in current)
     if (!cfgLoaded || current[k] !== cfgLoaded[k]) body[k] = current[k];
+
+  // the folder ticks live in their own endpoint, and are saved whether or
+  // not anything else on the dialog changed
+  try { await saveDlnaShare(); }
+  catch (e) { msg.textContent = "could not save the DLNA folders: " + e.message; return; }
+
   if (!Object.keys(body).length) { closeConfig(); return; }
   try {
     const r = await fetch("/api/settings", {

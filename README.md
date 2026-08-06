@@ -469,6 +469,7 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `DELETE /api/hls?stream=x` | delete an HLS stream's files from the media root |
 | `POST /api/play` `{file}` | transcode a media file to HLS (returns playlist path) |
 | `GET/POST/DELETE /api/channels` | list / add / remove live channels (persisted to `channels.json`) |
+| `GET/POST /api/dlna` | which library folders DLNA may show; POST takes the whole list (`{"folders":[…]}`) |
 | `GET /api/tuner?host=…` | an HDHomeRun's identity and channel lineup, each channel flagged if already added |
 | `POST /api/channels/import` | save a batch of channels idle; per-channel failures are reported, not thrown |
 | `GET/POST/DELETE /api/playlists` | list / save / forget folder playlists (persisted to `playlists.json`) |
@@ -588,6 +589,16 @@ Only the **library folders** are served, arranged folders-first and
 alphabetically, with the same readable titles the dashboard shows. Live
 channels and HLS streams are deliberately absent: DLNA clients can't play
 a playlist.
+
+**Choosing what goes out.** Under the switch is the library folder list,
+each with a tick. Until you change it every library folder is shared —
+turning DLNA on should not quietly hide half the library — and after that
+the choice is kept literally, the empty one included: sharing nothing is a
+legitimate answer and doesn't spring back to everything on restart. Ticks
+apply on **Save & apply**, so a stray click doesn't publish a folder the
+moment it lands. An unshared folder isn't merely hidden from the listing:
+its files can't be named or fetched either, so an id kept from before it
+was unshared returns nothing. The choice lives in a `dlna.json` sidecar.
 
 > **DLNA has no sign-in.** The protocol carries no account, cookie or
 > token — a TV that finds a media server expects to browse it. Switching

@@ -24,15 +24,25 @@ namespace J0kersMediaServer.Dlna;
 public sealed class DlnaService
 {
     private readonly Media.LibraryStore _library;
+    private readonly DlnaShare _share;
     private readonly Func<string> _serverName;
     private readonly string _uuid;
 
-    public DlnaService(Media.LibraryStore library, Func<string> serverName, string uuid)
+    public DlnaService(Media.LibraryStore library, DlnaShare share, Func<string> serverName, string uuid)
     {
         _library = library;
+        _share = share;
         _serverName = serverName;
         _uuid = uuid;
     }
+
+    /// <summary>
+    /// The folders DLNA may show — the library, narrowed by what has been
+    /// shared. Everything here goes through this rather than the library
+    /// directly, so a folder that isn't shared is not merely hidden from the
+    /// listing: its files cannot be named or fetched either.
+    /// </summary>
+    private IReadOnlyList<string> Roots() => _share.Shared(_library.All);
 
     /// <summary>
     /// Whether a caller may use the DLNA endpoints at all. The protocol has
@@ -99,7 +109,7 @@ public sealed class DlnaService
         catch { return null; }
         if (full.StartsWith(@"\\", StringComparison.Ordinal)) return null;
 
-        foreach (var root in _library.All)
+        foreach (var root in Roots())
         {
             string r;
             try { r = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root)); }
@@ -185,10 +195,10 @@ public sealed class DlnaService
         {
             if (metadata)
             {
-                sb.Append(Container("0", "-1", Escape(_serverName()), _library.All.Count));
+                sb.Append(Container("0", "-1", Escape(_serverName()), Roots().Count));
                 return new BrowseResult(Didl(sb.ToString()), 1, 1);
             }
-            var roots = _library.All.Where(Directory.Exists).ToList();
+            var roots = Roots().Where(Directory.Exists).ToList();
             var page = Page(roots, start, count);
             foreach (var folder in page)
                 sb.Append(Container(Encode(folder), "0", Escape(NameOf(folder)), CountChildren(folder)));
