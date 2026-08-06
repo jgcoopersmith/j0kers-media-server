@@ -591,7 +591,11 @@ channels and HLS streams are deliberately absent: DLNA clients can't play
 a playlist.
 
 **Choosing what goes out.** Under the switch is the library folder list,
-each with a tick. Until you change it every library folder is shared —
+each with a tick, editable in place: **+ Add folder** picks one and ✕ takes
+one out. These are the media library's own folders, so adding one here adds
+it to the dashboard's library too, and removing one takes it out of both —
+the confirmation says so, and nothing on disk is touched. A folder added
+here starts ticked, since sharing it is why it was added. Until you change it every library folder is shared —
 turning DLNA on should not quietly hide half the library — and after that
 the choice is kept literally, the empty one included: sharing nothing is a
 legitimate answer and doesn't spring back to everything on restart. Ticks

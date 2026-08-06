@@ -2326,28 +2326,65 @@ function renderDlnaNote() {
       + "and no VLC. Files are served whole, so what plays is whatever the device can decode itself.";
 
   if (!on) { box.innerHTML = ""; return; }
-  if (!cfgDlnaShare.length) {
-    box.innerHTML = '<div style="color:var(--muted);font-size:11.5px">'
-      + "No library folders yet — add one in the media library and a TV will find it here.</div>";
-    return;
-  }
 
-  let h = '<div style="color:var(--muted);font-size:11.5px;margin-bottom:3px">Shared over DLNA — '
-        + (picked ? picked + " of " + cfgDlnaShare.length : "<b>nothing yet</b>") + ":</div>";
-  h += '<div style="max-height:150px;overflow-y:auto;border:1px solid var(--grid);border-radius:8px;padding:4px 2px">';
-  for (const i in cfgDlnaShare) {
-    const f = cfgDlnaShare[i];
-    h += '<label style="display:flex;align-items:center;gap:8px;padding:3px 8px;font-size:12.5px;cursor:pointer;'
-      + 'text-transform:none;letter-spacing:0;color:var(--ink);margin:0">'
-      + '<input type="checkbox" data-dlna-folder="' + i + '"' + (f.shared ? " checked" : "")
-      + ' style="width:15px;height:15px">'
-      + "<span>" + esc(f.name) + "</span>"
-      + '<span class="mono" style="color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;'
-      + 'white-space:nowrap;flex:1" title="' + esc(f.path) + '">' + esc(f.path) + "</span>"
-      + (f.missing ? '<span style="color:var(--muted);font-size:11px">missing</span>' : "")
-      + "</label>";
+  let h = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">'
+    + '<span style="color:var(--muted);font-size:11.5px;flex:1">'
+    + (!cfgDlnaShare.length
+        ? "No folders yet — add one and a TV will find it here."
+        : "Shared over DLNA — " + (picked ? picked + " of " + cfgDlnaShare.length : "<b>nothing yet</b>") + ":")
+    + "</span>"
+    + '<button onclick="addDlnaFolder()">+ Add folder</button></div>';
+
+  if (cfgDlnaShare.length) {
+    h += '<div style="max-height:150px;overflow-y:auto;border:1px solid var(--grid);border-radius:8px;padding:4px 2px">';
+    for (const i in cfgDlnaShare) {
+      const f = cfgDlnaShare[i];
+      h += '<div style="display:flex;align-items:center;gap:8px;padding:3px 8px;font-size:12.5px">'
+        + '<label style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;cursor:pointer;'
+        + 'text-transform:none;letter-spacing:0;color:var(--ink);margin:0">'
+        + '<input type="checkbox" data-dlna-folder="' + i + '"' + (f.shared ? " checked" : "")
+        + ' style="width:15px;height:15px">'
+        + "<span>" + esc(f.name) + "</span>"
+        + '<span class="mono" style="color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;'
+        + 'white-space:nowrap;flex:1" title="' + esc(f.path) + '">' + esc(f.path) + "</span>"
+        + "</label>"
+        + (f.missing ? '<span style="color:var(--muted);font-size:11px">missing</span>' : "")
+        + '<button data-dlna-remove="' + esc(f.path) + '" title="Remove this folder from the media library">✕</button>'
+        + "</div>";
+    }
+    h += "</div>";
   }
-  box.innerHTML = h + "</div>";
+  box.innerHTML = h;
+}
+
+/* These are the media library's folders, not a list of DLNA's own — so
+   adding one here adds it to the library everywhere, and removing one takes
+   it out of the dashboard too. Said plainly on the way out rather than
+   discovered afterwards. */
+async function addDlnaFolder() {
+  const p = await pickPath({ mode: "folder", title: "Add a folder to the media library" });
+  if (!p) return;
+  const r = await fetch("/api/library", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...headers() },
+    body: JSON.stringify({ folder: p }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) { $("cfg-msg").textContent = data.error || ("could not add the folder: " + r.status); return; }
+  // a folder added here is meant to be shared — that is why it was added
+  cfgDlnaShare.push({ path: data.added || p, name: (data.added || p).split(/[\\/]/).filter(Boolean).pop(), shared: true });
+  refreshLibraryRoots(true);
+  renderDlnaNote();
+}
+
+async function removeDlnaFolder(path) {
+  if (!confirm("Remove this folder from the media library?\n\n" + path
+      + "\n\nIt leaves the dashboard's library as well, not just DLNA. Nothing on disk is touched."))
+    return;
+  await fetch("/api/library?folder=" + encodeURIComponent(path), { method: "DELETE", headers: headers() });
+  cfgDlnaShare = cfgDlnaShare.filter(f => f.path !== path);
+  refreshLibraryRoots(true);
+  renderDlnaNote();
 }
 
 /* Ticking a folder only marks it; Save & apply is what shares it — the
@@ -2358,6 +2395,10 @@ $("cfg-dlna-folders").addEventListener("change", e => {
   if (!box) return;
   cfgDlnaShare[box.dataset.dlnaFolder].shared = box.checked;
   renderDlnaNote();
+});
+$("cfg-dlna-folders").addEventListener("click", e => {
+  const btn = e.target.closest("[data-dlna-remove]");
+  if (btn) removeDlnaFolder(btn.dataset.dlnaRemove);
 });
 
 async function saveDlnaShare() {
