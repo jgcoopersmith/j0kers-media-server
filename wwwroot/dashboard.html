@@ -1467,10 +1467,13 @@ function playFromHistory(sel) {
   sel.selectedIndex = 0;
   if (!e) return;
   clearQueueState();
-  // a file goes back through the transcoder (quality may have changed since);
-  // a stream that was never a local file is simply played again
-  if (e.kind === "file" && e.path) prepareMedia(e.path);
-  else if (e.stream) playHls("/" + encodeURIComponent(e.stream) + "/index.m3u8");
+  // Both open the player. A file goes back through the transcoder, since the
+  // quality setting may have moved since — playMedia waits for the playlist
+  // and then plays it, where prepareMedia only readies it. A stream that was
+  // never a local file plays directly, through mediaUrl: the player fetches
+  // it from the HLS port with a signed token, not from this page's origin.
+  if (e.kind === "file" && e.path) playMedia(e.path, 0);
+  else if (e.stream) playHls(mediaUrl("/" + encodeURIComponent(e.stream) + "/index.m3u8"));
 }
 
 async function killSession(id) {
