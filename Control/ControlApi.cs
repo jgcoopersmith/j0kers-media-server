@@ -205,6 +205,10 @@ public sealed partial class ControlApi : IDisposable
             // add-content forms show
             case "/api/browse":
             case "/api/codecs":
+            // reading a tuner's lineup and saving channels from it is the
+            // same act as adding one by hand
+            case "/api/tuner":
+            case "/api/channels/import":
             case "/api/channels/restart":
             case "/api/channels/start":
             case "/api/channels/stop":
@@ -718,6 +722,19 @@ public sealed partial class ControlApi : IDisposable
             if (method == "POST" && path == "/api/channels")
             {
                 AddChannel(ctx);
+                return;
+            }
+
+            // ---- HDHomeRun: read a tuner's lineup, import what's picked ----
+            if (method == "GET" && path == "/api/tuner")
+            {
+                await ReadTunerLineup(ctx);
+                return;
+            }
+
+            if (method == "POST" && path == "/api/channels/import")
+            {
+                ImportChannels(ctx);
                 return;
             }
 
@@ -1536,6 +1553,7 @@ public sealed partial class ControlApi : IDisposable
 
     private sealed record PlayRequest(string? file, int? height);
     private sealed record ChannelRequest(string? name, string? url);
+    private sealed record ImportRequest(List<ChannelRequest>? channels);
 
     /// <summary>POST /api/play {file} — transcode any media file to HLS and return the stream name.</summary>
     private void PlayFile(HttpListenerContext ctx, AuthResult auth)
@@ -1757,6 +1775,120 @@ public sealed partial class ControlApi : IDisposable
     /// the provider, so the restream keeps working after the provider's
     /// session token has rolled over.
     /// </summary>
+    /// <summary>
+    /// GET /api/tuner?host=… — an HDHomeRun's identity and channel lineup,
+    /// with each channel marked if it is already saved here, so the dashboard
+    /// can offer only what would actually be new.
+    /// </summary>
+    private async Task ReadTunerLineup(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var host = Media.Providers.HdhrTuner.NormalizeHost(ctx.Request.QueryString["host"]);
+        if (host is null)
+        {
+            WriteJson(res, 400, new { error = "host must be a tuner address, e.g. 192.168.1.50 or hdhomerun.local" });
+            return;
+        }
+
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+            cts.CancelAfter(TimeSpan.FromSeconds(10)); // a tuner on the LAN answers instantly or not at all
+            var lineup = await Media.Providers.HdhrTuner.ReadAsync(host, _providerHttp, cts.Token);
+
+            var existing = (_ffmpeg?.Channels ?? new List<(Media.FfmpegManager.ChannelDef, string, string)>())
+                .Select(c => c.Item1.Url).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            Log.Info("control", $"tuner {host}: {lineup.Device.Name} with {lineup.Channels.Count} channel(s)");
+            WriteJson(res, 200, new
+            {
+                host,
+                device = new
+                {
+                    name = lineup.Device.Name,
+                    model = lineup.Device.Model,
+                    tuners = lineup.Device.TunerCount,
+                },
+                channels = lineup.Channels.Select(c => new
+                {
+                    number = c.Number,
+                    name = c.Name,
+                    channelName = Media.Providers.HdhrTuner.ChannelName(c),
+                    url = c.Url,
+                    hd = c.Hd,
+                    // a copy-protected cable channel can be listed but never
+                    // restreamed — say so rather than importing a dead row
+                    drm = c.Drm,
+                    favorite = c.Favorite,
+                    alreadyAdded = existing.Contains(c.Url),
+                }),
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            WriteJson(res, 504, new { error = $"no answer from {host} — check the address and that the tuner is powered on" });
+        }
+        catch (Exception ex)
+        {
+            WriteJson(res, 502, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// POST /api/channels/import — saves a batch of channels idle, the way
+    /// pinning does. One bad row (a duplicate name, usually) must not lose
+    /// the other thirty-nine, so each is tried on its own and the failures
+    /// are reported rather than thrown.
+    /// </summary>
+    private void ImportChannels(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        if (_ffmpeg is null || !_ffmpeg.Available)
+        {
+            WriteJson(res, 503, new { error = "ffmpeg is not available — install it (winget install Gyan.FFmpeg) and restart" });
+            return;
+        }
+
+        ImportRequest? req;
+        try { req = JsonSerializer.Deserialize<ImportRequest>(ReadBody(ctx), BodyJson); }
+        catch (Exception ex) { WriteJson(res, 400, new { error = "bad JSON: " + ex.Message }); return; }
+
+        var wanted = req?.channels ?? new List<ChannelRequest>();
+        if (wanted.Count == 0)
+        {
+            WriteJson(res, 400, new { error = "body must be { \"channels\": [ { \"name\": \"…\", \"url\": \"…\" } ] }" });
+            return;
+        }
+
+        var added = new List<string>();
+        var skipped = new List<object>();
+        foreach (var c in wanted)
+        {
+            var name = (c.name ?? "").Trim();
+            var url = (c.url ?? "").Trim();
+            if (name.Length == 0 || url.Length == 0
+                || !Uri.TryCreate(url, UriKind.Absolute, out var u)
+                || u.Scheme is not ("http" or "https" or "rtsp" or "udp" or "rtp"))
+            {
+                skipped.Add(new { name, reason = "needs a name and a playable url" });
+                continue;
+            }
+            try
+            {
+                _ffmpeg.AddChannel(name, url, start: false);
+                added.Add(name);
+            }
+            catch (Exception ex)
+            {
+                skipped.Add(new { name, reason = ex.Message });
+            }
+        }
+
+        Log.Info("control", $"imported {added.Count} channel(s) from a tuner lineup" +
+                            (skipped.Count > 0 ? $", skipped {skipped.Count}" : ""));
+        WriteJson(res, 200, new { added = added.Count, names = added, skipped });
+    }
+
     private async Task TvPin(HttpListenerContext ctx)
     {
         var res = ctx.Response;

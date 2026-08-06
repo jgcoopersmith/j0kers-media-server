@@ -184,7 +184,8 @@ set `ffmpeg.path`), the dashboard becomes a full media center:
   a sliding-window live HLS channel that anything can play, and channels
   persist in `channels.json` and restart with the server. `ffmpeg.liveVideoMode:
   "copy"` remuxes without transcoding when the source is already
-  H.264/AAC.
+  H.264/AAC. **📡 Import from tuner** adds a whole local lineup at once —
+  see below.
 
 **Add mounts from the GUI**: the *+ Add mount* button in the RTSP mounts
 card creates a mount from a test tone or an audio file (picked with the
@@ -197,6 +198,33 @@ itself is never touched, and re-adding the same path clears the
 tombstone. HLS stream rows have a ✕ too, which deletes the stream's
 playlist and segment files from disk (live-channel streams are refused —
 remove the channel instead).
+
+### Local channels from an HDHomeRun
+
+An HDHomeRun is an antenna with an HTTP server on it, so a whole local
+lineup can be imported in one go: **📡 Import from tuner** in the Live
+channels card, give it the tuner's address (`192.168.1.50`, or
+`hdhomerun.local` — a full `http://…/lineup.json` is accepted too), and
+press **Read lineup**.
+
+What comes back is the tuner's own scan — it does the tuning and scanning,
+from its app or web page; this only reads the result. Every channel is
+listed with its number and station; tick the ones you want and **Import
+selected**. Channels already added and copy-protected ones (`DRM`, cable
+only) are shown but can't be picked, since importing either produces a row
+that never plays.
+
+Imported channels are saved **idle**, exactly like pinning a free-TV
+channel — a restream is an ffmpeg process running around the clock, so
+starting forty at once should never be one click. Start the ones you
+actually watch from the list below. They're named `5.1 NBC`, number first,
+so they sort the way a remote does and two subchannels of one station don't
+collide.
+
+Two practical limits: a tuner has a fixed number of tuners (usually 2 or
+4), which caps how many channels can run at once; and over-the-air video is
+MPEG-2, so leave `ffmpeg.liveVideoMode` at `transcode` — `copy` won't play
+in a browser. Budget roughly one CPU core per running channel.
 
 ### Free TV
 
@@ -441,6 +469,8 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `DELETE /api/hls?stream=x` | delete an HLS stream's files from the media root |
 | `POST /api/play` `{file}` | transcode a media file to HLS (returns playlist path) |
 | `GET/POST/DELETE /api/channels` | list / add / remove live channels (persisted to `channels.json`) |
+| `GET /api/tuner?host=…` | an HDHomeRun's identity and channel lineup, each channel flagged if already added |
+| `POST /api/channels/import` | save a batch of channels idle; per-channel failures are reported, not thrown |
 | `GET/POST/DELETE /api/playlists` | list / save / forget folder playlists (persisted to `playlists.json`) |
 | `GET/POST/DELETE /api/library` | list / add / remove library root folders (persisted to `library.json`) |
 | `GET /api/thumb?path=` | cached JPEG thumbnail for a video or picture (ffmpeg) |

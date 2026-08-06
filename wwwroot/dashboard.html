@@ -572,8 +572,23 @@
   </div>
 
   <div class="card">
-    <h2 style="display:flex;align-items:center"><span style="flex:1">Live channels</span>
+    <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Live channels</span>
+      <button onclick="toggleImportTuner()" id="tuner-toggle" class="edit-only"
+              title="Read the channel list off an HDHomeRun tuner">📡 Import from tuner</button>
       <button onclick="toggleAddChannel()" id="ch-toggle" class="edit-only">+ Add channel</button></h2>
+    <div id="importtuner" class="edit-only" style="display:none;border:1px solid var(--grid);border-radius:10px;padding:12px;margin-bottom:10px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input id="tuner-host" class="am-in" placeholder="tuner address — 192.168.1.50, or hdhomerun.local"
+               style="flex:1;min-width:240px" onkeydown="if(event.key==='Enter')fetchTunerLineup()">
+        <button onclick="fetchTunerLineup()">Read lineup</button>
+      </div>
+      <div style="color:var(--muted);font-size:11.5px;margin-top:6px">
+        The tuner's own app or web page shows its address, and is where a channel scan is run.
+        Imported channels are saved idle — start the ones you want from the list below.
+      </div>
+      <div id="tuner-msg" style="color:var(--critical);font-size:12px;margin-top:6px"></div>
+      <div id="tuner-result" style="margin-top:8px"></div>
+    </div>
     <div id="addchannel" class="edit-only" style="display:none;border:1px solid var(--grid);border-radius:10px;padding:12px;margin-bottom:10px">
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <input id="ch-name" class="am-in" placeholder="channel name (e.g. NBC 5.1)" style="width:190px">
@@ -2900,6 +2915,120 @@ function toggleAddChannel() {
   $("ch-toggle").textContent = show ? "− Close" : "+ Add channel";
   $("ch-msg").textContent = "";
   if (show) $("ch-name").focus();
+}
+
+/* ---- import a lineup from an HDHomeRun ----
+   The tuner keeps its own scan; this reads the result and saves the picked
+   channels idle, which is what pinning a free-TV channel does too. The
+   address is remembered per browser — it is the one thing you would
+   otherwise retype every time. */
+let tunerChannels = [];
+
+function toggleImportTuner() {
+  const f = $("importtuner");
+  const show = f.style.display === "none";
+  f.style.display = show ? "block" : "none";
+  $("tuner-toggle").textContent = show ? "− Close" : "📡 Import from tuner";
+  $("tuner-msg").textContent = "";
+  if (show) {
+    $("tuner-host").value = $("tuner-host").value || localStorage.getItem("tunerHost") || "";
+    $("tuner-host").focus();
+  }
+}
+
+async function fetchTunerLineup() {
+  const msg = $("tuner-msg"), out = $("tuner-result");
+  const host = $("tuner-host").value.trim();
+  msg.textContent = "";
+  if (!host) { msg.textContent = "enter the tuner's address"; return; }
+  out.innerHTML = '<div style="color:var(--muted);font-size:12px">reading ' + esc(host) + "…</div>";
+  let data;
+  try {
+    data = await api("/api/tuner?host=" + encodeURIComponent(host));
+  } catch (e) {
+    out.innerHTML = "";
+    msg.textContent = e.message;
+    return;
+  }
+  localStorage.setItem("tunerHost", host);
+  tunerChannels = data.channels || [];
+  renderTunerLineup(data.device);
+}
+
+function renderTunerLineup(device) {
+  const out = $("tuner-result");
+  if (!tunerChannels.length) {
+    out.innerHTML = '<div class="empty">That tuner has no channels — run a channel scan from its own app first.</div>';
+    return;
+  }
+  const fresh = tunerChannels.filter(c => !c.alreadyAdded && !c.drm).length;
+  let h = '<div style="color:var(--muted);font-size:12px;margin-bottom:6px">'
+    + esc(device.name) + (device.model ? " · " + esc(device.model) : "")
+    + (device.tuners ? " · " + device.tuners + " tuners" : "")
+    + " · " + tunerChannels.length + " channels</div>";
+  h += '<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">'
+    + '<button onclick="tunerSelectAll(true)">Select all</button>'
+    + '<button onclick="tunerSelectAll(false)">Select none</button>'
+    + '<span style="flex:1"></span>'
+    + '<button id="tuner-import" onclick="importTunerChannels()" style="color:var(--good);border-color:color-mix(in srgb,var(--good) 45%,transparent)">'
+    + "Import selected</button></div>";
+  h += '<div style="max-height:320px;overflow-y:auto;border:1px solid var(--grid);border-radius:8px">';
+  for (const i in tunerChannels) {
+    const c = tunerChannels[i];
+    // already here, or copy-protected: shown so the lineup is the whole
+    // lineup, but not offered — importing either produces a dead row
+    const off = c.alreadyAdded || c.drm;
+    const note = c.alreadyAdded ? "already added" : c.drm ? "copy-protected — cannot be restreamed" : "";
+    h += '<label style="display:flex;align-items:center;gap:8px;padding:5px 10px;font-size:13px;'
+      + 'cursor:' + (off ? "default" : "pointer") + ";opacity:" + (off ? ".5" : "1") + '">'
+      + '<input type="checkbox" data-tuner-ch="' + i + '"' + (off ? " disabled" : " checked")
+      + ' style="width:15px;height:15px">'
+      + '<span class="mono" style="min-width:52px;color:var(--muted)">' + esc(c.number) + "</span>"
+      + "<span>" + esc(c.name) + "</span>"
+      + (c.hd ? '<span class="badge">HD</span>' : "")
+      + '<span style="flex:1"></span>'
+      + '<span style="color:var(--muted);font-size:11.5px">' + esc(note) + "</span>"
+      + "</label>";
+  }
+  out.innerHTML = h + "</div>";
+  if (!fresh) $("tuner-import").disabled = true;
+}
+
+function tunerSelectAll(on) {
+  for (const box of document.querySelectorAll("[data-tuner-ch]"))
+    if (!box.disabled) box.checked = on;
+}
+
+async function importTunerChannels() {
+  const msg = $("tuner-msg");
+  msg.textContent = "";
+  const picked = [];
+  for (const box of document.querySelectorAll("[data-tuner-ch]")) {
+    if (!box.checked || box.disabled) continue;
+    const c = tunerChannels[box.dataset.tunerCh];
+    if (c) picked.push({ name: c.channelName, url: c.url });
+  }
+  if (!picked.length) { msg.textContent = "nothing selected"; return; }
+  try {
+    const r = await fetch("/api/channels/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers() },
+      body: JSON.stringify({ channels: picked }),
+    });
+    const data = await r.json();
+    if (!r.ok) { msg.textContent = data.error || ("failed: " + r.status); return; }
+    // a partial import is the normal outcome on a second run — say which
+    // ones didn't make it rather than reporting a flat success
+    if (data.skipped && data.skipped.length)
+      msg.textContent = "added " + data.added + ", skipped " + data.skipped.length
+        + " (" + data.skipped.slice(0, 3).map(s => s.name + ": " + s.reason).join("; ") + ")";
+    else
+      toggleImportTuner();
+    refreshChannels(true);
+    fetchTunerLineup(); // re-mark what is now already added
+  } catch (e) {
+    msg.textContent = "request failed: " + e.message;
+  }
 }
 
 async function submitAddChannel() {
