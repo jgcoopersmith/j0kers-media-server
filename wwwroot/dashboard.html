@@ -561,8 +561,9 @@
       <button onclick="pinMediaViaPicker()" class="edit-only">⭐ Pin media</button>
       <button onclick="addLibraryRoot()" class="edit-only">➕ Add folder</button></h2>
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
-      <input id="lib-search" class="am-in" style="flex:1" placeholder="🔍 Search the whole library — title, file name, folder"
-             oninput="librarySearchTyped()" onkeydown="if(event.key==='Escape')clearLibrarySearch()">
+      <input id="lib-search" class="am-in" style="flex:1" placeholder="🔍 Search the whole library — Enter to search again"
+             oninput="librarySearchTyped()"
+             onkeydown="if(event.key==='Escape')clearLibrarySearch();else if(event.key==='Enter')librarySearchNow()">
       <button id="lib-search-clear" onclick="clearLibrarySearch()" style="display:none">✕ Clear</button>
     </div>
     <div id="favorites" style="margin-bottom:6px"></div>
@@ -2715,6 +2716,14 @@ function librarySearchTyped() {
   if (q.length < 2) return;   // the server refuses these anyway
   // typing is faster than a disk walk; only search once it pauses
   libSearchTimer = setTimeout(runLibrarySearch, 350);
+}
+
+/* Enter runs it now, and runs it again on text that hasn't changed — after
+   files have moved or been added, re-asking the same question is the whole
+   point, and typing doesn't fire when nothing was typed. */
+function librarySearchNow() {
+  clearTimeout(libSearchTimer);
+  runLibrarySearch();
 }
 
 async function runLibrarySearch() {

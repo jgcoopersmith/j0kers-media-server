@@ -147,8 +147,10 @@ set `ffmpeg.path`), the dashboard becomes a full media center:
   search answers "where is that film". Terms match the readable title as
   well as the file name, so `skyfall 2012` finds
   `Skyfall.2012.1080p.BluRay.x264-YIFY.mkv`, and all terms must match.
-  Matching folders are listed too. Results replace the listing until the
-  box is cleared (or Esc), which puts you back in the folder you were in.
+  Matching folders are listed too. **Enter** runs it again on the same
+  text — a re-search after files have moved, since typing nothing fires
+  nothing. Results replace the listing until the box is cleared (or Esc),
+  which puts you back in the folder you were in.
   The walk is bounded at 300 results or 5 seconds and says which one it
   hit, so a library on a slow network drive can't hang the card.
 - **Codecs** — transcode output codecs are configurable:
