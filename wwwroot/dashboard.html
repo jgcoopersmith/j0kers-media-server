@@ -564,7 +564,7 @@
       <input id="lib-search" class="am-in" style="flex:1" placeholder="🔍 Search the whole library — Enter to search again"
              oninput="librarySearchTyped()"
              onkeydown="if(event.key==='Escape')clearLibrarySearch();else if(event.key==='Enter')librarySearchNow()">
-      <select id="lib-scope" class="am-in" style="width:auto;max-width:40%" onchange="librarySearchNow()"
+      <select id="lib-scope" class="am-in" style="width:auto;max-width:40%" onchange="librarySearchScopeChanged()"
               title="Where to search">
         <option value="">Everywhere</option>
       </select>
@@ -2638,6 +2638,7 @@ async function refreshLibraryRoots(force) {
       + '</span>';
   }
   $("lib-roots").innerHTML = h;
+  renderSearchScope(); // a folder added or removed changes what can be searched
 }
 
 async function addLibraryRoot() {
@@ -2730,18 +2731,45 @@ function librarySearchNow() {
   runLibrarySearch();
 }
 
-/* The scope box offers the folder on screen beside "Everywhere". It is
-   rebuilt as you browse, and the choice is kept: someone who narrowed to a
-   folder and then opened a subfolder meant to narrow further, not to be
-   thrown back to the whole library. */
+/* The scope box lists every library folder, not just the one on screen —
+   narrowing to a folder should not mean navigating there first. The folder
+   currently open is offered as well when it is deeper than a library root,
+   and "Choose a folder…" reaches anything else. Rebuilt as you browse, and
+   the current choice is kept whenever it still exists. */
+const folderName = p => (p || "").split(/[\\/]/).filter(Boolean).pop() || p;
+
 function renderSearchScope() {
   const sel = $("lib-scope");
-  const wasFolder = sel.value !== "";
+  const keep = sel.value;
   const here = currentLibPath;
-  const name = here ? here.split(/[\\/]/).filter(Boolean).pop() : "";
-  sel.innerHTML = '<option value="">Everywhere</option>'
-    + (here ? '<option value="' + esc(here) + '">In ' + esc(name) + "</option>" : "");
-  sel.value = wasFolder && here ? here : "";
+  const roots = libraryRoots || [];
+  const known = new Set(roots.map(r => r.toLowerCase()));
+
+  let h = '<option value="">Everywhere</option>';
+  for (const r of roots) h += '<option value="' + esc(r) + '">In ' + esc(folderName(r)) + "</option>";
+  // the open folder, when it is somewhere below a root
+  if (here && !known.has(here.toLowerCase()))
+    h += '<option value="' + esc(here) + '">In ' + esc(folderName(here)) + " (open)</option>";
+  if (keep && keep !== "__pick__" && !known.has(keep.toLowerCase()) && keep !== here)
+    h += '<option value="' + esc(keep) + '">In ' + esc(folderName(keep)) + "</option>";
+  h += '<option value="__pick__">Choose a folder…</option>';
+  sel.innerHTML = h;
+
+  sel.value = [...sel.options].some(o => o.value === keep) ? keep : "";
+}
+
+/* "Choose a folder…" is an action, not a scope — pick one, then scope to
+   it. Cancelling has to put the box back where it was rather than leaving
+   it on an option that means nothing. */
+async function librarySearchScopeChanged() {
+  const sel = $("lib-scope");
+  if (sel.value !== "__pick__") { librarySearchNow(); return; }
+  sel.value = "";
+  const p = await pickPath({ mode: "folder", title: "Search inside which folder?", startPath: currentLibPath || "" });
+  if (!p) return;
+  sel.insertBefore(new Option("In " + folderName(p), p), sel.lastElementChild);
+  sel.value = p;
+  librarySearchNow();
 }
 
 async function runLibrarySearch() {
