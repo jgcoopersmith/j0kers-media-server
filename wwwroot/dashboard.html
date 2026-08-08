@@ -564,6 +564,10 @@
       <input id="lib-search" class="am-in" style="flex:1" placeholder="🔍 Search the whole library — Enter to search again"
              oninput="librarySearchTyped()"
              onkeydown="if(event.key==='Escape')clearLibrarySearch();else if(event.key==='Enter')librarySearchNow()">
+      <select id="lib-scope" class="am-in" style="width:auto;max-width:40%" onchange="librarySearchNow()"
+              title="Where to search">
+        <option value="">Everywhere</option>
+      </select>
       <button id="lib-search-clear" onclick="clearLibrarySearch()" style="display:none">✕ Clear</button>
     </div>
     <div id="favorites" style="margin-bottom:6px"></div>
@@ -2726,6 +2730,20 @@ function librarySearchNow() {
   runLibrarySearch();
 }
 
+/* The scope box offers the folder on screen beside "Everywhere". It is
+   rebuilt as you browse, and the choice is kept: someone who narrowed to a
+   folder and then opened a subfolder meant to narrow further, not to be
+   thrown back to the whole library. */
+function renderSearchScope() {
+  const sel = $("lib-scope");
+  const wasFolder = sel.value !== "";
+  const here = currentLibPath;
+  const name = here ? here.split(/[\\/]/).filter(Boolean).pop() : "";
+  sel.innerHTML = '<option value="">Everywhere</option>'
+    + (here ? '<option value="' + esc(here) + '">In ' + esc(name) + "</option>" : "");
+  sel.value = wasFolder && here ? here : "";
+}
+
 async function runLibrarySearch() {
   const q = $("lib-search").value.trim();
   if (q.length < 2) return;
@@ -2734,9 +2752,11 @@ async function runLibrarySearch() {
   if (libBrowsePath === null) libBrowsePath = currentLibPath;
   box.innerHTML = '<div class="empty">searching…</div>';
 
+  const scope = $("lib-scope").value;
   let data;
   try {
-    data = await api("/api/library/search?q=" + encodeURIComponent(q));
+    data = await api("/api/library/search?q=" + encodeURIComponent(q)
+                     + (scope ? "&folder=" + encodeURIComponent(scope) : ""));
   } catch (e) {
     if (gen !== libSearchGen) return;
     box.innerHTML = '<div class="empty">search failed: ' + esc(e.message) + "</div>";
@@ -2756,6 +2776,9 @@ async function runLibrarySearch() {
   let h = '<div style="color:var(--muted);font-size:12px;margin-bottom:6px">'
     + (total ? total + " match" + (total === 1 ? "" : "es") : "nothing matched")
     + " for “" + esc(data.query) + "”"
+    + (data.folder
+        ? " in " + esc(data.folder.split(/[\\/]/).filter(Boolean).pop())
+        : " across the whole library")
     + (data.truncated ? " · stopped at the first 300 — narrow the search"
        : data.timedOut ? " · gave up after 5 seconds, so there may be more" : "")
     + "</div>";
@@ -2823,6 +2846,7 @@ async function loadLibrary(path) {
   }
 
   currentLibPath = data.path;
+  renderSearchScope();
   $("lib-playall").style.display = ffmpegOk ? "" : "none";
   $("lib-save").style.display = "";
   refreshLibraryRoots(true); // update active chip highlight

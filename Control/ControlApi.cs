@@ -1576,6 +1576,26 @@ public sealed partial class ControlApi : IDisposable
             return;
         }
 
+        // No folder means the whole library, which is the useful default —
+        // "where is that film" rarely knows the folder. A folder narrows it,
+        // and has to be inside a library root: this walks the disk, so the
+        // scope is not the caller's to choose freely.
+        var scope = ctx.Request.QueryString["folder"] ?? "";
+        IReadOnlyList<string> roots;
+        if (scope.Length > 0)
+        {
+            if (!TryLocalPath(scope, out var full) || !IsShared(full) || !Directory.Exists(full))
+            {
+                WriteJson(res, 400, new { error = "that folder is not in the library" });
+                return;
+            }
+            roots = new[] { full };
+        }
+        else
+        {
+            roots = _library.All;
+        }
+
         var terms = query.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         const int cap = 300;
         var deadline = DateTime.UtcNow.AddSeconds(5);
@@ -1589,7 +1609,7 @@ public sealed partial class ControlApi : IDisposable
         bool Matches(string name) =>
             terms.All(t => name.Contains(t, StringComparison.OrdinalIgnoreCase));
 
-        foreach (var root in _library.All)
+        foreach (var root in roots)
         {
             if (truncated || timedOut) break;
             var stack = new Stack<string>();
@@ -1638,6 +1658,9 @@ public sealed partial class ControlApi : IDisposable
         WriteJson(res, 200, new
         {
             query,
+            // echoed back so a result arriving late can be matched to the
+            // scope it was asked for, not the one now on screen
+            folder = scope,
             files,
             folders,
             scanned,

@@ -143,8 +143,12 @@ set `ffmpeg.path`), the dashboard becomes a full media center:
   poster frames to be re-fetched, which a replaced file otherwise wouldn't
   get, since the browser caches those for a day under an unchanged URL.
 - **Search** — the box at the top of the card searches **every library
-  folder**, not the one on screen: browsing answers "what is in here",
-  search answers "where is that film". Terms match the readable title as
+  folder** by default, not just the one on screen: browsing answers "what
+  is in here", search answers "where is that film". The box beside it
+  narrows to the folder you have open — pick *In &lt;folder&gt;* and only
+  that folder and its subfolders are searched; it follows you as you browse
+  and keeps the narrowing, since opening a subfolder means narrowing
+  further rather than starting over. Terms match the readable title as
   well as the file name, so `skyfall 2012` finds
   `Skyfall.2012.1080p.BluRay.x264-YIFY.mkv`, and all terms must match.
   Matching folders are listed too. **Enter** runs it again on the same
@@ -485,7 +489,7 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `POST /api/channels/import` | save a batch of channels idle; per-channel failures are reported, not thrown |
 | `GET/POST/DELETE /api/playlists` | list / save / forget folder playlists (persisted to `playlists.json`) |
 | `GET/POST/DELETE /api/library` | list / add / remove library root folders (persisted to `library.json`) |
-| `GET /api/library/search?q=…` | playable files and folders matching every term, across all library roots |
+| `GET /api/library/search?q=…` | playable files and folders matching every term; all library roots, or one `&folder=` inside them |
 | `GET /api/thumb?path=` | cached JPEG thumbnail for a video or picture (ffmpeg) |
 | `GET/POST/DELETE /api/favorites` | list / pin / unpin quick-button media (persisted to `favorites.json`) |
 | `GET /api/codecs` | active transcode codecs + every encoder in the ffmpeg build |
