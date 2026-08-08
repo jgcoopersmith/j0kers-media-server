@@ -2740,7 +2740,6 @@ const folderName = p => (p || "").split(/[\\/]/).filter(Boolean).pop() || p;
 
 function renderSearchScope() {
   const sel = $("lib-scope");
-  const keep = sel.value;
   const here = currentLibPath;
   const roots = libraryRoots || [];
   const known = new Set(roots.map(r => r.toLowerCase()));
@@ -2750,25 +2749,41 @@ function renderSearchScope() {
   // the open folder, when it is somewhere below a root
   if (here && !known.has(here.toLowerCase()))
     h += '<option value="' + esc(here) + '">In ' + esc(folderName(here)) + " (open)</option>";
-  if (keep && keep !== "__pick__" && !known.has(keep.toLowerCase()) && keep !== here)
-    h += '<option value="' + esc(keep) + '">In ' + esc(folderName(keep)) + "</option>";
+  // a folder chosen through the picker, which may be neither a root nor open
+  if (scopeChoice && !known.has(scopeChoice.toLowerCase()) && scopeChoice !== here)
+    h += '<option value="' + esc(scopeChoice) + '">In ' + esc(folderName(scopeChoice)) + "</option>";
   h += '<option value="__pick__">Choose a folder…</option>';
   sel.innerHTML = h;
 
-  sel.value = [...sel.options].some(o => o.value === keep) ? keep : "";
+  // Opening a library or a folder IS choosing where to search — searching
+  // the whole library from inside one folder is not what the click meant.
+  // An explicit pick (including Everywhere) overrides that until the next
+  // time a folder is opened.
+  const want = scopeChoice === null ? (here || "") : scopeChoice;
+  sel.value = [...sel.options].some(o => o.value === want) ? want : "";
 }
+
+/* null = follow whatever folder is open; "" = Everywhere, chosen by hand;
+   a path = that folder, chosen by hand. Kept apart from the box's value
+   because the box is rebuilt on every poll, and a rebuild must not be able
+   to undo a choice — nor to freeze one that navigation should have moved. */
+let scopeChoice = null;
 
 /* "Choose a folder…" is an action, not a scope — pick one, then scope to
    it. Cancelling has to put the box back where it was rather than leaving
    it on an option that means nothing. */
 async function librarySearchScopeChanged() {
   const sel = $("lib-scope");
-  if (sel.value !== "__pick__") { librarySearchNow(); return; }
-  sel.value = "";
+  if (sel.value !== "__pick__") {
+    scopeChoice = sel.value;   // including "" for Everywhere, chosen by hand
+    librarySearchNow();
+    return;
+  }
+  sel.value = scopeChoice ?? "";
   const p = await pickPath({ mode: "folder", title: "Search inside which folder?", startPath: currentLibPath || "" });
   if (!p) return;
-  sel.insertBefore(new Option("In " + folderName(p), p), sel.lastElementChild);
-  sel.value = p;
+  scopeChoice = p;
+  renderSearchScope();
   librarySearchNow();
 }
 
@@ -2874,6 +2889,7 @@ async function loadLibrary(path) {
   }
 
   currentLibPath = data.path;
+  scopeChoice = null;      // opening a folder is a fresh answer to "where?"
   renderSearchScope();
   $("lib-playall").style.display = ffmpegOk ? "" : "none";
   $("lib-save").style.display = "";

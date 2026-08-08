@@ -142,13 +142,14 @@ set `ffmpeg.path`), the dashboard becomes a full media center:
   per request rather than cached, so this is a real rescan; it also forces
   poster frames to be re-fetched, which a replaced file otherwise wouldn't
   get, since the browser caches those for a day under an unchanged URL.
-- **Search** — the box at the top of the card searches **every library
-  folder** by default, not just the one on screen: browsing answers "what
-  is in here", search answers "where is that film". The box beside it
-  narrows to the folder you have open — pick *In &lt;folder&gt;* and only
-  that folder and its subfolders are searched; it follows you as you browse
-  and keeps the narrowing, since opening a subfolder means narrowing
-  further rather than starting over. Terms match the readable title as
+- **Search** — the box at the top of the card searches the library:
+  browsing answers "what is in here", search answers "where is that film".
+  **Selecting a library folder scopes the search to it** — opening one is
+  itself an answer to "where?", so the scope box beside the field follows
+  what you have open, down through subfolders. It lists every library
+  folder, plus *Choose a folder…* for anything else, and **Everywhere**
+  searches the lot; picking Everywhere by hand sticks until you next open a
+  folder. Terms match the readable title as
   well as the file name, so `skyfall 2012` finds
   `Skyfall.2012.1080p.BluRay.x264-YIFY.mkv`, and all terms must match.
   Matching folders are listed too. **Enter** runs it again on the same
