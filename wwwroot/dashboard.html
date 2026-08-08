@@ -560,6 +560,11 @@
       <button id="lib-refresh" onclick="rescanLibrary()" title="Re-read this folder from disk — picks up files added, removed or replaced since it was opened">🔄 Refresh</button>
       <button onclick="pinMediaViaPicker()" class="edit-only">⭐ Pin media</button>
       <button onclick="addLibraryRoot()" class="edit-only">➕ Add folder</button></h2>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+      <input id="lib-search" class="am-in" style="flex:1" placeholder="🔍 Search the whole library — title, file name, folder"
+             oninput="librarySearchTyped()" onkeydown="if(event.key==='Escape')clearLibrarySearch()">
+      <button id="lib-search-clear" onclick="clearLibrarySearch()" style="display:none">✕ Clear</button>
+    </div>
     <div id="favorites" style="margin-bottom:6px"></div>
     <div id="lib-roots" style="margin-bottom:6px"></div>
     <div id="playlists" style="margin-bottom:6px"></div>
@@ -2695,7 +2700,106 @@ async function rescanLibrary() {
   }
 }
 
+/* ---- library search: the whole library, not the folder on screen ----
+   Browsing answers "what is in here"; this answers "where is that film",
+   which is the question you have once a library is more than one folder
+   deep. Results replace the listing until the box is cleared, and the
+   folder you were in is remembered so clearing puts you back. */
+let libSearchTimer = null, libSearchGen = 0, libBrowsePath = null;
+
+function librarySearchTyped() {
+  clearTimeout(libSearchTimer);
+  const q = $("lib-search").value.trim();
+  $("lib-search-clear").style.display = q ? "" : "none";
+  if (!q) { clearLibrarySearch(); return; }
+  if (q.length < 2) return;   // the server refuses these anyway
+  // typing is faster than a disk walk; only search once it pauses
+  libSearchTimer = setTimeout(runLibrarySearch, 350);
+}
+
+async function runLibrarySearch() {
+  const q = $("lib-search").value.trim();
+  if (q.length < 2) return;
+  const box = $("library");
+  const gen = ++libSearchGen;
+  if (libBrowsePath === null) libBrowsePath = currentLibPath;
+  box.innerHTML = '<div class="empty">searching…</div>';
+
+  let data;
+  try {
+    data = await api("/api/library/search?q=" + encodeURIComponent(q));
+  } catch (e) {
+    if (gen !== libSearchGen) return;
+    box.innerHTML = '<div class="empty">search failed: ' + esc(e.message) + "</div>";
+    return;
+  }
+  if (gen !== libSearchGen) return; // a later search overtook this one
+
+  $("lib-path").textContent = "";
+  $("lib-playall").style.display = "none";
+  $("lib-save").style.display = "none";
+
+  const videos = data.files.filter(f => f.kind === "video");
+  const music = data.files.filter(f => f.kind === "audio");
+  const pictures = data.files.filter(f => f.kind === "image");
+  const total = data.files.length + data.folders.length;
+
+  let h = '<div style="color:var(--muted);font-size:12px;margin-bottom:6px">'
+    + (total ? total + " match" + (total === 1 ? "" : "es") : "nothing matched")
+    + " for “" + esc(data.query) + "”"
+    + (data.truncated ? " · stopped at the first 300 — narrow the search"
+       : data.timedOut ? " · gave up after 5 seconds, so there may be more" : "")
+    + "</div>";
+
+  // the folder each hit came from is half the answer when the same episode
+  // name appears in three seasons
+  const withFolder = (e, act, icon) =>
+    libRow(icon, e.title || e.name, shortFolder(e.folder), ffmpegOk || act === "lib-img" ? act : "",
+           e.path, pinButton(e.path), e.path);
+
+  if (videos.length) {
+    h += '<div class="lib-h">🎬 Videos <span class="cnt">' + videos.length + "</span></div>";
+    for (const e of videos) h += withFolder(e, "lib-play", "🎬");
+  }
+  if (music.length) {
+    h += '<div class="lib-h">🎵 Music <span class="cnt">' + music.length + "</span></div>";
+    for (const e of music) h += withFolder(e, "lib-play", "🎵");
+  }
+  if (pictures.length) {
+    h += '<div class="lib-h">🖼 Pictures <span class="cnt">' + pictures.length + "</span></div>";
+    for (const e of pictures) h += withFolder(e, "lib-img", "🖼");
+  }
+  if (data.folders.length) {
+    h += '<div class="lib-h">📁 Folders <span class="cnt">' + data.folders.length + "</span></div>";
+    for (const e of data.folders)
+      h += libRow("📁", e.name, shortFolder(e.folder), "lib-open", e.path, pinButton(e.path), e.path);
+  }
+
+  box.innerHTML = total ? h : h + '<div class="empty">no playable file matched that</div>';
+}
+
+/* A full path in the detail column pushes the name out of sight; the last
+   two segments are what actually tells them apart. */
+function shortFolder(folder) {
+  const parts = (folder || "").split(/[\\/]/).filter(Boolean);
+  return parts.length <= 2 ? folder : "…\\" + parts.slice(-2).join("\\");
+}
+
+function clearLibrarySearch() {
+  clearTimeout(libSearchTimer);
+  libSearchGen++;
+  $("lib-search").value = "";
+  $("lib-search-clear").style.display = "none";
+  const back = libBrowsePath;
+  libBrowsePath = null;
+  if (back) loadLibrary(back);
+  else if (libraryRoots.length) loadLibrary(libraryRoots[0]);
+  else $("library").innerHTML = '<div class="empty">Add a library folder — movies, music, and pictures inside it become playable here.</div>';
+}
+
 async function loadLibrary(path) {
+  // opening a folder from a result is the end of that search
+  if (libBrowsePath !== null && $("lib-search").value.trim() === "") libBrowsePath = null;
   const box = $("library");
   $("lib-path").textContent = path;
   box.innerHTML = '<div class="empty">loading…</div>';

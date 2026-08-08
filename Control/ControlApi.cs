@@ -943,6 +943,12 @@ public sealed partial class ControlApi : IDisposable
                 return;
             }
 
+            if (method == "GET" && path == "/api/library/search")
+            {
+                SearchLibrary(ctx);
+                return;
+            }
+
             if (method == "POST" && path == "/api/library")
             {
                 AddLibraryFolder(ctx);
@@ -1549,6 +1555,111 @@ public sealed partial class ControlApi : IDisposable
     private sealed record LibraryRequest(string? folder);
 
     /// <summary>POST /api/library {folder} — add a library root folder.</summary>
+    /// <summary>
+    /// GET /api/library/search?q=… — every playable file under the library
+    /// roots whose name matches, plus matching folders.
+    ///
+    /// The walk is the whole point and also the risk: a library can be a
+    /// network drive with a hundred thousand files on it, so it is bounded
+    /// by both a result cap and a wall clock, and says which one it hit
+    /// rather than quietly returning a short list. Terms are matched against
+    /// the readable title as well as the file name, so "skyfall 2012" finds
+    /// Skyfall.2012.1080p.BluRay.x264.mkv.
+    /// </summary>
+    private void SearchLibrary(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var query = (ctx.Request.QueryString["q"] ?? "").Trim();
+        if (query.Length < 2)
+        {
+            WriteJson(res, 400, new { error = "search needs at least two characters" });
+            return;
+        }
+
+        var terms = query.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        const int cap = 300;
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+
+        var files = new List<object>();
+        var folders = new List<object>();
+        var truncated = false;
+        var timedOut = false;
+        var scanned = 0;
+
+        bool Matches(string name) =>
+            terms.All(t => name.Contains(t, StringComparison.OrdinalIgnoreCase));
+
+        foreach (var root in _library.All)
+        {
+            if (truncated || timedOut) break;
+            var stack = new Stack<string>();
+            stack.Push(root);
+
+            while (stack.Count > 0)
+            {
+                if (files.Count + folders.Count >= cap) { truncated = true; break; }
+                if (DateTime.UtcNow > deadline) { timedOut = true; break; }
+
+                var dir = stack.Pop();
+                string[] subdirs, entries;
+                try
+                {
+                    subdirs = Directory.GetDirectories(dir);
+                    entries = Directory.GetFiles(dir);
+                }
+                catch
+                {
+                    continue; // unreadable folder: skip it, don't fail the search
+                }
+
+                foreach (var sub in subdirs)
+                {
+                    stack.Push(sub);
+                    var name = Path.GetFileName(sub);
+                    if (Matches(name))
+                        folders.Add(new { path = sub, name, folder = dir });
+                }
+
+                foreach (var file in entries)
+                {
+                    scanned++;
+                    var name = Path.GetFileName(file);
+                    var title = Media.StreamTitle.PrettifyFile(name);
+                    if (!Matches(name) && !Matches(title)) continue;
+                    var kind = KindOf(name);
+                    if (kind is null) continue; // not playable — not a result
+                    long size;
+                    try { size = new FileInfo(file).Length; } catch { size = 0; }
+                    files.Add(new { path = file, name, title, kind, size, folder = dir });
+                }
+            }
+        }
+
+        WriteJson(res, 200, new
+        {
+            query,
+            files,
+            folders,
+            scanned,
+            // "300 of them" and "as far as I got in 5 seconds" are different
+            // answers and the dashboard says which
+            truncated,
+            timedOut,
+        });
+    }
+
+    private static string? KindOf(string name) => Path.GetExtension(name).ToLowerInvariant() switch
+    {
+        ".mp4" or ".m4v" or ".mkv" or ".avi" or ".mov" or ".webm" or ".ts" or ".m2ts" or ".mts" or ".wmv"
+            or ".flv" or ".f4v" or ".mpg" or ".mpeg" or ".mpe" or ".m1v" or ".m2v" or ".vob" or ".3gp"
+            or ".3g2" or ".ogv" or ".ogm" or ".mxf" or ".asf" or ".rm" or ".rmvb" or ".divx" or ".dv" => "video",
+        ".mp3" or ".flac" or ".wav" or ".m4a" or ".m4b" or ".ogg" or ".oga" or ".aac" or ".wma" or ".opus"
+            or ".aiff" or ".aif" or ".ape" or ".wv" or ".mka" or ".ac3" or ".eac3" or ".dts" or ".amr" => "audio",
+        ".jpg" or ".jpeg" or ".png" or ".gif" or ".webp" or ".bmp" or ".avif" or ".tif" or ".tiff"
+            or ".heic" or ".heif" => "image",
+        _ => null,
+    };
+
     private void AddLibraryFolder(HttpListenerContext ctx)
     {
         var res = ctx.Response;

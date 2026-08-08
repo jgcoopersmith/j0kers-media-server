@@ -142,6 +142,15 @@ set `ffmpeg.path`), the dashboard becomes a full media center:
   per request rather than cached, so this is a real rescan; it also forces
   poster frames to be re-fetched, which a replaced file otherwise wouldn't
   get, since the browser caches those for a day under an unchanged URL.
+- **Search** — the box at the top of the card searches **every library
+  folder**, not the one on screen: browsing answers "what is in here",
+  search answers "where is that film". Terms match the readable title as
+  well as the file name, so `skyfall 2012` finds
+  `Skyfall.2012.1080p.BluRay.x264-YIFY.mkv`, and all terms must match.
+  Matching folders are listed too. Results replace the listing until the
+  box is cleared (or Esc), which puts you back in the folder you were in.
+  The walk is bounded at 300 results or 5 seconds and says which one it
+  hit, so a library on a slow network drive can't hang the card.
 - **Codecs** — transcode output codecs are configurable:
   `ffmpeg.videoCodec` (h264 default, h265/hevc, vp9, av1, mpeg2, mpeg4,
   `copy`, or any raw ffmpeg encoder name) and `ffmpeg.audioCodec` (aac
@@ -474,6 +483,7 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `POST /api/channels/import` | save a batch of channels idle; per-channel failures are reported, not thrown |
 | `GET/POST/DELETE /api/playlists` | list / save / forget folder playlists (persisted to `playlists.json`) |
 | `GET/POST/DELETE /api/library` | list / add / remove library root folders (persisted to `library.json`) |
+| `GET /api/library/search?q=…` | playable files and folders matching every term, across all library roots |
 | `GET /api/thumb?path=` | cached JPEG thumbnail for a video or picture (ffmpeg) |
 | `GET/POST/DELETE /api/favorites` | list / pin / unpin quick-button media (persisted to `favorites.json`) |
 | `GET /api/codecs` | active transcode codecs + every encoder in the ffmpeg build |
