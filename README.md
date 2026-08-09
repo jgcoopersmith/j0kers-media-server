@@ -49,6 +49,12 @@ use stays that way across reloads.
 Folding is only the view: a folded card keeps running. The log still
 collects, the polls still poll, channels keep streaming.
 
+The same tab is a **drag handle** — pick a card up by it and drop it
+anywhere in the column, and a line shows where it will land. The order is
+remembered per browser alongside the folds, so the dashboard you arrange is
+the one you come back to. (The card is only draggable while the pointer is
+on the tab, so selecting text inside a card never turns into a drag.)
+
 ### No console window
 
 The server is a windowed binary, so starting it from the desktop icon opens

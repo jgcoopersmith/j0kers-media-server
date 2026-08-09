@@ -121,6 +121,19 @@
   :root[data-theme="cloud"] body {
     background: linear-gradient(180deg, #d4ebfc 0%, #e8f4fd 45%, #fdf8ec 100%) fixed;
   }
+  /* Where the sunlight actually lands. The palette had gold in it but only
+     the logo and one badge ever wore it, so the theme read as blue-and-white
+     with a yellow rumour. Titles are the right place for it: they are on
+     every card, they are short, and they are not the text you read for
+     meaning — and at 4.65:1 on white they are still legible as text. */
+  :root[data-theme="cloud"] .card > h2,
+  :root[data-theme="cloud"] .lib-h { color: var(--accent); }
+  :root[data-theme="cloud"] .card { border-top: 2px solid #f6c443; }
+  :root[data-theme="cloud"] .card-fold { color: var(--accent); }
+  :root[data-theme="cloud"] .root-chip.active {
+    border-color: var(--accent); background: #fff8e6;
+  }
+  :root[data-theme="cloud"] .tile .k { color: var(--accent); }
   .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 20px 60px; }
 
   header { display: flex; align-items: center; gap: 14px; margin-bottom: 22px; }
@@ -339,6 +352,14 @@
     font-size: 11px; color: var(--muted);
   }
   .card-fold:hover { color: var(--ink); }
+  /* the same tab is the drag handle: one control, two gestures — click to
+     fold, drag to move */
+  .card-fold { cursor: grab; }
+  .card-fold:active { cursor: grabbing; }
+  .card.dragging { opacity: .45; }
+  /* where it would land, drawn on the card being displaced */
+  .card.drop-above { box-shadow: 0 -3px 0 -1px var(--series-1); }
+  .card.drop-below { box-shadow: 0 3px 0 -1px var(--series-1); }
   /* everything but the title bar goes; the h2's own margin would otherwise
      leave a gap under a collapsed card */
   .card.folded > *:not(h2) { display: none !important; }
@@ -4100,9 +4121,99 @@ function initCardFolding() {
     let saved = null;
     try { saved = localStorage.getItem(foldKey(card)); } catch {}
     setFolded(card, saved === "1", false);
+
+    makeCardDraggable(card, btn);
   }
 }
 
+/* ---- dragging a card to a new place in the column ----
+   The fold tab doubles as the handle: one control, two gestures. The card
+   is only marked draggable while the pointer is on that tab, so selecting
+   text in a card doesn't turn into a drag. */
+const ORDER_KEY = "j0kers-card-order";
+let draggingCard = null;
+
+function makeCardDraggable(card, handle) {
+  handle.addEventListener("mousedown", () => { card.draggable = true; });
+  handle.addEventListener("mouseup", () => { card.draggable = false; });
+
+  card.addEventListener("dragstart", e => {
+    draggingCard = card;
+    card.classList.add("dragging");
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      // Firefox won't start a drag without payload
+      try { e.dataTransfer.setData("text/plain", foldKey(card)); } catch {}
+    }
+  });
+
+  card.addEventListener("dragend", () => {
+    card.classList.remove("dragging");
+    card.draggable = false;
+    draggingCard = null;
+    clearDropMarks();
+    saveCardOrder();
+  });
+
+  card.addEventListener("dragover", e => {
+    if (!draggingCard || draggingCard === card) return;
+    e.preventDefault();
+    // drawing where it would land matters more than the cursor shape, so
+    // the effect hint must never be able to skip it
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    const box = card.getBoundingClientRect();
+    const above = e.clientY < box.top + box.height / 2;
+    clearDropMarks();
+    card.classList.add(above ? "drop-above" : "drop-below");
+  });
+
+  card.addEventListener("dragleave", () => card.classList.remove("drop-above", "drop-below"));
+
+  card.addEventListener("drop", e => {
+    if (!draggingCard || draggingCard === card) return;
+    e.preventDefault();
+    const box = card.getBoundingClientRect();
+    const above = e.clientY < box.top + box.height / 2;
+    card.parentNode.insertBefore(draggingCard, above ? card : card.nextSibling);
+    clearDropMarks();
+    saveCardOrder();
+  });
+}
+
+function clearDropMarks() {
+  for (const c of document.querySelectorAll(".card"))
+    c.classList.remove("drop-above", "drop-below");
+}
+
+function saveCardOrder() {
+  try {
+    localStorage.setItem(ORDER_KEY,
+      JSON.stringify([...document.querySelectorAll(".card")].map(foldKey)));
+  } catch {}
+}
+
+/* Applied before the tabs are added, so a reload comes up in the order it
+   was left. A card missing from the saved list — one added by a later
+   version — keeps its place at the end rather than disappearing. */
+function applyCardOrder() {
+  let order;
+  try { order = JSON.parse(localStorage.getItem(ORDER_KEY) || "null"); } catch { return; }
+  if (!Array.isArray(order) || !order.length) return;
+
+  const cards = [...document.querySelectorAll(".card")];
+  if (!cards.length) return;
+  const parent = cards[0].parentNode;
+  const anchor = cards[cards.length - 1].nextSibling;  // put them all back before this
+
+  const byKey = new Map(cards.map(c => [foldKey(c), c]));
+  for (const key of order) {
+    const card = byKey.get(key);
+    if (card) { parent.insertBefore(card, anchor); byKey.delete(key); }
+  }
+  for (const card of byKey.values()) parent.insertBefore(card, anchor);
+}
+
+applyCardOrder();
 initCardFolding();
 
 refreshAuth().then(async ok => {
