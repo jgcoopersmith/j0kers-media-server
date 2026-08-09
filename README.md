@@ -131,8 +131,10 @@ byte counter so a viewer leaving can't push the rate negative.
 The header has a **⏻ Start/Stop** button that stops or starts the streaming
 services (RTSP + HLS) while the dashboard stays up, a **👥 Users** dialog for
 accounts and keys, a **👤 Account** panel for your own password and keys, and
-a **🌗 theme toggle** (light/dark, remembered per browser and followed by the
-sign-in page; it tracks your system setting until you pick one), and a
+a **theme button** that cycles dark → light → **cloud** (a bright sky:
+whites and pale blues, a sunlit gradient down the page, and yellows kept
+for the accents — remembered per browser and followed by the sign-in page;
+it tracks your system setting until you pick one), and a
 **⚙ Config**
 dialog for the hostname/bind address, the RTSP/HLS/control ports, and how
 long share links live — saved to a `settings.json` sidecar and applied by restarting the

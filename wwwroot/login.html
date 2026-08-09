@@ -53,6 +53,26 @@
     --good:      #006300;
     --critical:  #d03b3b;
   }
+  /* Cloud — the dashboard's third theme, matched here so signing in after a
+     restart doesn't drop you into a different-looking server. */
+  :root[data-theme="cloud"] {
+    color-scheme: light;
+    --page:      #e8f4fd;
+    --surface:   #ffffff;
+    --surface-2: #f2f9ff;
+    --ink:       #10314f;
+    --ink-2:     #34597e;
+    --muted:     #577a98;
+    --grid:      #d3e7f7;
+    --border:    rgba(16,49,79,0.12);
+    --series-1:  #1f7ac4;
+    --good:      #12855a;
+    --warning:   #a35c00;
+    --critical:  #c62f2a;
+  }
+  :root[data-theme="cloud"] body {
+    background: linear-gradient(180deg, #d4ebfc 0%, #e8f4fd 45%, #fdf8ec 100%) fixed;
+  }
   :root[data-theme="dark"] {
     color-scheme: dark;
     --page:        #0d0d0d;
@@ -126,7 +146,7 @@
   (function () {
     try {
       var t = localStorage.getItem("j0kers-theme");
-      if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+      if (t === "light" || t === "dark" || t === "cloud") document.documentElement.setAttribute("data-theme", t);
     } catch (e) { /* storage blocked — fall back to the system preference */ }
   })();
 </script>

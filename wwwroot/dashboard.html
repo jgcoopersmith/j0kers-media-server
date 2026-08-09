@@ -61,6 +61,32 @@
     --good:      #006300;
     --critical:  #d03b3b;
   }
+  /* Cloud: a bright sky rather than a third grey. Whites and pale blues
+     carry the surfaces, a deeper blue does the work the grey ink did, and
+     the yellows are sunlight — kept for accents and warnings, where being
+     eye-catching is the job, rather than spread across the page where it
+     would only be hard to read. */
+  :root[data-theme="cloud"] {
+    color-scheme: light;
+    --page:      #e8f4fd;   /* open sky */
+    --surface:   #ffffff;   /* cloud */
+    --surface-2: #f2f9ff;
+    --ink:       #10314f;
+    --ink-2:     #34597e;
+    --muted:     #577a98;
+    --grid:      #d3e7f7;
+    --baseline:  #a9cdea;
+    --border:    rgba(16,49,79,0.12);
+    --series-1:  #1f7ac4;
+    /* These three are worn as small text on white, so they are the deep end
+       of the yellows rather than the bright end — the bright yellow lives in
+       the page's sunlit gradient, where nothing has to be read on top of it.
+       All are ≥4.5:1 on a card; the pale version measured 2.1. */
+    --accent:    #9c6b00;   /* sunlight, dark enough to read */
+    --good:      #12855a;
+    --warning:   #a35c00;
+    --critical:  #c62f2a;
+  }
   /* explicit dark has to be able to beat a system that prefers light */
   :root[data-theme="dark"] {
     color-scheme: dark;
@@ -87,6 +113,13 @@
     font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
     font-size: 14px;
     line-height: 1.45;
+  }
+  /* A sky rather than a flat fill: blue at the top warming to sunlight at
+     the bottom. Fixed, so it stays put while the page scrolls instead of
+     sliding past. The one place this theme gets to be cheerful without
+     costing any legibility — the cards sit on white regardless. */
+  :root[data-theme="cloud"] body {
+    background: linear-gradient(180deg, #d4ebfc 0%, #e8f4fd 45%, #fdf8ec 100%) fixed;
   }
   .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 20px 60px; }
 
@@ -436,7 +469,7 @@
   (function () {
     try {
       var t = localStorage.getItem("j0kers-theme");
-      if (t !== "light" && t !== "dark")
+      if (t !== "light" && t !== "dark" && t !== "cloud")
         t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
       document.documentElement.setAttribute("data-theme", t);
     } catch (e) { /* storage blocked — the CSS media query still applies */ }
@@ -1025,22 +1058,31 @@ function hidePasswords(root) {
 
 /* ---- theme: follows the system until you pick, then stays picked ---- */
 const THEME_KEY = "j0kers-theme";
+const THEMES = ["dark", "light", "cloud"];
 
 function currentTheme() {
-  return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+  const t = document.documentElement.getAttribute("data-theme");
+  return THEMES.includes(t) ? t : "dark";
 }
 
 /* The icon shows what you'd get, not what you're in — a sun on a dark page
-   reads as "go light" rather than as a status light. */
+   reads as "go light" rather than as a status light. With three themes the
+   button is a cycle, so it names the next one as well. */
+const THEME_NEXT = {
+  dark:  { icon: "☀",  label: "Switch to the light theme" },
+  light: { icon: "☁",  label: "Switch to the cloud theme" },
+  cloud: { icon: "🌙", label: "Switch to the dark theme" },
+};
+
 function paintThemeButton() {
-  const dark = currentTheme() === "dark";
-  $("themebtn").textContent = dark ? "☀" : "🌙";
-  $("themebtn").title = dark ? "Switch to the light theme" : "Switch to the dark theme";
-  $("themebtn").setAttribute("aria-label", $("themebtn").title);
+  const next = THEME_NEXT[currentTheme()];
+  $("themebtn").textContent = next.icon;
+  $("themebtn").title = next.label;
+  $("themebtn").setAttribute("aria-label", next.label);
 }
 
 function toggleTheme() {
-  const next = currentTheme() === "dark" ? "light" : "dark";
+  const next = THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length];
   document.documentElement.setAttribute("data-theme", next);
   try { localStorage.setItem(THEME_KEY, next); } catch { /* private mode */ }
   paintThemeButton();
