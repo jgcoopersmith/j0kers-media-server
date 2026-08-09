@@ -146,7 +146,7 @@ public sealed partial class ControlApi
                 return true;
 
             case ("POST", "/api/users"):
-                CreateUser(ctx);
+                CreateUser(ctx, auth);
                 return true;
 
             case ("PUT", "/api/users"):
@@ -325,7 +325,7 @@ public sealed partial class ControlApi
 
     // ---- account administration ----
 
-    private void CreateUser(HttpListenerContext ctx)
+    private void CreateUser(HttpListenerContext ctx, AuthResult auth)
     {
         var res = ctx.Response;
         if (!TryReadJson<UserRequest>(ctx, out var req, out var error))
@@ -343,6 +343,15 @@ public sealed partial class ControlApi
         if (!string.IsNullOrEmpty(req.password) && UserStore.ValidatePassword(req.password) is string passwordError)
         {
             WriteJson(res, 400, new { error = passwordError });
+            return;
+        }
+
+        // Only a server admin may make one. Otherwise an ordinary admin
+        // could mint an account above their own level and sign into it,
+        // which makes the tier decorative.
+        if (UserStore.LevelOf(req.role) >= AccessLevel.ServerAdmin && !auth.IsServerAdmin)
+        {
+            WriteJson(res, 403, new { error = "only a Server Admin can create a Server Admin" });
             return;
         }
 
@@ -376,9 +385,20 @@ public sealed partial class ControlApi
         // foot-gun, and the store's last-admin rule wouldn't catch it when
         // another admin exists
         var self = auth.User is not null && auth.User.Id == user.Id;
-        if (self && (req.enabled == false || (req.role is not null && !UserStore.NormalizeRole(req.role).Equals(UserStore.RoleAdmin))))
+        if (self && (req.enabled == false
+                     || (req.role is not null && UserStore.LevelOf(req.role) < AccessLevel.Admin)))
         {
             WriteJson(res, 400, new { error = "you cannot remove your own administrator rights" });
+            return;
+        }
+
+        // Granting the top tier, or taking it away, is a server admin's
+        // alone — including demoting one, which an ordinary admin doing it
+        // would be a lateral attack rather than administration.
+        if (!auth.IsServerAdmin
+            && (UserStore.LevelOf(req.role) >= AccessLevel.ServerAdmin || user.IsServerAdmin))
+        {
+            WriteJson(res, 403, new { error = "only a Server Admin can change a Server Admin" });
             return;
         }
 
@@ -453,7 +473,7 @@ public sealed partial class ControlApi
             id = "",
             username = auth.Method == "token" ? "control token" : "local",
             displayName = auth.Method == "token" ? "Control token" : "Unclaimed server",
-            role = UserStore.RoleAdmin,
+            role = auth.Level >= AccessLevel.ServerAdmin ? UserStore.RoleServerAdmin : UserStore.RoleAdmin,
             enabled = true,
             hasPassword = false,
             keys = Array.Empty<object>(),
@@ -466,6 +486,7 @@ public sealed partial class ControlApi
         username = u.Username,
         displayName = u.DisplayName,
         role = u.Role,
+        roleLabel = UserStore.RoleLabel(u.Role),
         enabled = u.Enabled,
         hasPassword = u.HasPassword,
         createdUtc = u.CreatedUtc,

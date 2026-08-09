@@ -299,6 +299,7 @@
     font-size: 10px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted);
     border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px;
   }
+  .badge.serveradmin { color: var(--good); border-color: color-mix(in srgb, var(--good) 45%, transparent); }
   .badge.admin { color: var(--series-1); border-color: color-mix(in srgb, var(--series-1) 45%, transparent); }
   .badge.edit { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
   .badge.off { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 45%, transparent); }
@@ -325,6 +326,8 @@
      the page honest about what the buttons would achieve. */
   body:not(.is-admin) .admin-only,
   body:not(.is-admin) [data-act="session-kill"] { display: none !important; }
+  /* the log names paths, accounts and client addresses — server admin only */
+  body:not(.is-server-admin) .server-admin-only { display: none !important; }
   body:not(.can-edit) .edit-only,
   body:not(.can-edit) [data-act$="-remove"],
   body:not(.can-edit) [data-act="fav-add"],
@@ -454,7 +457,7 @@
     <div class="tile"><div class="k">HLS streams</div><div class="v" id="t-hls">–</div><div class="d" id="t-hls-d">on port –</div></div>
   </div>
 
-  <div class="card admin-only" id="logcard">
+  <div class="card server-admin-only" id="logcard">
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Log</span>
       <select id="log-filter" class="am-in" style="width:auto" onchange="renderLog()" title="Hide anything below this level">
         <option value="TRACE">Everything</option>
@@ -681,6 +684,8 @@
   <div class="dlg wide" role="dialog" aria-modal="true">
     <h3>👥 User accounts</h3>
     <div class="hint" style="margin-top:0">
+      <b>Server Admin</b> — runs the machine: everything below, plus the Log card, and the only role
+      that can grant or change this one.<br>
       <b>Admin</b> — full access, including the Config dialog, the power button, and these accounts.<br>
       <b>Edit</b> — adds and removes library folders, channels, mounts, playlists and streams, but can't
       reach the Config dialog or accounts.<br>
@@ -696,6 +701,7 @@
         <option value="read">read</option>
         <option value="edit">edit</option>
         <option value="admin">admin</option>
+        <option value="serveradmin">Server Admin</option>
       </select>
       <button class="go" onclick="createUser()">Add</button>
     </div>
@@ -1036,8 +1042,9 @@ async function refreshAuth() {
   } catch { return false; }
   me = authState.user || null;
   const role = (me && me.role) || "";
-  document.body.classList.toggle("is-admin", role === "admin");
-  document.body.classList.toggle("can-edit", role === "admin" || role === "edit");
+  document.body.classList.toggle("is-server-admin", role === "serveradmin");
+  document.body.classList.toggle("is-admin", role === "admin" || role === "serveradmin");
+  document.body.classList.toggle("can-edit", role === "admin" || role === "edit" || role === "serveradmin");
   $("acct-pill").textContent = me ? (me.username || "local") : "sign in";
   $("acctbtn").style.display = authState.authRequired ? "" : "none";
   if (!authState.authenticated) { showLogin(); return false; }
@@ -1134,7 +1141,7 @@ async function loadUsers() {
   try { data = await api("/api/users"); }
   catch (e) { $("users-list").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; return; }
   $("users-list").innerHTML = data.users.map(u => {
-    const badges = '<span class="badge ' + esc(u.role) + '">' + esc(u.role) + "</span>"
+    const badges = '<span class="badge ' + esc(u.role) + '">' + esc(u.roleLabel || u.role) + "</span>"
       + (u.enabled ? "" : '<span class="badge off">disabled</span>')
       + (u.hasPassword ? "" : '<span class="badge">key only</span>')
       + (u.self ? '<span class="badge">you</span>' : "");
@@ -1187,8 +1194,8 @@ async function toggleUserEdit(id) {
     + '<input class="am-in" id="ue-name-' + id + '" value="' + esc(u.username) + '" style="width:140px">'
     + '<input class="am-in" id="ue-disp-' + id + '" value="' + esc(u.displayName) + '" placeholder="display name" style="flex:1;min-width:120px">'
     + '<select class="am-in" id="ue-role-' + id + '">'
-    + ["read", "edit", "admin"].map(r =>
-        '<option value="' + r + '"' + (u.role === r ? " selected" : "") + ">" + r + "</option>").join("")
+    + [["read", "read"], ["edit", "edit"], ["admin", "admin"], ["serveradmin", "Server Admin"]].map(([r, label]) =>
+        '<option value="' + r + '"' + (u.role === r ? " selected" : "") + ">" + label + "</option>").join("")
     + "</select>"
     + '<label class="chk" style="margin:0"><input type="checkbox" id="ue-on-' + id + '"' + (u.enabled ? " checked" : "") + "><span>enabled</span></label>"
     + "</div>"
@@ -1331,8 +1338,8 @@ async function tick() {
   if (transcodingNow.length || hadTranscodes) renderHls();
   hadTranscodes = transcodingNow.length > 0;
   renderSessions(sessions.sessions);
-  // the card is admin-only, and so is the endpoint behind it
-  if (document.body.classList.contains("is-admin")) refreshLog();
+  // the card is server-admin-only, and so is the endpoint behind it
+  if (document.body.classList.contains("is-server-admin")) refreshLog();
   refreshHistory();
   refreshMounts();   // cheap, cached-ish
   refreshHls();

@@ -17,6 +17,13 @@ public enum AccessLevel
     Edit = 2,
     /// <summary>Everything: configuration, the power button, and accounts.</summary>
     Admin = 3,
+    /// <summary>
+    /// The person who runs the machine, as distinct from the person who runs
+    /// the library. Everything an administrator has, plus what exposes the
+    /// server's own workings — the log, which names file paths, accounts and
+    /// client addresses — and the sole right to grant this level.
+    /// </summary>
+    ServerAdmin = 4,
 }
 
 /// <summary>
@@ -25,7 +32,8 @@ public enum AccessLevel
 public sealed record AuthResult(AccessLevel Level, UserAccount? User, string Method)
 {
     public static readonly AuthResult Anonymous = new(AccessLevel.None, null, "none");
-    public bool IsAdmin => Level == AccessLevel.Admin;
+    public bool IsAdmin => Level >= AccessLevel.Admin;
+    public bool IsServerAdmin => Level >= AccessLevel.ServerAdmin;
     /// <summary>Cookie-backed requests are the ones a hostile page could ride; keys and tokens are not.</summary>
     public bool IsCookie => Method == "session";
     public string Name => User?.Username ?? (Method == "token" ? "legacy-token" : "anonymous");
@@ -119,7 +127,10 @@ public sealed class AuthService
         if (ReadSessionCookie(ctx) is string token && ResolveSession(token) is UserAccount sessionUser)
             return new AuthResult(LevelOf(sessionUser), sessionUser, "session");
 
-        if (!Enforcing) return new AuthResult(AccessLevel.Admin, null, "open");
+        // No accounts yet: whoever reaches an unclaimed server is its owner,
+        // top tier included — otherwise a fresh install would hide the log
+        // from the only person there.
+        if (!Enforcing) return new AuthResult(AccessLevel.ServerAdmin, null, "open");
 
         return AuthResult.Anonymous;
     }

@@ -38,7 +38,9 @@ public sealed class UserAccount
     [JsonPropertyName("createdUtc")] public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
     [JsonPropertyName("lastLoginUtc")] public DateTime? LastLoginUtc { get; set; }
 
-    [JsonIgnore] public bool IsAdmin => Role.Equals(UserStore.RoleAdmin, StringComparison.OrdinalIgnoreCase);
+    /// <summary>Administrator or above — a server admin is one too.</summary>
+    [JsonIgnore] public bool IsAdmin => UserStore.LevelOf(Role) >= AccessLevel.Admin;
+    [JsonIgnore] public bool IsServerAdmin => UserStore.LevelOf(Role) >= AccessLevel.ServerAdmin;
     [JsonIgnore] public bool HasPassword => PasswordHash.Length > 0;
 }
 
@@ -51,6 +53,8 @@ public sealed class UserAccount
 /// </summary>
 public sealed class UserStore
 {
+    /// <summary>Runs the machine: everything an admin has, plus the log, plus granting this role.</summary>
+    public const string RoleServerAdmin = "serveradmin";
     /// <summary>Full access: configuration, the power button, and accounts.</summary>
     public const string RoleAdmin = "admin";
     /// <summary>Adds and removes library content, but can't reach the Config dialog or accounts.</summary>
@@ -58,7 +62,7 @@ public sealed class UserStore
     /// <summary>Watches what has been shared. Changes nothing.</summary>
     public const string RoleRead = "read";
 
-    public static readonly string[] Roles = { RoleAdmin, RoleEdit, RoleRead };
+    public static readonly string[] Roles = { RoleServerAdmin, RoleAdmin, RoleEdit, RoleRead };
 
     private const int Iterations = 210_000;
     private const int SaltBytes = 16;
@@ -254,6 +258,8 @@ public sealed class UserStore
     /// </summary>
     public static string NormalizeRole(string? role) => (role?.Trim().ToLowerInvariant()) switch
     {
+        // the spellings a person or an older config might reasonably use
+        RoleServerAdmin or "server-admin" or "server admin" or "serveradministrator" => RoleServerAdmin,
         RoleAdmin => RoleAdmin,
         RoleEdit => RoleEdit,
         _ => RoleRead,
@@ -261,9 +267,19 @@ public sealed class UserStore
 
     public static AccessLevel LevelOf(string? role) => NormalizeRole(role) switch
     {
+        RoleServerAdmin => AccessLevel.ServerAdmin,
         RoleAdmin => AccessLevel.Admin,
         RoleEdit => AccessLevel.Edit,
         _ => AccessLevel.Read,
+    };
+
+    /// <summary>The human name for a role, for the dashboard and for logs.</summary>
+    public static string RoleLabel(string? role) => NormalizeRole(role) switch
+    {
+        RoleServerAdmin => "Server Admin",
+        RoleAdmin => "Admin",
+        RoleEdit => "Edit",
+        _ => "Read",
     };
 
     /// <summary>
@@ -277,7 +293,7 @@ public sealed class UserStore
         {
             var newRole = role is null ? user.Role : NormalizeRole(role);
             var newEnabled = enabled ?? user.Enabled;
-            var stillAdmin = newEnabled && newRole.Equals(RoleAdmin, StringComparison.OrdinalIgnoreCase);
+            var stillAdmin = newEnabled && LevelOf(newRole) >= AccessLevel.Admin;
             if (!stillAdmin && user.IsAdmin && user.Enabled && !_users.Any(u =>
                     u.Id != user.Id && u.Enabled && u.IsAdmin))
                 throw new InvalidOperationException("this is the last enabled administrator");

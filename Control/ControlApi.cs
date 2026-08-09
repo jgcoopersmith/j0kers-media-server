@@ -222,8 +222,11 @@ public sealed partial class ControlApi : IDisposable
         switch (path)
         {
             // the log names paths, accounts and client addresses — the most
-            // revealing thing the server holds
+            // revealing thing the server holds, so it belongs to whoever
+            // runs the machine rather than to whoever runs the library
             case "/api/log":
+                return AccessLevel.ServerAdmin;
+
             // what an unauthenticated protocol is allowed to see is an
             // administrator's decision, not an editor's
             case "/api/dlna":
