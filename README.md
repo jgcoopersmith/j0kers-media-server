@@ -38,6 +38,17 @@ terminate buttons, server throughput, mounts with copyable `rtsp://`
 URIs, HLS stream list, and the effective config. (Set
 `control.openDashboardOnStart` to `false` for headless use.)
 
+### Folding cards away
+
+Every card — Log, Sessions, HLS streams, RTSP mounts, Media library, Live
+channels, Free TV — has a **▾** tab at the left of its title. Click it and
+the card folds down to its title bar; click again to bring it back. What is
+folded is remembered per browser, so a dashboard trimmed to the parts you
+use stays that way across reloads.
+
+Folding is only the view: a folded card keeps running. The log still
+collects, the polls still poll, channels keep streaming.
+
 ### No console window
 
 The server is a windowed binary, so starting it from the desktop icon opens

@@ -299,6 +299,19 @@
     font-size: 10px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted);
     border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px;
   }
+  /* ---- collapsing a card down to its title bar ---- */
+  .card-fold {
+    flex: 0 0 auto; width: 22px; height: 22px; padding: 0; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 11px; color: var(--muted);
+  }
+  .card-fold:hover { color: var(--ink); }
+  /* everything but the title bar goes; the h2's own margin would otherwise
+     leave a gap under a collapsed card */
+  .card.folded > *:not(h2) { display: none !important; }
+  .card.folded { padding-bottom: 14px; }
+  .card.folded h2 { margin-bottom: 0; }
+
   .badge.serveradmin { color: var(--good); border-color: color-mix(in srgb, var(--good) 45%, transparent); }
   .badge.admin { color: var(--series-1); border-color: color-mix(in srgb, var(--series-1) 45%, transparent); }
   .badge.edit { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
@@ -3991,6 +4004,64 @@ window.addEventListener("pagehide", () => {
 /* Establish who we are before the first poll, so the page never briefly
    renders administration controls to someone who isn't an administrator. */
 decoratePasswords();   // the account and add-user fields that ship in the markup
+
+/* ---- fold a card down to its title bar ----
+   A dashboard this tall is mostly scrolling past the parts you are not
+   using today. Each card gets a tab at the left of its title, and what is
+   folded is remembered per browser — the point is a layout that stays the
+   way you left it, which it wouldn't if every reload reopened everything.
+   The cards keep running while folded: the log still collects, the poll
+   still polls. Only the view is put away. */
+/* The title's own span, not the whole h2 — that would sweep in the tab's
+   arrow and every control in the bar, and a title split across lines came
+   out empty. Falls back to position, so a card with no title still gets a
+   key of its own rather than sharing one. */
+function foldKey(card) {
+  const span = card.querySelector("h2 span");
+  const title = (span?.textContent || card.id || "").trim();
+  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return "fold:" + (slug || "card" + [...document.querySelectorAll(".card")].indexOf(card));
+}
+
+function setFolded(card, folded, remember = true) {
+  card.classList.toggle("folded", folded);
+  const btn = card.querySelector(".card-fold");
+  if (btn) {
+    btn.textContent = folded ? "▸" : "▾";
+    btn.title = folded ? "Expand" : "Collapse";
+    btn.setAttribute("aria-expanded", folded ? "false" : "true");
+  }
+  if (remember) {
+    try { localStorage.setItem(foldKey(card), folded ? "1" : "0"); } catch {}
+  }
+}
+
+function initCardFolding() {
+  for (const card of document.querySelectorAll(".card")) {
+    const h2 = card.querySelector("h2");
+    if (!h2 || h2.querySelector(".card-fold")) continue;
+
+    // a plain (non-flex) title bar has to become one, or the tab and the
+    // text stack instead of sitting side by side
+    if (getComputedStyle(h2).display !== "flex") {
+      h2.style.display = "flex";
+      h2.style.alignItems = "center";
+      h2.style.gap = "8px";
+    }
+
+    const btn = document.createElement("button");
+    btn.className = "card-fold";
+    btn.type = "button";
+    btn.onclick = () => setFolded(card, !card.classList.contains("folded"));
+    h2.insertBefore(btn, h2.firstChild);
+
+    let saved = null;
+    try { saved = localStorage.getItem(foldKey(card)); } catch {}
+    setFolded(card, saved === "1", false);
+  }
+}
+
+initCardFolding();
 
 refreshAuth().then(async ok => {
   if (!ok) return;
