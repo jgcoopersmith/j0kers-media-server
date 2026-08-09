@@ -1,13 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <!-- Windowed, so the desktop icon opens no console window. Launched from
+         a terminal it attaches to that one instead (see ConsoleWindow). -->
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>J0kersMediaServer</RootNamespace>
     <AssemblyName>j0kers-media-server</AssemblyName>
-    <Version>0.1.56</Version>
+    <Version>0.1.57</Version>
     <ApplicationIcon>assets\j0kers.ico</ApplicationIcon>
     <!-- Protocol text (HLS EXTINF, RTSP dates) must never be locale-formatted:
          a de-DE machine would otherwise emit "#EXTINF:6,000," and break playback. -->

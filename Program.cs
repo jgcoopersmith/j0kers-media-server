@@ -4,6 +4,11 @@ using J0kersMediaServer.Hls;
 using J0kersMediaServer.Logging;
 using J0kersMediaServer.Rtsp;
 
+// Before anything is written: pick up the terminal's console if we were
+// launched from one. From the desktop icon there is none, and the dashboard's
+// Log card is where the server's output goes.
+J0kersMediaServer.Services.ConsoleWindow.AttachToParent();
+
 // ---- command line ----
 // j0kers-media-server [config.json] [-h host] [-r rtspPort] [-H hlsPort] [-c controlPort]
 // Flags override the config file, settings.json, and env vars.
@@ -101,7 +106,7 @@ if (hostArg is not null && !System.Net.IPAddress.TryParse(hostArg, out _)
 var explicitConfig = cfgArg ?? Environment.GetEnvironmentVariable("J0KERS_CONFIG");
 if (explicitConfig is not null && !File.Exists(explicitConfig))
 {
-    Console.Error.WriteLine($"Config file not found: {Path.GetFullPath(explicitConfig)}");
+    J0kersMediaServer.Services.ConsoleWindow.Fatal($"Config file not found: {Path.GetFullPath(explicitConfig)}");
     return 1;
 }
 var configPath = explicitConfig
@@ -135,13 +140,13 @@ try
 }
 catch (Exception ex)
 {
-    Console.Error.WriteLine($"Failed to load config: {ex.Message}");
+    J0kersMediaServer.Services.ConsoleWindow.Fatal($"Failed to load config: {ex.Message}");
     return 1;
 }
 
 if (new[] { config.Rtsp.Port, config.Hls.Port, config.Control.Port }.Distinct().Count() != 3)
 {
-    Console.Error.WriteLine("RTSP, HLS, and control ports must all be different " +
+    J0kersMediaServer.Services.ConsoleWindow.Fatal("RTSP, HLS, and control ports must all be different " +
         $"(got rtsp={config.Rtsp.Port} hls={config.Hls.Port} control={config.Control.Port}).");
     return 1;
 }
@@ -192,7 +197,7 @@ try
 }
 catch (Exception ex)
 {
-    Console.Error.WriteLine($"Failed to load accounts: {ex.Message}");
+    J0kersMediaServer.Services.ConsoleWindow.Fatal($"Failed to load accounts: {ex.Message}");
     return 1;
 }
 var auth = new J0kersMediaServer.Auth.AuthService(userStore, config.Control.AuthToken);
@@ -315,7 +320,7 @@ try
 }
 catch (Exception ex)
 {
-    Console.Error.WriteLine($"Startup failed: {ex.Message}");
+    J0kersMediaServer.Services.ConsoleWindow.Fatal($"Startup failed: {ex.Message}");
     tray?.Dispose(); discovery?.Dispose(); services?.Dispose(); control?.Dispose(); ffmpeg?.Dispose();
     return 1;
 }

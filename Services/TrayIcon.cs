@@ -265,7 +265,11 @@ public sealed class TrayIcon : IDisposable
         try
         {
             AppendMenu(menu, MF_STRING, IdOpen, "Open dashboard");
-            AppendMenu(menu, MF_STRING, IdConsole, _consoleVisible ? "Hide console" : "Show console");
+            // Started from the desktop icon there is no console at all —
+            // offering to show one that cannot exist is a dead menu item.
+            // The dashboard's Log card is where the output is.
+            if (GetConsoleWindow() != IntPtr.Zero)
+                AppendMenu(menu, MF_STRING, IdConsole, _consoleVisible ? "Hide console" : "Show console");
             AppendMenu(menu, MF_SEPARATOR, 0, null);
             AppendMenu(menu, MF_STRING, IdServices,
                 _servicesRunning() ? "Stop streaming services" : "Start streaming services");

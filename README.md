@@ -38,6 +38,19 @@ terminate buttons, server throughput, mounts with copyable `rtsp://`
 URIs, HLS stream list, and the effective config. (Set
 `control.openDashboardOnStart` to `false` for headless use.)
 
+### No console window
+
+The server is a windowed binary, so starting it from the desktop icon opens
+**no console window at all** — the dashboard's **Log** card is where a
+running server says what it is doing.
+
+Launched from a terminal it attaches to *that* console and prints as it
+always did, so `dotnet run`, `--help` and command-line use are unaffected;
+nothing is created that wasn't already open. A startup failure with no
+console to report it to — a broken `server.json`, a port already taken —
+raises a message box, because an icon that silently does nothing is the
+worst possible answer to a bad config file.
+
 ### Run it in the background (Windows)
 
 Tick **Minimize to the system tray** in the dashboard's ⚙ Config dialog —
