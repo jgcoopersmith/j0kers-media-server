@@ -49,11 +49,17 @@ use stays that way across reloads.
 Folding is only the view: a folded card keeps running. The log still
 collects, the polls still poll, channels keep streaming.
 
-The same tab is a **drag handle** — pick a card up by it and drop it
-anywhere in the column, and a line shows where it will land. The order is
-remembered per browser alongside the folds, so the dashboard you arrange is
-the one you come back to. (The card is only draggable while the pointer is
-on the tab, so selecting text inside a card never turns into a drag.)
+Cards are also **dragged into whatever order you want** — pick one up
+anywhere on it, not just by the tab, and a line shows where it will land.
+The title bar is where that is advertised (the cursor turns into a hand),
+the way a window says it can be moved. The order is remembered per browser
+alongside the folds, so the dashboard you arrange is the one you come back
+to.
+
+Dragging is off over the parts that need the mouse themselves — buttons,
+inputs, clickable rows, tables, media tiles, and the log's scrolling
+body — and over a selection in progress, so moving a card never competes
+with using one. Mouse only: HTML5 drag-and-drop has no touch equivalent.
 
 ### No console window
 

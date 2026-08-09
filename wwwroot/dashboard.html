@@ -352,10 +352,12 @@
     font-size: 11px; color: var(--muted);
   }
   .card-fold:hover { color: var(--ink); }
-  /* the same tab is the drag handle: one control, two gestures — click to
-     fold, drag to move */
+  /* The card moves by being dragged from almost anywhere on it; the title
+     bar is where that is advertised, the way a window says so. */
+  .card > h2 { cursor: grab; }
   .card-fold { cursor: grab; }
   .card-fold:active { cursor: grabbing; }
+  .card.dragging, .card.dragging > h2 { cursor: grabbing; }
   .card.dragging { opacity: .45; }
   /* where it would land, drawn on the card being displaced */
   .card.drop-above { box-shadow: 0 -3px 0 -1px var(--series-1); }
@@ -4122,7 +4124,7 @@ function initCardFolding() {
     try { saved = localStorage.getItem(foldKey(card)); } catch {}
     setFolded(card, saved === "1", false);
 
-    makeCardDraggable(card, btn);
+    makeCardDraggable(card);
   }
 }
 
@@ -4133,9 +4135,28 @@ function initCardFolding() {
 const ORDER_KEY = "j0kers-card-order";
 let draggingCard = null;
 
-function makeCardDraggable(card, handle) {
-  handle.addEventListener("mousedown", () => { card.draggable = true; });
-  handle.addEventListener("mouseup", () => { card.draggable = false; });
+/* Anything that would rather have the mouse than move the card: controls,
+   clickable rows, media tiles, and the places you scroll or select text.
+   Everything else — the title bar, the card's own background, plain
+   headings and labels — is fair game as a handle. */
+const NO_DRAG_FROM = "button, a, input, select, textarea, label, video, audio, img," +
+                     " [data-act], [contenteditable], table, pre, code, #log, .tiles";
+
+function canDragFrom(target) {
+  if (!(target instanceof Element)) return true;
+  if (target.closest(".card-fold")) return true;      // the tab is a handle, not a control
+  if (target.closest(NO_DRAG_FROM)) return false;
+  // mid-selection: finish the selection rather than snatching the card away
+  const sel = window.getSelection?.();
+  return !sel || sel.isCollapsed;
+}
+
+function makeCardDraggable(card) {
+  // The whole card is the handle, minus the parts that need the mouse
+  // themselves. Set on mousedown rather than left on: a permanently
+  // draggable card cannot have text selected inside it at all.
+  card.addEventListener("mousedown", e => { card.draggable = canDragFrom(e.target); });
+  card.addEventListener("mouseup", () => { card.draggable = false; });
 
   card.addEventListener("dragstart", e => {
     draggingCard = card;
