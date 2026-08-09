@@ -221,6 +221,9 @@ public sealed partial class ControlApi : IDisposable
 
         switch (path)
         {
+            // the log names paths, accounts and client addresses — the most
+            // revealing thing the server holds
+            case "/api/log":
             // what an unauthenticated protocol is allowed to see is an
             // administrator's decision, not an editor's
             case "/api/dlna":
@@ -715,6 +718,31 @@ public sealed partial class ControlApi : IDisposable
             if (method == "POST" && path == "/api/settings")
             {
                 SaveSettings(ctx);
+                return;
+            }
+
+            // ---- the log, for the dashboard's panel ----
+            if (method == "GET" && path == "/api/log")
+            {
+                _ = long.TryParse(ctx.Request.QueryString["since"], out var since);
+                var take = int.TryParse(ctx.Request.QueryString["max"], out var m) ? Math.Clamp(m, 1, 500) : 200;
+                var (entries, last, missed) = Log.Since(since, take);
+                WriteJson(res, 200, new
+                {
+                    entries = entries.Select(e => new
+                    {
+                        seq = e.Seq,
+                        level = e.Level,
+                        area = e.Area,
+                        message = e.Message,
+                        at = e.At.ToString("HH:mm:ss.fff"),
+                    }),
+                    last,
+                    // the ring wrapped past what they had — there is a hole
+                    missed,
+                    level = _serverConfig.Logging.Level,
+                    file = Log.FilePath,
+                });
                 return;
             }
 

@@ -36,6 +36,59 @@ public static class Log
         var tag = level.ToString().ToUpperInvariant();
         Console.WriteLine($"{now:HH:mm:ss.fff} [{tag,-5}] [{area}] {msg}");
         _file?.Write($"{now:yyyy-MM-dd HH:mm:ss.fff} [{tag,-5}] [{area}] {msg}");
+        Remember(level, area, msg, now);
+    }
+
+    // ---- recent lines, for the dashboard's log panel ----
+
+    public readonly record struct Entry(long Seq, string Level, string Area, string Message, DateTime At);
+
+    /// <summary>
+    /// The last few hundred lines, kept in memory so the dashboard can show
+    /// what the console used to. A ring rather than a list: this is written
+    /// from every request thread and must not grow without bound, and the
+    /// file is the durable record for anything older.
+    /// </summary>
+    private const int Capacity = 500;
+
+    private static readonly Entry[] _ring = new Entry[Capacity];
+    private static readonly object _ringLock = new();
+    private static long _seq;
+
+    private static void Remember(LogLevel level, string area, string msg, DateTime at)
+    {
+        lock (_ringLock)
+        {
+            var seq = ++_seq;
+            _ring[(seq - 1) % Capacity] = new Entry(seq, level.ToString().ToUpperInvariant(), area, msg, at);
+        }
+    }
+
+    /// <summary>
+    /// Everything logged after <paramref name="since"/>. The caller passes
+    /// back the last sequence it saw, so a poll returns the two new lines
+    /// rather than the last five hundred every time.
+    ///
+    /// <paramref name="missed"/> is true when the ring has wrapped past what
+    /// the caller last saw — it lost lines, and saying so beats a silent gap.
+    /// </summary>
+    public static (IReadOnlyList<Entry> Entries, long Last, bool Missed) Since(long since, int max = Capacity)
+    {
+        lock (_ringLock)
+        {
+            var last = _seq;
+            var oldest = Math.Max(1, last - Capacity + 1);
+            var missed = since > 0 && since < oldest - 1;
+            var from = Math.Max(since + 1, oldest);
+            if (from > last) return (Array.Empty<Entry>(), last, missed);
+
+            // a first fetch asks for the tail, not the whole ring
+            if (last - from + 1 > max) from = last - max + 1;
+
+            var result = new List<Entry>((int)(last - from + 1));
+            for (var s = from; s <= last; s++) result.Add(_ring[(s - 1) % Capacity]);
+            return (result, last, missed);
+        }
     }
 
     // ---- file sink ----

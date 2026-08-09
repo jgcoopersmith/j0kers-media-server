@@ -410,6 +410,19 @@ a `history.json` sidecar next to the config, fifty entries deep.
 
 ### Logging
 
+A **Log** card sits above Sessions on the dashboard, showing what the
+console window shows — the last 500 lines, scrollable, colour-coded by
+level, with a filter (errors only … everything) applied to the lines
+already in hand rather than only to new ones. It follows the newest line
+until you scroll up, and follows again when you scroll back to the bottom.
+Lines are fetched by sequence number, so a poll collects the two new ones
+rather than the last five hundred. Administrators only — the log names file
+paths, accounts and client addresses.
+
+Anything that fails *before* the control API is listening — a broken
+`server.json`, a port already taken — never reaches the dashboard, because
+there is no dashboard yet. The log file below is what has those.
+
 The server logs to the console and, unless you turn it off, to a rotating
 file — tray mode hides the console entirely, so without the file nothing
 survives the session. Everything below is in the dashboard's ⚙ Config
@@ -476,6 +489,7 @@ ffmpeg -i input.mp4 -c:v h264 -c:a aac -f hls -hls_time 6 -hls_list_size 0 media
 | `GET /api/config` | effective config (token redacted) |
 | `GET /api/mounts` | configured mounts + announcement URI |
 | `GET /api/sessions` | who is watching: RTSP sessions and HLS viewers |
+| `GET /api/log?since=…` | log lines after a sequence number, from a 500-line in-memory ring (admin) |
 | `GET/DELETE /api/history` | the caller's last watched items (`?count=`, default 10); DELETE forgets one `?path=` or all of them |
 | `DELETE /api/sessions/{id}` | force-terminate a session |
 | `GET /api/preview?mount=/x` | live WAV audio of a mount (dashboard player) |

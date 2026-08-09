@@ -454,6 +454,21 @@
     <div class="tile"><div class="k">HLS streams</div><div class="v" id="t-hls">–</div><div class="d" id="t-hls-d">on port –</div></div>
   </div>
 
+  <div class="card admin-only" id="logcard">
+    <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Log</span>
+      <select id="log-filter" class="am-in" style="width:auto" onchange="renderLog()" title="Hide anything below this level">
+        <option value="TRACE">Everything</option>
+        <option value="DEBUG">Debug and up</option>
+        <option value="INFO" selected>Normal</option>
+        <option value="WARN">Warnings and errors</option>
+        <option value="ERROR">Errors only</option>
+      </select>
+      <button id="log-follow" onclick="toggleLogFollow()" title="Keep the newest line in view">⏬ Following</button></h2>
+    <div id="log" style="height:220px;overflow-y:auto;border:1px solid var(--grid);border-radius:10px;
+                         background:var(--surface-2);padding:8px 10px;font-family:ui-monospace,Consolas,monospace;
+                         font-size:11.5px;line-height:1.5"></div>
+  </div>
+
   <div class="card">
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Sessions</span>
       <select id="recent" class="am-in" style="width:auto;max-width:60%" onchange="playFromHistory(this)"
@@ -1316,6 +1331,8 @@ async function tick() {
   if (transcodingNow.length || hadTranscodes) renderHls();
   hadTranscodes = transcodingNow.length > 0;
   renderSessions(sessions.sessions);
+  // the card is admin-only, and so is the endpoint behind it
+  if (document.body.classList.contains("is-admin")) refreshLog();
   refreshHistory();
   refreshMounts();   // cheap, cached-ish
   refreshHls();
@@ -1430,6 +1447,70 @@ function renderSessions(list) {
       + "</td></tr>";
   }
   $("sessions").innerHTML = h + '</table>';
+}
+
+/* ---- the log panel: what the console window used to show ----
+   Lines are kept client-side and asked for by sequence, so a poll fetches
+   the two new ones rather than the last five hundred. The level filter is
+   applied here rather than on the server, so dropping to "errors only"
+   shows the errors already in hand instead of waiting for a new one. */
+const LOG_LEVELS = { TRACE: 0, DEBUG: 1, INFO: 2, WARN: 3, ERROR: 4 };
+const LOG_KEEP = 500;              // matches the server's ring
+let logLines = [], logSeq = 0, logFollow = true, logMissed = false;
+
+async function refreshLog() {
+  let data;
+  try { data = await api("/api/log?since=" + logSeq); }
+  catch { return; }               // not an admin, or the server blinked
+  if (!data.entries.length && !data.missed) return;
+  if (data.missed && !logMissed) logMissed = true;
+  logSeq = data.last;
+  logLines = logLines.concat(data.entries).slice(-LOG_KEEP);
+  renderLog();
+}
+
+function renderLog() {
+  const box = $("log");
+  const floor = LOG_LEVELS[$("log-filter").value] ?? 2;
+  const shown = logLines.filter(e => (LOG_LEVELS[e.level] ?? 2) >= floor);
+
+  let h = logMissed
+    ? '<div style="color:var(--muted)">… earlier lines have scrolled out of memory — the log file has them</div>'
+    : "";
+  for (const e of shown) {
+    const colour = e.level === "ERROR" ? "var(--critical)"
+      : e.level === "WARN" ? "var(--warning)"
+      : e.level === "DEBUG" || e.level === "TRACE" ? "var(--muted)"
+      : "var(--ink-2)";
+    h += '<div style="color:' + colour + ';white-space:pre-wrap;word-break:break-word">'
+      + '<span style="color:var(--muted)">' + esc(e.at) + "</span> "
+      + '<span style="color:var(--muted)">[' + esc(e.area) + "]</span> "
+      + esc(e.message) + "</div>";
+  }
+  box.innerHTML = h || '<div style="color:var(--muted)">nothing at this level yet</div>';
+  if (logFollow) box.scrollTop = box.scrollHeight;
+}
+
+/* Following is off the moment you scroll up — reading anything is
+   impossible if the newest line keeps yanking the view back — and on again
+   when you return to the bottom yourself. */
+$("log").addEventListener("scroll", () => {
+  const box = $("log");
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+  if (atBottom !== logFollow) { logFollow = atBottom; paintLogFollow(); }
+});
+
+function toggleLogFollow() {
+  logFollow = !logFollow;
+  paintLogFollow();
+  if (logFollow) $("log").scrollTop = $("log").scrollHeight;
+}
+
+function paintLogFollow() {
+  $("log-follow").textContent = logFollow ? "⏬ Following" : "⏸ Paused";
+  $("log-follow").title = logFollow
+    ? "Keeping the newest line in view — scroll up to pause"
+    : "Scrolled up; new lines are still arriving. Click to follow again.";
 }
 
 /* ---- recently watched: the last ten, since the table above only ever
