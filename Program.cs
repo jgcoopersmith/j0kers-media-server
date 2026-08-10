@@ -153,6 +153,29 @@ if (new[] { config.Rtsp.Port, config.Hls.Port, config.Control.Port }.Distinct().
 
 if (trayArg is bool wantTray) config.MinimizeToTray = wantTray;
 
+// ---- one server per port ----
+// Double-clicking the icon when it is already running used to get as far as
+// starting ffmpeg before failing to take the port, and what happened next
+// depended on where it failed: an error box, or a process left alive that
+// served nothing. Settle it here instead, before anything is started.
+//
+// A second launch is nearly always someone wanting the dashboard, so that is
+// what they get — no error, no second copy.
+using var single = new Mutex(initiallyOwned: false,
+    $"Global\\j0kers-media-server-{config.Control.Port}", out _);
+var gotIt = false;
+try { gotIt = single.WaitOne(TimeSpan.Zero); }
+catch (AbandonedMutexException) { gotIt = true; }   // the previous holder was killed
+if (!gotIt)
+{
+    var running = $"http://localhost:{config.Control.Port}/";
+    Console.WriteLine($"j0kers Media Server is already running — opening {running}");
+    if (!TryOpenBrowser(running))
+        J0kersMediaServer.Services.ConsoleWindow.Fatal(
+            $"j0kers Media Server is already running.\n\nIts dashboard is at {running}");
+    return 0;
+}
+
 Log.SetLevel(config.Logging.Level);
 var baseDirectory = File.Exists(configPath)
     ? Path.GetDirectoryName(Path.GetFullPath(configPath))!
@@ -320,7 +343,18 @@ try
 }
 catch (Exception ex)
 {
-    J0kersMediaServer.Services.ConsoleWindow.Fatal($"Startup failed: {ex.Message}");
+    // Far and away the most common startup failure is the server already
+    // running: double-clicking the icon a second time. "Access is denied" or
+    // "address already in use" is a true but unhelpful way to say that, so
+    // say the likely thing and name the port.
+    var inUse = ex is System.Net.HttpListenerException or System.Net.Sockets.SocketException
+                || ex.Message.Contains("in use", StringComparison.OrdinalIgnoreCase)
+                || ex.Message.Contains("Access is denied", StringComparison.OrdinalIgnoreCase);
+    J0kersMediaServer.Services.ConsoleWindow.Fatal(inUse
+        ? $"j0kers Media Server looks like it is already running.\n\n" +
+          $"Port {config.Control.Port} is taken, so this copy has stopped. Open the dashboard at " +
+          $"http://localhost:{config.Control.Port}/ — or exit the running copy first.\n\n({ex.Message})"
+        : $"Startup failed: {ex.Message}");
     tray?.Dispose(); discovery?.Dispose(); services?.Dispose(); control?.Dispose(); ffmpeg?.Dispose();
     return 1;
 }

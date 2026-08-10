@@ -24,7 +24,11 @@ public static class ConsoleWindow
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetConsoleWindow();
 
-    [DllImport("user32.dll")]
+    // CharSet.Unicode is not optional here: the default is Ansi, which hands
+    // the wide-character MessageBoxW single-byte text and paints the box with
+    // whatever those bytes happen to mean as UTF-16 — a screen of nonsense
+    // instead of the error.
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int MessageBoxW(IntPtr hWnd, string text, string caption, uint type);
 
     /// <summary>Whether this process has a console to write to at all.</summary>
