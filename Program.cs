@@ -168,7 +168,12 @@ try { gotIt = single.WaitOne(TimeSpan.Zero); }
 catch (AbandonedMutexException) { gotIt = true; }   // the previous holder was killed
 if (!gotIt)
 {
-    var running = $"http://localhost:{config.Control.Port}/";
+    // The same address the running copy advertises, not localhost. Cookies
+    // and the "remember this device" key are both per-origin, so opening
+    // http://localhost:9090/ when the server opened http://10.0.0.191:9090/
+    // lands on an origin that has neither — a sign-in page every time,
+    // alternating with the real dashboard depending on which path started it.
+    var running = DashboardUrls(config.Control.BindAddress, config.Control.Port)[0];
     Console.WriteLine($"j0kers Media Server is already running — opening {running}");
     if (!TryOpenBrowser(running))
         J0kersMediaServer.Services.ConsoleWindow.Fatal(
