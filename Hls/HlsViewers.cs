@@ -61,7 +61,17 @@ public sealed class HlsViewers
     /// Records a request against a viewing. <paramref name="bytes"/> is the
     /// response body size — 0 for a playlist, the segment size for media.
     /// </summary>
-    public void Note(HttpListenerContext ctx, string stream, string? user, long bytes)
+    /// <param name="create">
+    /// Whether this request may begin a viewing. False for playlist fetches:
+    /// a playlist is read by anything that merely looks at a stream — the
+    /// dashboard listing it, a link being checked, a player deciding whether
+    /// it can play it — and counting those made the sessions table claim
+    /// someone was watching a stream nobody had opened. Media is the proof of
+    /// watching, so only a segment starts one; a playlist keeps a viewing
+    /// that already exists alive, which matters for a paused-but-buffering
+    /// player still polling for the next segment.
+    /// </param>
+    public void Note(HttpListenerContext ctx, string stream, string? user, long bytes, bool create = true)
     {
         var client = ctx.Request.RemoteEndPoint?.Address.ToString() ?? "unknown";
         var player = DescribePlayer(ctx.Request.UserAgent);
@@ -71,18 +81,26 @@ public sealed class HlsViewers
         var id = Id(client, stream, player);
 
         var started = false;
-        var entry = _entries.GetOrAdd(id, _ =>
+        Entry? entry;
+        if (create)
         {
-            started = true;
-            return new Entry
+            entry = _entries.GetOrAdd(id, _ =>
             {
-                Stream = stream,
-                Client = client,
-                Player = player,
-                StartedUtc = DateTime.UtcNow,
-                LastSeenUtc = DateTime.UtcNow,
-            };
-        });
+                started = true;
+                return new Entry
+                {
+                    Stream = stream,
+                    Client = client,
+                    Player = player,
+                    StartedUtc = DateTime.UtcNow,
+                    LastSeenUtc = DateTime.UtcNow,
+                };
+            });
+        }
+        else if (!_entries.TryGetValue(id, out entry))
+        {
+            return;   // looking at a stream is not watching it
+        }
 
         entry.LastSeenUtc = DateTime.UtcNow;
         if (!string.IsNullOrEmpty(user)) entry.User = user;

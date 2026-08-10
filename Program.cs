@@ -228,7 +228,7 @@ catch (Exception ex)
     J0kersMediaServer.Services.ConsoleWindow.Fatal($"Failed to load accounts: {ex.Message}");
     return 1;
 }
-var auth = new J0kersMediaServer.Auth.AuthService(userStore, config.Control.AuthToken);
+var auth = new J0kersMediaServer.Auth.AuthService(userStore, config.Control.AuthToken, baseDirectory);
 
 // Media URLs are authorized by signature, not by session: players can't
 // carry a cookie or a header.
@@ -443,6 +443,9 @@ discovery?.Dispose();
 services?.Dispose();
 control?.Dispose();
 ffmpeg?.Dispose();
+// the idle timestamps have been sliding forward all session; write them out
+// so a browser left open isn't signed out by a restart over a stale one
+auth.FlushSessions();
 Log.Info("main", "bye");
 Log.CloseFile();
 return 0;

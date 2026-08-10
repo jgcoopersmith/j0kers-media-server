@@ -133,7 +133,12 @@ The **Sessions** card lists everyone watching, both kinds at once. RTSP has
 real sessions, so those can be terminated. HLS has none — a viewer is a
 series of unrelated file requests — so one is inferred instead: requests
 from the same client for the same stream are one viewing, live until they
-stop for 90 seconds (long enough that a player which has buffered ahead
+stop for 90 seconds. **A viewing begins with the first segment, not the
+first playlist** — playlists are read by anything that merely looks at a
+stream, so counting them had the table claiming someone was watching a
+stream nobody had opened. Once a viewing exists, playlist polls keep it
+alive, which is what a buffered player still asking for the next segment
+needs (long enough that a player which has buffered ahead
 and gone quiet doesn't vanish mid-film; it shows as *buffered* rather than
 *playing*). There's no connection to cut, so those rows have no Terminate
 button — revoke the account or key instead. The **Throughput** tile is the
@@ -638,6 +643,19 @@ Other software on the machine may already hold these ports — Bonjour ships
 with a lot of things, and Windows runs its own SSDP service. That is
 expected and shared rather than exclusive; a mechanism that cannot start
 logs it and the others carry on.
+
+### Staying signed in
+
+Sessions are kept in a `sessions.json` sidecar, so a restart — an update,
+a reboot — does not sign everyone out. What is stored is the SHA-256 of each
+token, exactly as it is held in memory: the file can recognise a cookie, not
+be replayed as one. Expired sessions, and sessions belonging to accounts
+that have since been deleted or disabled, are dropped on load rather than
+restored.
+
+Idle timeout is 12 hours and the hard cap is 7 days, unchanged. The sliding
+idle timestamps are written at shutdown, so a browser left open overnight
+isn't signed out by a restart over a stale one.
 
 ### DLNA — TVs and players with no browser
 

@@ -50,9 +50,10 @@ public sealed record AuthResult(AccessLevel Level, UserAccount? User, string Met
 ///     media element can't set headers), for phones, players and scripts
 ///     that should just keep working without a login prompt.
 ///
-/// Sessions live in memory only: a server restart signs everyone out, while
-/// their keys keep working. Failed logins are throttled per account and per
-/// source address with an escalating lockout.
+/// Sessions survive a restart: the table is kept in a sessions.json sidecar
+/// as token digests, so an update or a reboot doesn't sign everybody out.
+/// Failed logins are throttled per account and per source address with an
+/// escalating lockout.
 /// </summary>
 public sealed class AuthService
 {
@@ -68,9 +69,13 @@ public sealed class AuthService
 
     private sealed class Session
     {
+        [System.Text.Json.Serialization.JsonPropertyName("userId")]
         public required string UserId { get; init; }
+        [System.Text.Json.Serialization.JsonPropertyName("createdUtc")]
         public required DateTime CreatedUtc { get; init; }
+        [System.Text.Json.Serialization.JsonPropertyName("lastSeenUtc")]
         public DateTime LastSeenUtc { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("clientHint")]
         public string ClientHint { get; init; } = "";
     }
 
@@ -88,11 +93,83 @@ public sealed class AuthService
     private readonly ConcurrentDictionary<string, Session> _sessions = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Throttle> _throttles = new(StringComparer.OrdinalIgnoreCase);
 
-    public AuthService(UserStore users, string legacyToken)
+    /// <summary>
+    /// Where sessions are kept between runs. They used to live only in
+    /// memory, so every restart signed everybody out — survivable only
+    /// because a remembered device could trade its key for a new session,
+    /// and not at all if you had never ticked that box.
+    ///
+    /// What is stored is the SHA-256 of each token, exactly as in memory: the
+    /// file cannot be replayed as a cookie, only recognised. Same class of
+    /// secret as the key digests already in users.json, and it sits beside
+    /// them with the same expectation of being owner-readable.
+    /// </summary>
+    private readonly string _sessionFile;
+
+    public AuthService(UserStore users, string legacyToken, string? baseDirectory = null)
     {
         _users = users;
         _legacyToken = legacyToken ?? "";
+        _sessionFile = baseDirectory is null ? "" : Path.Combine(baseDirectory, "sessions.json");
+        LoadSessions();
     }
+
+    private void LoadSessions()
+    {
+        if (_sessionFile.Length == 0 || !File.Exists(_sessionFile)) return;
+        try
+        {
+            var stored = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, Session>>(
+                File.ReadAllText(_sessionFile));
+            if (stored is null) return;
+            var now = DateTime.UtcNow;
+            var kept = 0;
+            foreach (var (id, s) in stored)
+            {
+                // an expired session is not worth restoring, and neither is
+                // one whose account has since gone or been disabled
+                if (now - s.LastSeenUtc > SessionIdle || now - s.CreatedUtc > SessionMax) continue;
+                if (_users.FindById(s.UserId) is not { Enabled: true }) continue;
+                _sessions[id] = s;
+                kept++;
+            }
+            if (kept > 0) Log.Info("auth", $"restored {kept} signed-in session(s)");
+        }
+        catch (Exception ex)
+        {
+            // a damaged file costs everyone a sign-in, which is recoverable;
+            // refusing to start is not
+            Log.Warn("auth", $"could not read sessions.json ({ex.Message}) — everyone will sign in again");
+        }
+    }
+
+    /// <summary>
+    /// Writes the session table. Called after anything that changes it; the
+    /// idle-timestamp slide on every request deliberately does not, or a
+    /// dashboard poll would rewrite this file every two seconds.
+    /// </summary>
+    private void SaveSessions()
+    {
+        if (_sessionFile.Length == 0) return;
+        try
+        {
+            var tmp = _sessionFile + ".tmp";
+            File.WriteAllText(tmp, System.Text.Json.JsonSerializer.Serialize(
+                _sessions, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            File.Move(tmp, _sessionFile, overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("auth", $"could not save sessions.json: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Persists the sliding idle timestamps, so a browser left open for days
+    /// isn't signed out by a restart just because the file still says noon.
+    /// Called on shutdown, where one write costs nothing.
+    /// </summary>
+    public void FlushSessions() => SaveSessions();
 
     public UserStore Users => _users;
 
@@ -292,6 +369,7 @@ public sealed class AuthService
             ClientHint = ClientKey(ctx),
         };
         PruneSessions();
+        SaveSessions();
         return token;
     }
 
@@ -347,14 +425,16 @@ public sealed class AuthService
 
     public void Logout(HttpListenerContext ctx)
     {
-        if (ReadSessionCookie(ctx) is string token) _sessions.TryRemove(Digest(token), out _);
+        if (ReadSessionCookie(ctx) is string token && _sessions.TryRemove(Digest(token), out _)) SaveSessions();
     }
 
     /// <summary>Drops every session belonging to a user — used when their password changes or they are disabled.</summary>
     public void RevokeSessionsFor(string userId)
     {
+        var changed = false;
         foreach (var (id, session) in _sessions)
-            if (session.UserId == userId) _sessions.TryRemove(id, out _);
+            if (session.UserId == userId && _sessions.TryRemove(id, out _)) changed = true;
+        if (changed) SaveSessions();
     }
 
     /// <summary>Number of live sessions for a user (dashboard display).</summary>

@@ -316,9 +316,11 @@ public sealed class HlsServer : IDisposable
 
             if (parts[1].EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase))
             {
-                // a playlist fetch is someone pressing play — count them
-                // straight away rather than waiting for the first segment
-                Viewers?.Note(ctx, parts[0], watcher, 0);
+                // A playlist fetch is not yet watching: the dashboard reads
+                // playlists to list streams, and a player reads one to decide
+                // whether it can play at all. It refreshes a viewing that has
+                // already started; the first segment is what starts one.
+                Viewers?.Note(ctx, parts[0], watcher, 0, create: false);
                 // A playlist written by a segmenter (ffmpeg VOD/live jobs)
                 // wins — it has exact durations and live-window state. The
                 // generated playlist covers plain directories of segments.

@@ -37,6 +37,9 @@ publish/
 # device to anything browsing the network
 /config/discovery-id
 /discovery-id
+# signed-in sessions (token digests) — never commit these
+/config/sessions.json
+/sessions.json
 # accounts: password hashes and key digests — never commit these
 /config/users.json
 /users.json
