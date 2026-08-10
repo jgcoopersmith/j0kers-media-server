@@ -342,6 +342,14 @@ try
             return false;
         }
 
+        // Closing the dashboard in background mode leaves the server running,
+        // which is the opposite of what closing a window normally means — so
+        // the tray icon says so, briefly.
+        control.OnDashboardClosed = () => tray?.Notify(
+            "j0kers Media Server",
+            "Still running in the background — the joker icon on the taskbar reopens the dashboard.",
+            autoHideMs: 3000);
+
         control.SetTrayMode = ApplyTrayMode;
         if (config.MinimizeToTray) ApplyTrayMode(true);
     }

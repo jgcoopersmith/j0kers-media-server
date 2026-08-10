@@ -182,12 +182,27 @@ public sealed partial class ControlApi : IDisposable
     {
         lock (_shutdownLock)
         {
+            // a refresh reconnects within a second: no shutdown, and no
+            // "still running in the background" for a page that never left
+            if (_closedNoticeTimer is not null)
+            {
+                _closedNoticeTimer.Dispose();
+                _closedNoticeTimer = null;
+            }
             if (_closeShutdownTimer is null) return;
             Log.Info("control", "activity detected — shutdown cancelled");
             _closeShutdownTimer.Dispose();
             _closeShutdownTimer = null;
         }
     }
+
+    /// <summary>
+    /// Raised a couple of seconds after the last dashboard closes while the
+    /// server is set to keep running — where something has to say so.
+    /// </summary>
+    public Action? OnDashboardClosed { get; set; }
+
+    private Timer? _closedNoticeTimer;
 
     public void Start()
     {
@@ -519,6 +534,23 @@ public sealed partial class ControlApi : IDisposable
                             Log.Info("control", "no dashboard reconnected — shutting down");
                             _requestShutdown();
                         }, null, 5000, Timeout.Infinite);
+                    }
+                }
+                else if (OnDashboardClosed is not null)
+                {
+                    // Background mode: closing the page leaves the server
+                    // running, which is worth saying — it is the opposite of
+                    // what closing a window usually means. Held for a moment
+                    // first, because this same beacon fires on a refresh and
+                    // on a tab switch, and a balloon for those would be noise.
+                    lock (_shutdownLock)
+                    {
+                        _closedNoticeTimer?.Dispose();
+                        _closedNoticeTimer = new Timer(_ =>
+                        {
+                            Log.Info("control", "dashboard closed — still running in the background");
+                            OnDashboardClosed?.Invoke();
+                        }, null, 2000, Timeout.Infinite);
                     }
                 }
                 WriteJson(res, 200, new { scheduled = _config.ShutdownOnClose });

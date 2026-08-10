@@ -90,7 +90,11 @@ a joker icon in the notification area. Double-click it to open the
 dashboard; right-click for a menu — open dashboard, show/hide the console,
 start/stop the streaming services, exit. Closing the dashboard doesn't stop
 the server in this mode, so it keeps serving your phone and other devices
-until you pick Exit. `--no-tray` overrides the config for one run. On
+until you pick Exit — and the tray icon says so with a short balloon when
+you close it, since a window that closes and leaves something running is
+the opposite of what closing usually means. It clears itself after three
+seconds. A page *refresh* doesn't trigger it: the notice waits a couple of
+seconds first, and any dashboard coming back cancels it. `--no-tray` overrides the config for one run. On
 macOS/Linux use your init system (systemd/launchd) or `nohup` instead.
 
 When the server is bound to `0.0.0.0` and more than one network is

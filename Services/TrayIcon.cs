@@ -317,7 +317,15 @@ public sealed class TrayIcon : IDisposable
     }
 
     /// <summary>Shows a balloon notification from the tray icon.</summary>
-    public void Notify(string title, string message)
+    /// <summary>
+    /// Shows a balloon from the tray icon.
+    ///
+    /// <paramref name="autoHideMs"/> takes it down again after that long.
+    /// Windows decides how long a balloon lingers on its own — the struct's
+    /// timeout field has been ignored since Vista — so a specific duration
+    /// has to be done by clearing the balloon ourselves.
+    /// </summary>
+    public void Notify(string title, string message, int autoHideMs = 0)
     {
         if (!OperatingSystem.IsWindows() || _hwnd == IntPtr.Zero) return;
         var data = NewData();
@@ -326,7 +334,30 @@ public sealed class TrayIcon : IDisposable
         data.szInfo = message.Length > 250 ? message[..250] : message;
         data.dwInfoFlags = 0;
         Shell_NotifyIcon(NIM_MODIFY, ref data);
+
+        _balloonTimer?.Dispose();
+        _balloonTimer = null;
+        if (autoHideMs <= 0) return;
+        _balloonTimer = new Timer(_ => HideBalloon(), null, autoHideMs, Timeout.Infinite);
     }
+
+    /// <summary>Takes the balloon down: the same call with nothing to say.</summary>
+    private void HideBalloon()
+    {
+        if (!OperatingSystem.IsWindows() || _hwnd == IntPtr.Zero || _disposed) return;
+        try
+        {
+            var data = NewData();
+            data.uFlags = NIF_INFO;
+            data.szInfoTitle = "";
+            data.szInfo = "";
+            data.dwInfoFlags = 0;
+            Shell_NotifyIcon(NIM_MODIFY, ref data);
+        }
+        catch { /* the icon may be going away underneath us */ }
+    }
+
+    private Timer? _balloonTimer;
 
     private static void SafeInvoke(Action action)
     {
@@ -340,6 +371,8 @@ public sealed class TrayIcon : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        _balloonTimer?.Dispose();
+        _balloonTimer = null;
         if (!OperatingSystem.IsWindows() || _hwnd == IntPtr.Zero) return;
 
         var data = NewData();
