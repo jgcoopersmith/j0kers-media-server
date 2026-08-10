@@ -100,6 +100,14 @@ on. A link built from whichever address you happen to have the dashboard
 open on is the wrong one to hand to a phone on a different subnet. With a
 single address nothing extra is drawn.
 
+**Streams sit in whatever order you put them in.** The server lists them as
+it finds them on disk, which is alphabetical and rarely the order you care
+about — drag a row by the **⠿** grip at its left (or a tile by the tile
+itself, in Condensed) and drop it where you want it. The order is
+remembered per browser and applies to all three views. It is stored as
+names, so a stream appearing or disappearing doesn't shuffle the rest; a
+new one sorts after everything you have placed.
+
 **Copy gives the stream URL** — the `.m3u8` playlist itself, which is what
 VLC, Kodi and anything else that plays a URL want. For a browser, click the
 stream's *name* instead: that opens the `/watch/` page, an HTML player that
@@ -148,10 +156,12 @@ byte counter so a viewer leaving can't push the rate negative.
 The header has a **⏻ Start/Stop** button that stops or starts the streaming
 services (RTSP + HLS) while the dashboard stays up, a **👥 Users** dialog for
 accounts and keys, a **👤 Account** panel for your own password and keys, and
-a **theme button** that cycles dark → light → **cloud** (a bright sky:
-whites and pale blues, a sunlit gradient down the page, and yellows kept
-for the accents — remembered per browser and followed by the sign-in page;
-it tracks your system setting until you pick one), and a
+a **theme button** that cycles dark → light → **cloud** → **forest**
+(cloud is a bright sky: whites and pale blues, a sunlit gradient and gold
+accents. Forest is dark but warm: deep green under canopy, moss where the
+others use grey, and low sun through the leaves. Both are remembered per
+browser and followed by the sign-in page; the button tracks your system
+setting until you pick one), and a
 **⚙ Config**
 dialog for the hostname/bind address, the RTSP/HLS/control ports, and how
 long share links live — saved to a `settings.json` sidecar and applied by restarting the
@@ -197,8 +207,9 @@ set `ffmpeg.path`), the dashboard becomes a full media center:
   `Skyfall.2012.1080p.BluRay.x264-YIFY.mkv`, and all terms must match.
   Matching folders are listed too. **Enter** runs it again on the same
   text — a re-search after files have moved, since typing nothing fires
-  nothing. Results replace the listing until the box is cleared (or Esc),
-  which puts you back in the folder you were in.
+  nothing. A red **✕** appears at the end of the box once there is anything
+  in it; that, or Esc, clears the search and puts you back in the folder you
+  were in.
   The walk is bounded at 300 results or 5 seconds and says which one it
   hit, so a library on a slow network drive can't hang the card.
 - **Codecs** — transcode output codecs are configurable:

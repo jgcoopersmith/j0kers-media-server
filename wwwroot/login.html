@@ -73,6 +73,26 @@
   :root[data-theme="cloud"] body {
     background: linear-gradient(180deg, #d4ebfc 0%, #e8f4fd 45%, #fdf8ec 100%) fixed;
   }
+  /* Forest — the dashboard's fourth theme, matched here for the same reason
+     cloud is: signing in should not look like a different server. */
+  :root[data-theme="forest"] {
+    color-scheme: dark;
+    --page:      #0d1710;
+    --surface:   #16241a;
+    --surface-2: #1d2f22;
+    --ink:       #f0f6ee;
+    --ink-2:     #c3d6c0;
+    --muted:     #8aa088;
+    --grid:      #263a2b;
+    --border:    rgba(240,246,238,0.10);
+    --series-1:  #6cc26c;
+    --good:      #57bb5a;
+    --warning:   #e0a63c;
+    --critical:  #e2685f;
+  }
+  :root[data-theme="forest"] body {
+    background: linear-gradient(180deg, #0b1a10 0%, #0d1710 55%, #121c12 100%) fixed;
+  }
   :root[data-theme="dark"] {
     color-scheme: dark;
     --page:        #0d0d0d;
@@ -146,7 +166,7 @@
   (function () {
     try {
       var t = localStorage.getItem("j0kers-theme");
-      if (t === "light" || t === "dark" || t === "cloud") document.documentElement.setAttribute("data-theme", t);
+      if (t === "light" || t === "dark" || t === "cloud" || t === "forest") document.documentElement.setAttribute("data-theme", t);
     } catch (e) { /* storage blocked — fall back to the system preference */ }
   })();
 </script>

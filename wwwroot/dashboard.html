@@ -87,6 +87,37 @@
     --warning:   #a35c00;
     --critical:  #c62f2a;
   }
+  /* Forest: a dark theme, but warm rather than neutral — deep green under
+     canopy instead of grey. Moss and lichen do the work blue does elsewhere,
+     and the accent is the low sun coming through the leaves. */
+  :root[data-theme="forest"] {
+    color-scheme: dark;
+    --page:      #0d1710;   /* under the canopy */
+    --surface:   #16241a;
+    --surface-2: #1d2f22;
+    --ink:       #f0f6ee;
+    --ink-2:     #c3d6c0;
+    --muted:     #8aa088;
+    --grid:      #263a2b;
+    --baseline:  #35503b;
+    --border:    rgba(240,246,238,0.10);
+    --series-1:  #6cc26c;   /* new growth */
+    --accent:    #e0a63c;   /* sun through the leaves */
+    --good:      #57bb5a;
+    --warning:   #e0a63c;
+    --critical:  #e2685f;
+  }
+  :root[data-theme="forest"] body {
+    background: linear-gradient(180deg, #0b1a10 0%, #0d1710 55%, #121c12 100%) fixed;
+  }
+  /* the same places the cloud theme puts its sunlight */
+  :root[data-theme="forest"] .card > h2,
+  :root[data-theme="forest"] .lib-h { color: var(--series-1); }
+  :root[data-theme="forest"] .card { border-top: 2px solid #3f6b45; }
+  :root[data-theme="forest"] .card-fold { color: var(--series-1); }
+  :root[data-theme="forest"] .tile .k { color: var(--series-1); }
+  :root[data-theme="forest"] .root-chip.active { border-color: var(--accent); }
+
   /* explicit dark has to be able to beat a system that prefers light */
   :root[data-theme="dark"] {
     color-scheme: dark;
@@ -362,6 +393,19 @@
   /* where it would land, drawn on the card being displaced */
   .card.drop-above { box-shadow: 0 -3px 0 -1px var(--series-1); }
   .card.drop-below { box-shadow: 0 3px 0 -1px var(--series-1); }
+
+  /* ---- putting the HLS streams in your own order ---- */
+  .hls-grip {
+    cursor: grab; color: var(--muted); user-select: none; font-size: 13px;
+    padding: 0 2px; flex: 0 0 auto; align-self: center;
+  }
+  .hls-grip:active { cursor: grabbing; }
+  .hls-item.dragging { opacity: .45; }
+  .hls-item.drop-above { box-shadow: 0 -3px 0 -1px var(--series-1); }
+  .hls-item.drop-below { box-shadow: 0 3px 0 -1px var(--series-1); }
+  /* in the tile grid the line reads better down the sides */
+  .tv-grid .hls-item.drop-above { box-shadow: -3px 0 0 -1px var(--series-1); }
+  .tv-grid .hls-item.drop-below { box-shadow: 3px 0 0 -1px var(--series-1); }
   /* everything but the title bar goes; the h2's own margin would otherwise
      leave a gap under a collapsed card */
   .card.folded > *:not(h2) { display: none !important; }
@@ -492,7 +536,7 @@
   (function () {
     try {
       var t = localStorage.getItem("j0kers-theme");
-      if (t !== "light" && t !== "dark" && t !== "cloud")
+      if (t !== "light" && t !== "dark" && t !== "cloud" && t !== "forest")
         t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
       document.documentElement.setAttribute("data-theme", t);
     } catch (e) { /* storage blocked — the CSS media query still applies */ }
@@ -648,14 +692,20 @@
       <button onclick="pinMediaViaPicker()" class="edit-only">⭐ Pin media</button>
       <button onclick="addLibraryRoot()" class="edit-only">➕ Add folder</button></h2>
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
-      <input id="lib-search" class="am-in" style="flex:1" placeholder="🔍 Search the whole library — Enter to search again"
-             oninput="librarySearchTyped()"
-             onkeydown="if(event.key==='Escape')clearLibrarySearch();else if(event.key==='Enter')librarySearchNow()">
+      <div style="flex:1;position:relative;display:flex">
+        <input id="lib-search" class="am-in" style="flex:1;padding-right:30px"
+               placeholder="🔍 Search the whole library — Enter to search again"
+               oninput="librarySearchTyped()"
+               onkeydown="if(event.key==='Escape')clearLibrarySearch();else if(event.key==='Enter')librarySearchNow()">
+        <button id="lib-search-clear" onclick="clearLibrarySearch()" title="Clear the search (Esc)"
+                style="display:none;position:absolute;right:4px;top:50%;transform:translateY(-50%);
+                       border:none;background:none;padding:0 6px;line-height:1;font-size:14px;
+                       color:var(--critical);cursor:pointer">✕</button>
+      </div>
       <select id="lib-scope" class="am-in" style="width:auto;max-width:40%" onchange="librarySearchScopeChanged()"
               title="Where to search">
         <option value="">Everywhere</option>
       </select>
-      <button id="lib-search-clear" onclick="clearLibrarySearch()" style="display:none">✕ Clear</button>
     </div>
     <div id="favorites" style="margin-bottom:6px"></div>
     <div id="lib-roots" style="margin-bottom:6px"></div>
@@ -1081,7 +1131,7 @@ function hidePasswords(root) {
 
 /* ---- theme: follows the system until you pick, then stays picked ---- */
 const THEME_KEY = "j0kers-theme";
-const THEMES = ["dark", "light", "cloud"];
+const THEMES = ["dark", "light", "cloud", "forest"];
 
 function currentTheme() {
   const t = document.documentElement.getAttribute("data-theme");
@@ -1092,9 +1142,10 @@ function currentTheme() {
    reads as "go light" rather than as a status light. With three themes the
    button is a cycle, so it names the next one as well. */
 const THEME_NEXT = {
-  dark:  { icon: "☀",  label: "Switch to the light theme" },
-  light: { icon: "☁",  label: "Switch to the cloud theme" },
-  cloud: { icon: "🌙", label: "Switch to the dark theme" },
+  dark:   { icon: "☀",  label: "Switch to the light theme" },
+  light:  { icon: "☁",  label: "Switch to the cloud theme" },
+  cloud:  { icon: "🍃", label: "Switch to the forest theme" },
+  forest: { icon: "🌙", label: "Switch to the dark theme" },
 };
 
 function paintThemeButton() {
@@ -1944,7 +1995,7 @@ function renderHls() {
   const view = cardView("hls");
   let h = pending.map(convertingRow).join("");
 
-  for (const s of lastHls.streams) {
+  for (const s of hlsInChosenOrder(lastHls.streams)) {
     const url = mediaUrl(s.playlist);
     // the watch page plays in any browser (phones included); the raw
     // m3u8 is linked from that page for VLC users
@@ -1973,7 +2024,10 @@ function renderHls() {
 
     if (view === "condensed") {
       // poster and title only — the whole tile plays, as in the TV grid
-      h += '<div class="tv-tile" data-act="hls-play" data-arg="' + esc(url) + '" title="' + esc(s.name) + '">'
+      // the whole tile plays; it is also the drag handle, since a tile has
+      // no spare room for a separate grip
+      h += '<div class="tv-tile hls-item" draggable="true" data-hls-name="' + esc(s.name) + '"'
+        + ' data-act="hls-play" data-arg="' + esc(url) + '" title="' + esc(s.name) + '">'
         + thumb("hls-thumb-sm")
         + '<span style="flex:1;min-width:0;color:var(--ink);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
         + transcoding + esc(s.title || s.name) + '</span></div>';
@@ -1981,8 +2035,12 @@ function renderHls() {
     }
 
     // readable title on top, the stream id (what the URLs use) underneath
-    h += '<div style="display:flex;align-items:' + (view === "info" ? "flex-start" : "center")
+    h += '<div class="hls-item" data-hls-name="' + esc(s.name) + '"'
+      + ' style="display:flex;align-items:' + (view === "info" ? "flex-start" : "center")
       + ';gap:8px;padding:' + (view === "info" ? "10px" : "7px") + ' 0;border-bottom:1px solid var(--grid)">'
+      // a row is mostly buttons and links, so the drag needs a place of its
+      // own rather than the whole row
+      + '<span class="hls-grip" title="Drag to reorder">⠿</span>'
       + thumb("hls-thumb")
       + '<div style="flex:1;min-width:0">' + transcoding
       + '<a href="' + esc(watchUrl) + '" target="_blank" rel="noopener" title="Open the watch page">'
@@ -2010,6 +2068,105 @@ function renderHls() {
 
   box.className = view === "condensed" ? "tv-grid" : "";
   box.innerHTML = h;
+  wireHlsDrag(box);
+}
+
+/* ---- the HLS streams in whatever order you put them in ----
+   The server lists streams as it finds them on disk, which is alphabetical
+   and rarely the order you care about. Dragging one sets your own; it is
+   remembered per browser, and applies to every view of the card.
+
+   The stored list is names, not positions, so a stream that appears or
+   disappears doesn't shuffle everything else. Anything not in it — a new
+   stream — sorts after what is, in the server's order. */
+const HLS_ORDER_KEY = "j0kers-hls-order";
+
+function hlsOrder() {
+  try { return JSON.parse(localStorage.getItem(HLS_ORDER_KEY) || "[]"); } catch { return []; }
+}
+
+function hlsInChosenOrder(streams) {
+  const order = hlsOrder();
+  if (!order.length) return streams;
+  const rank = new Map(order.map((n, i) => [n.toLowerCase(), i]));
+  // a stable sort, so unknown streams keep the order the server gave them
+  return streams.map((s, i) => ({ s, i }))
+    .sort((a, b) => {
+      const ra = rank.has(a.s.name.toLowerCase()) ? rank.get(a.s.name.toLowerCase()) : Infinity;
+      const rb = rank.has(b.s.name.toLowerCase()) ? rank.get(b.s.name.toLowerCase()) : Infinity;
+      return ra === rb ? a.i - b.i : ra - rb;
+    })
+    .map(x => x.s);
+}
+
+function saveHlsOrder(box) {
+  const names = [...box.querySelectorAll("[data-hls-name]")].map(e => e.dataset.hlsName);
+  try { localStorage.setItem(HLS_ORDER_KEY, JSON.stringify(names)); } catch {}
+}
+
+let draggingHls = null;
+
+function wireHlsDrag(box) {
+  for (const item of box.querySelectorAll(".hls-item")) {
+    const grip = item.querySelector(".hls-grip");
+    // rows are armed by their grip; a tile is its own handle
+    if (grip) {
+      grip.addEventListener("mousedown", () => { item.draggable = true; });
+      grip.addEventListener("mouseup", () => { item.draggable = false; });
+    }
+
+    item.addEventListener("dragstart", e => {
+      draggingHls = item;
+      item.classList.add("dragging");
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = "move";
+        try { e.dataTransfer.setData("text/plain", item.dataset.hlsName); } catch {}
+      }
+      e.stopPropagation();   // reordering a stream is not moving the card
+    });
+
+    item.addEventListener("dragend", () => {
+      item.classList.remove("dragging");
+      if (grip) item.draggable = false;
+      draggingHls = null;
+      clearHlsMarks(box);
+      saveHlsOrder(box);
+    });
+
+    item.addEventListener("dragover", e => {
+      if (!draggingHls || draggingHls === item) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+      clearHlsMarks(box);
+      item.classList.add(beforeHls(item, e) ? "drop-above" : "drop-below");
+    });
+
+    item.addEventListener("dragleave", () => item.classList.remove("drop-above", "drop-below"));
+
+    item.addEventListener("drop", e => {
+      if (!draggingHls || draggingHls === item) return;
+      e.preventDefault();
+      e.stopPropagation();
+      box.insertBefore(draggingHls, beforeHls(item, e) ? item : item.nextSibling);
+      clearHlsMarks(box);
+      saveHlsOrder(box);
+    });
+  }
+}
+
+/* Tiles sit side by side, rows stack — so which half of the target counts
+   as "before" depends on which way the list runs. */
+function beforeHls(item, e) {
+  const box = item.getBoundingClientRect();
+  return item.closest(".tv-grid")
+    ? e.clientX < box.left + box.width / 2
+    : e.clientY < box.top + box.height / 2;
+}
+
+function clearHlsMarks(box) {
+  for (const i of box.querySelectorAll(".hls-item"))
+    i.classList.remove("drop-above", "drop-below");
 }
 
 
