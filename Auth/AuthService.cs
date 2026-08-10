@@ -148,19 +148,31 @@ public sealed class AuthService
     /// idle-timestamp slide on every request deliberately does not, or a
     /// dashboard poll would rewrite this file every two seconds.
     /// </summary>
+    private readonly object _saveLock = new();
+
     private void SaveSessions()
     {
         if (_sessionFile.Length == 0) return;
-        try
+        // Signing in, signing out and revoking all reach this from different
+        // request threads. Two of them writing at once used to interleave
+        // into one temp file and move the mess over the real one — and an
+        // unreadable sessions.json signs everybody out on the next start,
+        // which is the thing the file exists to prevent. One writer at a
+        // time, and a temp name that cannot be shared even so.
+        lock (_saveLock)
         {
-            var tmp = _sessionFile + ".tmp";
-            File.WriteAllText(tmp, System.Text.Json.JsonSerializer.Serialize(
-                _sessions, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
-            File.Move(tmp, _sessionFile, overwrite: true);
-        }
-        catch (Exception ex)
-        {
-            Log.Warn("auth", $"could not save sessions.json: {ex.Message}");
+            var tmp = $"{_sessionFile}.{Environment.ProcessId}.{Environment.CurrentManagedThreadId}.tmp";
+            try
+            {
+                File.WriteAllText(tmp, System.Text.Json.JsonSerializer.Serialize(
+                    _sessions, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+                File.Move(tmp, _sessionFile, overwrite: true);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("auth", $"could not save sessions.json: {ex.Message}");
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            }
         }
     }
 

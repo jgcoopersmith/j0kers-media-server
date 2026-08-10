@@ -2076,6 +2076,12 @@ function convertingRow(t) {
 /* Kept apart from the fetch so switching view doesn't re-hit the media port. */
 function renderHls() {
   if (!lastHls) return;
+  // A poll landing mid-drag would replace the row being held: 'drop' would
+  // never reach a live node, and the dragend that follows would save the
+  // order off the freshly drawn list — silently throwing the move away.
+  // Redraw when the drag is over instead.
+  if (draggingHls) { hlsRenderDeferred = true; return; }
+  hlsRenderDeferred = false;
   const box = $("hls");
 
   /* Files being converted that have not reached the disk yet.
@@ -2205,6 +2211,8 @@ function saveHlsOrder(box) {
 }
 
 let draggingHls = null;
+// set when a poll wanted to redraw during a drag; spent when the drag ends
+let hlsRenderDeferred = false;
 
 function wireHlsDrag(box) {
   for (const item of box.querySelectorAll(".hls-item")) {
@@ -2231,6 +2239,8 @@ function wireHlsDrag(box) {
       draggingHls = null;
       clearHlsMarks(box);
       saveHlsOrder(box);
+      // a poll asked for a redraw while this was in the air
+      if (hlsRenderDeferred) renderHls();
     });
 
     item.addEventListener("dragover", e => {

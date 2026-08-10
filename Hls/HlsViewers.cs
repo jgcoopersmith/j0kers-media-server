@@ -84,10 +84,15 @@ public sealed class HlsViewers
         Entry? entry;
         if (create)
         {
-            entry = _entries.GetOrAdd(id, _ =>
+            if (!_entries.TryGetValue(id, out entry))
             {
-                started = true;
-                return new Entry
+                // The value overload, not the factory one: a factory can run
+                // on several threads for the same key and only one result is
+                // kept, so a flag set inside it says "started" on every thread
+                // that raced — and the viewing gets announced more than once.
+                // Comparing against what the dictionary actually kept is the
+                // only answer that is true exactly once.
+                var candidate = new Entry
                 {
                     Stream = stream,
                     Client = client,
@@ -95,7 +100,9 @@ public sealed class HlsViewers
                     StartedUtc = DateTime.UtcNow,
                     LastSeenUtc = DateTime.UtcNow,
                 };
-            });
+                entry = _entries.GetOrAdd(id, candidate);
+                started = ReferenceEquals(entry, candidate);
+            }
         }
         else if (!_entries.TryGetValue(id, out entry))
         {

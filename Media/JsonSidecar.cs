@@ -59,7 +59,10 @@ internal static class JsonSidecar
     /// </summary>
     public static void Save<T>(string file, T value, string label)
     {
-        var tmp = file + ".tmp";
+        // the writer's own temp name: every caller holds a lock around its
+        // own file today, but a shared "x.json.tmp" is one refactor away from
+        // two writers interleaving into it and moving the mess into place
+        var tmp = $"{file}.{Environment.CurrentManagedThreadId}.tmp";
         try
         {
             File.WriteAllText(tmp, JsonSerializer.Serialize(value, WriteOpts));

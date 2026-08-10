@@ -161,23 +161,55 @@ if (trayArg is bool wantTray) config.MinimizeToTray = wantTray;
 //
 // A second launch is nearly always someone wanting the dashboard, so that is
 // what they get — no error, no second copy.
-using var single = new Mutex(initiallyOwned: false,
-    $"Global\\j0kers-media-server-{config.Control.Port}", out _);
-var gotIt = false;
-try { gotIt = single.WaitOne(TimeSpan.Zero); }
-catch (AbandonedMutexException) { gotIt = true; }   // the previous holder was killed
-if (!gotIt)
+// One claim per port this copy needs, not one for the server as a whole: a
+// second copy started with a different control port would take a different
+// name and sail through the guard, only to fail on the RTSP or HLS port it
+// still shares — which is the half-started process the guard exists to stop.
+var claims = new List<Mutex>();
+string? clash = null;
+bool Claim(string what, int port)
 {
-    // The same address the running copy advertises, not localhost. Cookies
-    // and the "remember this device" key are both per-origin, so opening
-    // http://localhost:9090/ when the server opened http://10.0.0.191:9090/
-    // lands on an origin that has neither — a sign-in page every time,
-    // alternating with the real dashboard depending on which path started it.
-    var running = DashboardUrls(config.Control.BindAddress, config.Control.Port)[0];
-    Console.WriteLine($"j0kers Media Server is already running — opening {running}");
-    if (!TryOpenBrowser(running))
+    var m = new Mutex(initiallyOwned: false, $"Global\\j0kers-media-server-{what}-{port}", out _);
+    bool got;
+    try { got = m.WaitOne(TimeSpan.Zero); }
+    catch (AbandonedMutexException) { got = true; }   // the previous holder was killed
+    if (got) { claims.Add(m); }
+    else { clash ??= $"{what} port {port}"; m.Dispose(); }
+    return got;
+}
+
+var controlFree = !config.Control.Enabled || Claim("control", config.Control.Port);
+var portsFree = controlFree
+                && (!config.Rtsp.Enabled || Claim("rtsp", config.Rtsp.Port))
+                && (!config.Hls.Enabled || Claim("hls", config.Hls.Port));
+if (!portsFree)
+{
+    // The dashboard is the thing to open when the *control* port is the one
+    // already taken — that is the running copy's own address. If only a
+    // media port clashes, the running copy is somewhere else and all that
+    // can honestly be said is which port is in the way.
+    if (!controlFree)
+    {
+        // The same address the running copy advertises, not localhost.
+        // Cookies and the "remember this device" key are both per-origin, so
+        // opening http://localhost:9090/ when the server opened
+        // http://10.0.0.191:9090/ lands on an origin that has neither — a
+        // sign-in page every time.
+        var running = DashboardUrls(config.Control.BindAddress, config.Control.Port)[0];
+        Console.WriteLine($"j0kers Media Server is already running — opening {running}");
+        if (!TryOpenBrowser(running))
+            J0kersMediaServer.Services.ConsoleWindow.Fatal(
+                $"j0kers Media Server is already running.\n\nIts dashboard is at {running}");
+    }
+    else
+    {
+        // Fatal already picks the right channel — the terminal when there is
+        // one, a message box when there isn't; printing as well says it twice
         J0kersMediaServer.Services.ConsoleWindow.Fatal(
-            $"j0kers Media Server is already running.\n\nIts dashboard is at {running}");
+            $"Another copy of j0kers Media Server is already using the {clash}.\n\n" +
+            "Exit that one first, or give this one different ports.");
+    }
+    foreach (var m in claims) { try { m.ReleaseMutex(); } catch { } m.Dispose(); }
     return 0;
 }
 
@@ -454,6 +486,10 @@ ffmpeg?.Dispose();
 // the idle timestamps have been sliding forward all session; write them out
 // so a browser left open isn't signed out by a restart over a stale one
 auth.FlushSessions();
+// Releasing here also keeps these referenced for the whole run: a collected
+// Mutex closes its handle, which would hand the ports to a second copy while
+// this one is still serving them.
+foreach (var m in claims) { try { m.ReleaseMutex(); } catch { } m.Dispose(); }
 Log.Info("main", "bye");
 Log.CloseFile();
 return 0;

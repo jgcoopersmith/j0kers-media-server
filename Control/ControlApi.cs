@@ -421,7 +421,11 @@ public sealed partial class ControlApi : IDisposable
             // library roots before it names a file.
             if (path.StartsWith("/dlna/", StringComparison.OrdinalIgnoreCase))
             {
-                if (_dlna is null)
+                // captured once: DLNA can be switched off from the Config
+                // dialog on another thread, and re-reading the field after
+                // this check is how a served request becomes a null reference
+                var dlna = _dlna;
+                if (dlna is null)
                 {
                     WriteJson(res, 404, new { error = "DLNA is off — enable discovery.dlna to serve the library to TVs" });
                     return;
@@ -432,7 +436,7 @@ public sealed partial class ControlApi : IDisposable
                     WriteJson(res, 403, new { error = "DLNA is served to the local network only" });
                     return;
                 }
-                ServeDlna(ctx, path, method);
+                ServeDlna(ctx, path, method, dlna);
                 return;
             }
 
@@ -2187,10 +2191,9 @@ public sealed partial class ControlApi : IDisposable
     /// for both services, an event subscription that is accepted and never
     /// used, and the files themselves.
     /// </summary>
-    private void ServeDlna(HttpListenerContext ctx, string path, string method)
+    private void ServeDlna(HttpListenerContext ctx, string path, string method, Dlna.DlnaService dlna)
     {
         var res = ctx.Response;
-        var dlna = _dlna!;
 
         switch (path.ToLowerInvariant())
         {

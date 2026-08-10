@@ -282,7 +282,7 @@ public sealed class ServerConfig
     /// </summary>
     private static void WriteAtomic(string file, string json, string label)
     {
-        var tmp = file + ".tmp";
+        var tmp = $"{file}.{Environment.CurrentManagedThreadId}.tmp";
         try
         {
             File.WriteAllText(tmp, json);
