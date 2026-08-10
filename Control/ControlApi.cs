@@ -567,6 +567,15 @@ public sealed partial class ControlApi : IDisposable
                         version = typeof(ControlApi).Assembly.GetName().Version?.ToString(3),
                         running = _services.Running,
                         uptimeSeconds = (int)(DateTime.UtcNow - _startedUtc).TotalSeconds,
+                        // the machine's own clock, for the dashboard's header:
+                        // an instant, the offset that turns it into local time
+                        // here, and what this zone is called
+                        timeUtc = DateTime.UtcNow,
+                        utcOffsetMinutes = (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.Now).TotalMinutes,
+                        timeZone = ZoneAbbreviation(),
+                        timeZoneFull = TimeZoneInfo.Local.IsDaylightSavingTime(DateTime.Now)
+                            ? TimeZoneInfo.Local.DaylightName
+                            : TimeZoneInfo.Local.StandardName,
                         rtsp = new
                         {
                             enabled = _serverConfig.Rtsp.Enabled,
@@ -2631,6 +2640,40 @@ public sealed partial class ControlApi : IDisposable
         catch (Exception ex)
         {
             WriteJson(res, 400, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// A short name for this machine's timezone. Windows has no
+    /// abbreviations — it calls this "Mountain Daylight Time" — so the
+    /// initials of the words are taken, which is exactly where MDT, GMT and
+    /// AEST come from. Anything that doesn't reduce sensibly (a name with
+    /// one word, or an offset-style name like "UTC+03:00") is given as the
+    /// offset instead, which is never wrong even when it isn't idiomatic.
+    /// </summary>
+    private static string ZoneAbbreviation()
+    {
+        try
+        {
+            var zone = TimeZoneInfo.Local;
+            var name = zone.IsDaylightSavingTime(DateTime.Now) ? zone.DaylightName : zone.StandardName;
+            var words = name.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                            .Where(w => char.IsLetter(w[0]))
+                            .ToArray();
+            if (words.Length >= 2)
+            {
+                var initials = string.Concat(words.Select(w => char.ToUpperInvariant(w[0])));
+                if (initials.Length is >= 2 and <= 5) return initials;
+            }
+
+            var offset = zone.GetUtcOffset(DateTime.Now);
+            return offset == TimeSpan.Zero
+                ? "UTC"
+                : $"UTC{(offset < TimeSpan.Zero ? "-" : "+")}{Math.Abs(offset.Hours):00}:{Math.Abs(offset.Minutes):00}";
+        }
+        catch
+        {
+            return "";
         }
     }
 

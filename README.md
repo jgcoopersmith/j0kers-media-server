@@ -169,9 +169,12 @@ scattered across the page — behind the cards, never under text, so the
 cards stay plain white and everything you read sits on a flat surface. All
 are remembered per browser and followed by the sign-in page; the button
 tracks your system setting until you pick one), a **clock** showing the
-date, the time to the second and the timezone (this browser's own clock,
-not the server's — the dashboard gets read from phones and other machines;
-hover for the full zone name), and a
+date, the time to the second and the timezone — the **server's** clock, so
+a dashboard open on a phone in another timezone still says what time it is
+on the machine holding the media, which is the time its logs are in (hover
+for the full zone name). It re-syncs on every status poll and runs the
+seconds locally in between, so it costs no extra requests and can't drift.
+And a
 **⚙ Config**
 dialog for the hostname/bind address, the RTSP/HLS/control ports, and how
 long share links live — saved to a `settings.json` sidecar and applied by restarting the

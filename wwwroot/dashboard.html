@@ -1187,29 +1187,42 @@ function hidePasswords(root) {
 }
 
 /* ---- the clock in the header ----
-   This browser's own time, not the server's: the dashboard is read from
-   phones and other machines, and the useful answer to "what time is it"
-   is the time where the person reading it is. Tabular numerals, so the
-   seconds tick without the pill twitching wider and narrower.
+   The server's clock, not this browser's — a dashboard open on a phone in
+   another timezone should still say what time it is on the machine holding
+   the media, which is the time its logs and schedules are in.
 
-   The abbreviation is whatever the platform calls this zone (EDT, GMT+2);
-   the tooltip carries the full IANA name, which is the unambiguous one. */
+   The status poll carries the server's instant, its UTC offset, and what it
+   calls its zone. Between polls the seconds run locally against the
+   difference between the two clocks, so this costs no extra requests and
+   still cannot drift. Tabular numerals keep the pill from twitching. */
+let clockSkewMs = null;        // server time − this browser's time
+let clockOffsetMin = 0, clockZone = "", clockZoneFull = "";
+
+function noteServerClock(status) {
+  if (!status || !status.timeUtc) return;
+  const server = Date.parse(status.timeUtc);
+  if (Number.isNaN(server)) return;
+  clockSkewMs = server - Date.now();
+  clockOffsetMin = status.utcOffsetMinutes || 0;
+  clockZone = status.timeZone || "";
+  clockZoneFull = status.timeZoneFull || "";
+  tickClock();
+}
+
 function tickClock() {
   const pill = $("clockpill");
   if (!pill) return;
-  const now = new Date();
-  const time = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  const date = now.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
-  let zone = "";
-  try {
-    zone = new Intl.DateTimeFormat([], { timeZoneName: "short" })
-      .formatToParts(now).find(p => p.type === "timeZoneName")?.value || "";
-  } catch { /* no Intl zone name — the time and date still stand */ }
-  pill.textContent = date + " · " + time + (zone ? " " + zone : "");
-  if (!pill.title) {
-    try { pill.title = Intl.DateTimeFormat().resolvedOptions().timeZone + " — this browser's clock"; }
-    catch { pill.title = "this browser's clock"; }
-  }
+  if (clockSkewMs === null) { pill.textContent = "—"; return; }
+
+  // shift the instant by the server's offset and then read it as UTC: that
+  // prints the server's wall clock whatever zone this browser is in
+  const shifted = new Date(Date.now() + clockSkewMs + clockOffsetMin * 60000);
+  const time = shifted.toLocaleTimeString([], {
+    hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" });
+  const date = shifted.toLocaleDateString([], {
+    weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
+  pill.textContent = date + " · " + time + (clockZone ? " " + clockZone : "");
+  pill.title = (clockZoneFull || clockZone || "server time") + " — the server's clock";
 }
 tickClock();
 setInterval(tickClock, 1000);
@@ -1522,6 +1535,7 @@ async function tick() {
   pw.classList.toggle("on", running);
   pw.classList.toggle("off", !running);
   $("verpill").textContent = "v" + (status.version || "?");
+  noteServerClock(status);   // re-syncs the header clock on every poll
   rtspPort = status.rtsp.port; hlsPort = status.hls.port;
   hlsAddresses = status.hls.addresses || [];
 
