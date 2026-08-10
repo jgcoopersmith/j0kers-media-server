@@ -117,6 +117,7 @@ public sealed class AuthService
     private void LoadSessions()
     {
         if (_sessionFile.Length == 0 || !File.Exists(_sessionFile)) return;
+        Services.SecretFile.Protect(_sessionFile);   // an older build's file, on the way past
         try
         {
             var stored = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, Session>>(

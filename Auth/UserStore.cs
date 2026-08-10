@@ -94,6 +94,10 @@ public sealed class UserStore
     {
         _file = Path.Combine(baseDirectory, "users.json");
         Load();
+        // On startup too, not only when it is next written: a file created by
+        // an older build kept whatever the config folder allowed — which on a
+        // machine where that folder grants Everyone is every local account.
+        Services.SecretFile.Protect(_file);
     }
 
     public string FilePath => _file;
