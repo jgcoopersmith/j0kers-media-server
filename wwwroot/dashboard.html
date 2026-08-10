@@ -2523,16 +2523,57 @@ if (localStorage.getItem("j0kers-res")) $("pc-res").value = localStorage.getItem
    specific second to resume at (quality switch). */
 let currentHlsStream = null; // what the player is on, for the history marks
 
-async function playHls(url, startAt) {
-  const box = $("hlsplayer"), video = $("hlsvideo"), msg = $("hlsmsg");
+/* ---- playback opens in a tab of its own ----
+   The player page is a black, chromeless full-window video: opened in its
+   own tab, the picture gets the whole screen instead of a slot halfway down
+   a dashboard.
+
+   The tab has to be opened during the click that asked for it — a browser
+   only allows that with a user gesture, and anything opened after an await
+   is a popup as far as it is concerned. So a click opens the tab straight
+   away and whatever is still loading points it somewhere afterwards; see
+   openPlayerTab / pointPlayerTab. */
+const POPUP_BLOCKED_NOTE =
+  "Playing here — the browser blocked the player tab. Allow pop-ups for this site to use it.";
+let playingHereBecauseBlocked = false;
+
+function playerPageUrl(src, title) {
+  return "/player?src=" + encodeURIComponent(src) + (title ? "&title=" + encodeURIComponent(title) : "");
+}
+
+/* Opens a blank tab now, to be pointed at the player once the URL is known.
+   Returns null if the browser refused, and the caller carries on inline. */
+function openPlayerTab() {
+  try { return window.open("", "_blank"); } catch { return null; }
+}
+
+function pointPlayerTab(win, src, title) {
+  const url = playerPageUrl(src, title);
+  if (win && !win.closed) { win.location.replace(url); return true; }
+  // no tab in hand (no gesture, or a blocker): this may still be allowed
+  const fresh = window.open(url, "_blank");
+  return !!fresh;
+}
+
+async function playHls(url, startAt, tab) {
+  playingHereBecauseBlocked = false;
   currentHlsStream = streamNameFromUrl(url);
   // playing an existing stream never touches /api/play — this is the only
   // notice the recently-watched list gets
   noteWatched();
+
+  // The whole point: the media plays in its own tab, not in the card.
+  if (pointPlayerTab(tab ?? openPlayerTab(), url, playerTitleFor(url))) return;
+
+  // A blocked popup shouldn't mean nothing happens, so the card's player is
+  // still here as the fallback — with the reason, since "it played in the
+  // wrong place" is otherwise a mystery.
+  playingHereBecauseBlocked = true;
+  const box = $("hlsplayer"), video = $("hlsvideo"), msg = $("hlsmsg");
   box.style.display = "block";
   bringPlayerIntoView();
   setPlayerTitle(playerTitleFor(url));
-  msg.textContent = "";
+  msg.textContent = POPUP_BLOCKED_NOTE;
   if (window._hls) { window._hls.destroy(); window._hls = null; }
 
   // a restreamed channel, or a provider channel coming through the TV proxy
@@ -2583,7 +2624,8 @@ async function playHls(url, startAt) {
       });
       if (window.Hls) break;
     }
-    msg.textContent = "";
+    // don't wipe the reason this is playing in the card at all
+    msg.textContent = playingHereBecauseBlocked ? POPUP_BLOCKED_NOTE : "";
   }
   if (window.Hls && Hls.isSupported()) {
     // startPosition is the setting that actually pins where playback begins;
@@ -3623,6 +3665,16 @@ async function playMedia(path, startAt) {
   const name = path.split(/[\\/]/).pop();
   currentMediaPath = path;
   const gen = ++playGeneration;
+  // Claim the tab now, while the click that asked for it still counts as a
+  // gesture: preparing a file takes seconds, and a tab opened after that
+  // wait is a popup as far as the browser is concerned.
+  const tab = openPlayerTab();
+  if (tab) {
+    try {
+      tab.document.write("<title>Preparing…</title><body style=\"margin:0;background:#000;color:#999;"
+        + "font:14px system-ui;display:grid;place-items:center;height:100vh\">preparing…</body>");
+    } catch { /* about:blank in another tab can be picky; harmless */ }
+  }
   // quality applies to video only; audio has nothing to scale
   const height = mediaKind(path) === "video" ? parseInt($("pc-res").value, 10) || 0 : 0;
   try {
@@ -3645,9 +3697,11 @@ async function playMedia(path, startAt) {
       if (s.ready) break;
       await new Promise(res2 => setTimeout(res2, 500));
     }
-    if (gen !== playGeneration) return; // a newer play (rapid ⏭/⏮) superseded this one
-    playHls(url, startAt);
-    document.getElementById("hlsplayer").scrollIntoView({ behavior: "smooth", block: "center" });
+    if (gen !== playGeneration) {          // a newer play (rapid ⏭/⏮) superseded this one
+      if (tab && !tab.closed) tab.close();  // and its tab is now pointless
+      return;
+    }
+    playHls(url, startAt, tab);
   } catch (e) {
     alert("playback failed: " + e.message);
   }

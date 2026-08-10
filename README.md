@@ -38,6 +38,19 @@ terminate buttons, server throughput, mounts with copyable `rtsp://`
 URIs, HLS stream list, and the effective config. (Set
 `control.openDashboardOnStart` to `false` for headless use.)
 
+### Playback opens in its own tab
+
+Pressing play opens a **separate tab** with nothing in it but the video:
+black, chromeless, edge to edge. It asks for fullscreen as it loads, and
+since browsers only grant that off a user gesture — which a newly opened
+tab does not reliably carry — the first click in that tab tries again (or
+press `f`).
+
+The tab is claimed the instant you click, before the file is prepared: a tab
+opened after an await is a pop-up as far as the browser is concerned. If
+pop-ups are blocked anyway, the media falls back to the dashboard's own
+player and says why, rather than doing nothing.
+
 ### Folding cards away
 
 Every card — Log, Sessions, HLS streams, RTSP mounts, Media library, Live

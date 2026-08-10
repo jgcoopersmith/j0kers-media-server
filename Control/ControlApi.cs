@@ -436,6 +436,37 @@ public sealed partial class ControlApi : IDisposable
                 return;
             }
 
+            // A player on its own page, opened in a tab of its own so the
+            // picture gets the whole window. It takes the source as a
+            // parameter rather than a stream name because not everything
+            // playable is a stream on disk — a free-TV channel comes through
+            // the proxy on this same port — and it sits here rather than on
+            // the HLS port so both kinds are same-origin with the dashboard.
+            if (method == "GET" && path == "/player")
+            {
+                if (auth.Level == AccessLevel.None) { WriteJson(res, 401, new { error = "sign in first" }); return; }
+                var src = ctx.Request.QueryString["src"] ?? "";
+                var title = ctx.Request.QueryString["title"] ?? "";
+                // This machine only. A path is one of ours by definition;
+                // an absolute URL has to name this same host, because the
+                // media it plays is served from another port on it — the
+                // HLS port — and the dashboard builds those links absolute.
+                // What it must never be is a way to point the browser at
+                // somewhere else entirely.
+                if (!IsOwnMediaUrl(src, ctx))
+                {
+                    WriteJson(res, 400, new { error = "src must be a path or a URL on this server" });
+                    return;
+                }
+                var page = Encoding.UTF8.GetBytes(PlayerPage(src, title));
+                res.StatusCode = 200;
+                res.ContentType = "text/html; charset=utf-8";
+                res.Headers["Cache-Control"] = "no-store";
+                res.ContentLength64 = page.Length;
+                res.OutputStream.Write(page);
+                return;
+            }
+
             // the player library is a third-party asset with nothing in it
             // to protect, and the sign-in page must render before any login
             if (method == "GET" && path == "/hls.min.js")
@@ -2641,6 +2672,118 @@ public sealed partial class ControlApi : IDisposable
         {
             WriteJson(res, 400, new { error = ex.Message });
         }
+    }
+
+    /// <summary>
+    /// Whether the player may be pointed at this: a path on this server, or
+    /// an http(s) URL on the same host it was asked from. Ports are not
+    /// compared — the media is on a different one by design — but the host
+    /// is, so the page cannot be turned into an open redirect or made to
+    /// embed somebody else's video under this server's name.
+    /// </summary>
+    private static bool IsOwnMediaUrl(string src, HttpListenerContext ctx)
+    {
+        if (src.Length == 0) return false;
+        if (src.StartsWith('/')) return !src.StartsWith("//", StringComparison.Ordinal);
+        if (!Uri.TryCreate(src, UriKind.Absolute, out var u)) return false;
+        if (u.Scheme is not ("http" or "https")) return false;
+        if (!string.IsNullOrEmpty(u.UserInfo)) return false;
+
+        var asked = ctx.Request.Url?.Host ?? "";
+        if (u.Host.Equals(asked, StringComparison.OrdinalIgnoreCase)) return true;
+        // reaching the dashboard by name and the media by address (or the
+        // other way round) is normal here, so accept this machine's own
+        // addresses too
+        return System.Net.IPAddress.TryParse(u.Host, out var ip)
+               && (System.Net.IPAddress.IsLoopback(ip)
+                   || Services.NetworkInfo.Active().Any(i => i.Address == u.Host));
+    }
+
+    /// <summary>
+    /// The full-window player page. Black, chromeless, the video and nothing
+    /// else — the point of opening a tab is that the picture gets all of it.
+    ///
+    /// It asks for fullscreen as it loads. Browsers only grant that off a
+    /// user gesture and a tab opened from a click does not reliably carry
+    /// one, so a refusal is expected rather than exceptional: the page is
+    /// already edge-to-edge, and the first click anywhere tries again.
+    /// </summary>
+    private static string PlayerPage(string src, string title)
+    {
+        var srcJs = JsonSerializer.Serialize(src);
+        var shown = System.Net.WebUtility.HtmlEncode(
+            string.IsNullOrWhiteSpace(title) ? "j0kers Media Server" : title);
+        return $$"""
+            <!doctype html>
+            <html lang="en">
+            <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>{{shown}} — j0kers</title>
+            <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🃏</text></svg>">
+            <style>
+              html, body { margin: 0; height: 100%; background: #000; color: #ddd;
+                           font-family: system-ui, sans-serif; overflow: hidden; }
+              video { width: 100vw; height: 100vh; display: block; background: #000; }
+              #msg {
+                position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+                font-size: 14px; color: #bbb; text-align: center; pointer-events: none;
+              }
+              /* only until the first click, which is also what earns fullscreen */
+              #hint {
+                position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+                background: rgba(0,0,0,.6); border: 1px solid rgba(255,255,255,.18);
+                border-radius: 999px; padding: 6px 14px; font-size: 12.5px; color: #ddd;
+                transition: opacity .4s; pointer-events: none;
+              }
+            </style>
+            <script src="/hls.min.js"></script>
+            </head>
+            <body>
+            <video id="v" controls autoplay playsinline></video>
+            <div id="msg">loading…</div>
+            <div id="hint">click for fullscreen</div>
+            <script>
+              const src = {{srcJs}}, v = document.getElementById("v");
+              const msg = document.getElementById("msg"), hint = document.getElementById("hint");
+              const done = () => { msg.style.display = "none"; };
+
+              // hls.js first. Chromium answers "maybe" to the native HLS
+              // question and then cannot play it — asking politely gets a
+              // black screen and a MEDIA_ELEMENT_ERROR. Native is the
+              // fallback, which is where Safari lands.
+              if (window.Hls && Hls.isSupported()) {
+                const hls = new Hls({ enableWorker: true });
+                hls.loadSource(src);
+                hls.attachMedia(v);
+                hls.on(Hls.Events.ERROR, (_, d) => {
+                  if (d.fatal) msg.textContent = "playback failed: " + (d.details || d.type);
+                });
+              } else {
+                v.src = src;
+              }
+              v.addEventListener("playing", done);
+              v.addEventListener("loadeddata", done);
+
+              // Try immediately — some browsers honour the opener's click —
+              // and fall back to earning it from the first one here.
+              function goFullscreen() {
+                const el = document.documentElement;
+                const ask = el.requestFullscreen || el.webkitRequestFullscreen;
+                if (!ask || document.fullscreenElement) return;
+                try { const p = ask.call(el); if (p && p.catch) p.catch(() => {}); } catch {}
+              }
+              goFullscreen();
+              addEventListener("click", () => { goFullscreen(); hint.style.opacity = "0"; }, { once: true });
+              addEventListener("keydown", e => { if (e.key === "f") goFullscreen(); });
+              // it stops being useful the moment fullscreen happens
+              document.addEventListener("fullscreenchange",
+                () => { if (document.fullscreenElement) hint.style.display = "none"; });
+              setTimeout(() => { hint.style.opacity = "0"; }, 6000);
+            </script>
+            </body>
+            </html>
+            """;
     }
 
     /// <summary>
