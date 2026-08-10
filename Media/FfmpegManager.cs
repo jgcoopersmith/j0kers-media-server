@@ -853,6 +853,21 @@ public sealed class FfmpegManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// What a remote input is allowed to reach. ffmpeg follows the URIs
+    /// inside what it is given, and an HLS playlist may name its segments as
+    /// <c>file:///…</c> — so a hostile or hijacked stream URL can have ffmpeg
+    /// read this machine's files and mux them into something watchable.
+    /// The list below is everything a real network source needs and nothing
+    /// that touches the disk: no <c>file</c>, no <c>concat</c>, no
+    /// <c>subfile</c>. Local playback passes a path, not a URL, and is
+    /// unaffected.
+    /// </summary>
+    private static readonly string[] RemoteProtocolWhitelist =
+    {
+        "-protocol_whitelist", "crypto,data,http,https,tcp,tls,udp,rtp,rtsp,srt,rtmp,rtmps,pipe",
+    };
+
     private void StartLiveJob(string name, string url)
     {
         var stream = ChannelStream(name);
@@ -862,6 +877,7 @@ public sealed class FfmpegManager : IDisposable
         var args = new List<string> { "-hide_banner", "-loglevel", "error", "-y" };
         if (url.StartsWith("rtsp://", StringComparison.OrdinalIgnoreCase))
             args.AddRange(new[] { "-rtsp_transport", "tcp" });
+        args.AddRange(RemoteProtocolWhitelist);
         args.AddRange(new[] { "-i", url });
 
         var remuxAll = _config.LiveVideoMode.Equals("copy", StringComparison.OrdinalIgnoreCase);

@@ -53,6 +53,18 @@ public sealed class HlsProxy
     public async Task<Result> FetchAsync(string url, string providerId, string proxyBase, bool relaySegments,
         CancellationToken ct)
     {
+        // Where this URL came from is a third party's playlist, and the
+        // server is about to fetch it from inside the network and hand the
+        // answer back. A playlist naming 127.0.0.1:9090 or 169.254.169.254
+        // would make this a window onto everything the server can reach that
+        // the caller cannot — so nothing private is fetched, whatever it says.
+        if (!Services.PrivateNetwork.MayFetch(url, out var why))
+        {
+            Log.Warn("tv", $"refused to fetch {Trim(url)}: {why}");
+            return new Result(403, "text/plain",
+                Encoding.UTF8.GetBytes("refused: that address is not fetchable from here"));
+        }
+
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         req.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
         // the stitcher only answers CORS for its own site; asking as that

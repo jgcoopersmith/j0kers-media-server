@@ -49,27 +49,9 @@ public sealed class DlnaService
     /// no credentials, so the boundary is the network itself: loopback and
     /// private ranges only, never something that arrived off the internet.
     /// </summary>
-    public static bool IsLocalClient(IPAddress? ip)
-    {
-        if (ip is null) return false;
-        if (IPAddress.IsLoopback(ip)) return true;
-        if (ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal) return true;
-        if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
-        {
-            if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
-            else return ip.GetAddressBytes()[0] == 0xfd || ip.GetAddressBytes()[0] == 0xfc; // ULA
-        }
-        var b = ip.GetAddressBytes();
-        return b[0] switch
-        {
-            10 => true,
-            127 => true,
-            172 => b[1] >= 16 && b[1] <= 31,
-            192 => b[1] == 168,
-            169 => b[1] == 254,   // link-local, when DHCP failed
-            _ => false,
-        };
-    }
+    /// The same predicate the outbound fetches use, asked the other way
+    /// round — see Services/PrivateNetwork.
+    public static bool IsLocalClient(IPAddress? ip) => Services.PrivateNetwork.IsPrivate(ip);
 
     // ---- the content tree -------------------------------------------------
 

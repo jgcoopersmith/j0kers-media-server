@@ -48,7 +48,9 @@ public sealed class MediaLink
             if (File.Exists(path))
             {
                 var existing = Convert.FromBase64String(File.ReadAllText(path).Trim());
-                if (existing.Length >= 32) return existing;
+                // a key written by an older build inherited the folder's
+                // permissions; tighten it on the way past
+                if (existing.Length >= 32) { Services.SecretFile.Protect(path); return existing; }
                 Log.Warn("media", "signing.key was too short — generating a new one");
             }
         }
@@ -61,6 +63,8 @@ public sealed class MediaLink
         try
         {
             File.WriteAllText(path, Convert.ToBase64String(secret));
+            // anyone holding this can mint a playable link for any stream
+            Services.SecretFile.Protect(path);
         }
         catch (Exception ex)
         {

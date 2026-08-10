@@ -51,6 +51,12 @@ public sealed class M3uProvider : IChannelProvider
         {
             if (_lineup.Count > 0 && DateTime.UtcNow - _fetchedUtc < Ttl) return _lineup;
 
+            // providers.json is the administrator's own file, but a playlist
+            // URL pointed at this network would still turn a lineup refresh
+            // into a fetch of something the caller cannot reach
+            if (!Services.PrivateNetwork.MayFetch(_url, out var why))
+                throw new InvalidOperationException($"provider '{Id}' will not be fetched: {why}");
+
             var text = await _http.GetStringAsync(_url, ct);
             var (channels, urls) = Parse(text);
             _lineup = channels;

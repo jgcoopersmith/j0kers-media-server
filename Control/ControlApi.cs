@@ -2282,6 +2282,18 @@ public sealed partial class ControlApi : IDisposable
             WriteJson(res, 400, new { error = "host must be a tuner address, e.g. 192.168.1.50 or hdhomerun.local" });
             return;
         }
+        // A tuner is a box on this network: not the internet (where this
+        // endpoint would be a probe — the timing and the error text say
+        // whether something answers), not this machine, and emphatically not
+        // the cloud metadata address.
+        if (!Services.PrivateNetwork.IsLanDevice(host.Split(':')[0]))
+        {
+            WriteJson(res, 400, new
+            {
+                error = "a tuner has to be a device on this network — that address is not one",
+            });
+            return;
+        }
 
         try
         {

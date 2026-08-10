@@ -683,6 +683,37 @@ with a lot of things, and Windows runs its own SSDP service. That is
 expected and shared rather than exclusive; a mechanism that cannot start
 logs it and the others carry on.
 
+### Security posture
+
+Worth knowing what is and isn't defended, since this server hands out media
+on a home network:
+
+- **Passwords** are PBKDF2-HMAC-SHA256, 210k iterations, per-user salt, and
+  compared in constant time. API keys are stored only as digests.
+- **Sessions** are HttpOnly, SameSite=Strict cookies, marked Secure over
+  TLS — including TLS terminated by a reverse proxy, whose
+  `X-Forwarded-Proto` is believed **only from loopback**, since anyone who
+  can reach the port could otherwise claim it.
+- **No TLS of its own.** Bound beyond loopback it serves plain HTTP, so
+  passwords and cookies cross the network in the clear; it says so in the
+  log at every start. Put it behind a TLS reverse proxy for anything wider
+  than a trusted LAN.
+- **The secret files** — `users.json`, `signing.key`, `sessions.json` —
+  are restricted to the account running the server on first write, rather
+  than inheriting the folder's permissions.
+- **What the server fetches on your behalf** (free-TV playlists, the HLS
+  proxy) is refused if it resolves to loopback, an RFC 1918 range, CGNAT,
+  link-local or the cloud metadata address — a playlist naming
+  `127.0.0.1:9090` must not become a window onto this machine. Tuner
+  lookups are the mirror image: a LAN device only, never this machine and
+  never the metadata address.
+- **ffmpeg gets an explicit protocol whitelist on remote inputs**, without
+  `file`, so a hostile playlist cannot name `file:///…` as a segment and
+  have local files muxed into something watchable.
+- **DLNA is unauthenticated by design** — the protocol has no credentials.
+  It is off by default, answers private addresses only, and shares just the
+  folders you tick.
+
 ### Staying signed in
 
 Sessions are kept in a `sessions.json` sidecar, so a restart — an update,

@@ -124,9 +124,11 @@ public sealed class UserStore
     private void Save()
     {
         var json = JsonSerializer.Serialize(new Document { Users = _users }, JsonOpts);
-        var tmp = _file + ".tmp";
+        var tmp = $"{_file}.{Environment.CurrentManagedThreadId}.tmp";
         File.WriteAllText(tmp, json);
         File.Move(tmp, _file, overwrite: true);
+        // password hashes and key digests: this account's business alone
+        Services.SecretFile.Protect(_file);
     }
 
     private static string NewId() => Convert.ToHexString(RandomNumberGenerator.GetBytes(8)).ToLowerInvariant();

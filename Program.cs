@@ -225,6 +225,19 @@ Log.ConfigureFile(config.Logging.ToFile, config.Logging.ResolveDirectory(baseDir
 
 Log.Info("main", $"{config.ServerName} starting (config: {(File.Exists(configPath) ? configPath : "built-in defaults")})");
 
+// Serving beyond this machine over plain HTTP means passwords and session
+// cookies cross the network in the clear. That is a legitimate choice on a
+// home LAN and it is what this server does by default — but it should be a
+// choice, not a surprise, so it is said once at every start.
+if (config.Control.Enabled
+    && !HttpListenerBinder.IsLoopbackBind(config.Control.BindAddress))
+{
+    Log.Warn("main", "the dashboard is served over plain HTTP on " +
+        $"{config.Control.BindAddress}:{config.Control.Port} — passwords and session cookies " +
+        "cross the network unencrypted. Put it behind a TLS reverse proxy for anything " +
+        "beyond a trusted LAN; the proxy's X-Forwarded-Proto is honoured from loopback.");
+}
+
 if (config.Mounts.Count == 0)
 {
     config.Mounts.Add(new MountConfig { Path = "/test", Source = "tone", Description = "Default 440 Hz test tone" });

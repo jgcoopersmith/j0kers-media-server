@@ -52,7 +52,9 @@ public sealed partial class ControlApi
                     authenticated = auth.Level != AccessLevel.None,
                     // a plain-HTTP bind beyond loopback means the password
                     // crosses the wire in the clear; the UI says so
-                    secure = ctx.Request.IsSecureConnection
+                    // TLS, or a reverse proxy that terminated it, or the
+                    // password never leaving the machine at all
+                    secure = AuthService.IsSecureRequest(ctx)
                              || Hls.HttpListenerBinder.IsLoopbackRequest(ctx),
                     user = Describe(auth),
                 });

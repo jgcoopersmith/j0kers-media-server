@@ -167,6 +167,7 @@ public sealed class AuthService
                 File.WriteAllText(tmp, System.Text.Json.JsonSerializer.Serialize(
                     _sessions, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
                 File.Move(tmp, _sessionFile, overwrite: true);
+                Services.SecretFile.Protect(_sessionFile);
             }
             catch (Exception ex)
             {
@@ -461,9 +462,30 @@ public sealed class AuthService
     /// server-side idle timeout handles the rest. Secure is set only on
     /// HTTPS: on a plain-HTTP LAN bind it would make the cookie unusable.
     /// </summary>
+    /// <summary>
+    /// Whether this request reached the user over TLS — directly, or through
+    /// a reverse proxy that terminated it and said so.
+    ///
+    /// <c>X-Forwarded-Proto</c> is a claim, not a fact: anyone who can reach
+    /// the port can send it. It is believed only from loopback, which is
+    /// where a proxy on this machine connects from and where a remote
+    /// attacker cannot put themselves. Believing it from anywhere else would
+    /// let a plain-HTTP client talk the server into marking its cookie
+    /// Secure — and a Secure cookie is one the browser then refuses to send
+    /// back over the plain connection it actually has.
+    /// </summary>
+    public static bool IsSecureRequest(HttpListenerContext ctx)
+    {
+        if (ctx.Request.IsSecureConnection) return true;
+        if (!IPAddress.IsLoopback(ctx.Request.RemoteEndPoint?.Address ?? IPAddress.None)) return false;
+        var proto = ctx.Request.Headers["X-Forwarded-Proto"];
+        return proto is not null
+               && proto.Split(',')[0].Trim().Equals("https", StringComparison.OrdinalIgnoreCase);
+    }
+
     public static void SetSessionCookie(HttpListenerContext ctx, string token)
     {
-        var secure = ctx.Request.IsSecureConnection ? "; Secure" : "";
+        var secure = IsSecureRequest(ctx) ? "; Secure" : "";
         ctx.Response.Headers.Add("Set-Cookie",
             $"{CookieName}={token}; Path=/; HttpOnly; SameSite=Strict{secure}");
     }
