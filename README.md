@@ -168,7 +168,10 @@ sprinkles is strawberry frosting with pink, blue, yellow and red sprinkles
 scattered across the page — behind the cards, never under text, so the
 cards stay plain white and everything you read sits on a flat surface. All
 are remembered per browser and followed by the sign-in page; the button
-tracks your system setting until you pick one), and a
+tracks your system setting until you pick one), a **clock** showing the
+date, the time to the second and the timezone (this browser's own clock,
+not the server's — the dashboard gets read from phones and other machines;
+hover for the full zone name), and a
 **⚙ Config**
 dialog for the hostname/bind address, the RTSP/HLS/control ports, and how
 long share links live — saved to a `settings.json` sidecar and applied by restarting the

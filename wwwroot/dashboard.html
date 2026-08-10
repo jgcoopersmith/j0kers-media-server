@@ -613,6 +613,7 @@
     <button class="pill admin-only" id="usersbtn" onclick="openUsers()" title="Add, edit, and remove user accounts">👥 Users</button>
     <button class="pill" id="acctbtn" onclick="openAccount()" title="Your account, password, and keys">👤 <span id="acct-pill">…</span></button>
     <button class="pill" id="themebtn" onclick="toggleTheme()" title="Switch theme">🌗</button>
+    <span class="pill" id="clockpill" style="font-variant-numeric:tabular-nums">–</span>
     <span class="pill" id="verpill">v–</span>
   </header>
 
@@ -1184,6 +1185,34 @@ function hidePasswords(root) {
     eye.setAttribute("aria-label", eye.title);
   }
 }
+
+/* ---- the clock in the header ----
+   This browser's own time, not the server's: the dashboard is read from
+   phones and other machines, and the useful answer to "what time is it"
+   is the time where the person reading it is. Tabular numerals, so the
+   seconds tick without the pill twitching wider and narrower.
+
+   The abbreviation is whatever the platform calls this zone (EDT, GMT+2);
+   the tooltip carries the full IANA name, which is the unambiguous one. */
+function tickClock() {
+  const pill = $("clockpill");
+  if (!pill) return;
+  const now = new Date();
+  const time = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const date = now.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
+  let zone = "";
+  try {
+    zone = new Intl.DateTimeFormat([], { timeZoneName: "short" })
+      .formatToParts(now).find(p => p.type === "timeZoneName")?.value || "";
+  } catch { /* no Intl zone name — the time and date still stand */ }
+  pill.textContent = date + " · " + time + (zone ? " " + zone : "");
+  if (!pill.title) {
+    try { pill.title = Intl.DateTimeFormat().resolvedOptions().timeZone + " — this browser's clock"; }
+    catch { pill.title = "this browser's clock"; }
+  }
+}
+tickClock();
+setInterval(tickClock, 1000);
 
 /* ---- theme: follows the system until you pick, then stays picked ---- */
 const THEME_KEY = "j0kers-theme";
