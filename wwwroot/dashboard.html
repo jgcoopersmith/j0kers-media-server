@@ -3042,6 +3042,11 @@ async function loadLibrary(path) {
   // opening a folder from a result is the end of that search
   if (libBrowsePath !== null && $("lib-search").value.trim() === "") libBrowsePath = null;
   const box = $("library");
+  // Opening a folder from halfway down a long listing left the page at that
+  // scroll position, which in the new folder is somewhere near its end —
+  // reading as "it jumped to the bottom". Remember whether this is a move
+  // to a different folder, and put its start back under the eye below.
+  const movedFolder = currentLibPath !== null && currentLibPath !== path;
   $("lib-path").textContent = path;
   box.innerHTML = '<div class="empty">loading…</div>';
   let data;
@@ -3112,6 +3117,20 @@ async function loadLibrary(path) {
   }
 
   box.innerHTML = h || '<div class="empty">nothing playable in this folder</div>';
+
+  // Only on a move, and only when the start of the listing is off the top of
+  // the window: someone who opened a folder already in view should not have
+  // the page yanked around underneath them. The card's own header is the
+  // target rather than the listing, so the path and the search box come with
+  // it. No smooth scroll — this is a destination, not a journey.
+  if (movedFolder) {
+    const card = box.closest(".card");
+    const top = card ? card.getBoundingClientRect().top : 0;
+    // scrollTo rather than scrollIntoView: the latter does nothing here, and
+    // silently — this page's cards are in a plain static column, and it
+    // decided there was nothing to scroll
+    if (card && top < 0) window.scrollTo(0, top + window.scrollY);
+  }
 }
 
 function tileGrid(entries, join, act, fallbackIcon) {
