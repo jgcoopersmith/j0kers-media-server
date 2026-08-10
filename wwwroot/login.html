@@ -73,6 +73,41 @@
   :root[data-theme="cloud"] body {
     background: linear-gradient(180deg, #d4ebfc 0%, #e8f4fd 45%, #fdf8ec 100%) fixed;
   }
+  /* Donut sprinkles — same palette and the same scatter as the dashboard. */
+  :root[data-theme="donut"] {
+    color-scheme: light;
+    --page:      #ffe3ef;
+    --surface:   #ffffff;
+    --surface-2: #fff2f7;
+    --ink:       #3b2230;
+    --ink-2:     #63394f;
+    --muted:     #7c5a6d;
+    --grid:      #f7d3e2;
+    --border:    rgba(59,34,48,0.12);
+    --series-1:  #1573c4;
+    --good:      #2b8047;
+    --warning:   #a06500;
+    --critical:  #cf3030;
+  }
+  :root[data-theme="donut"] body {
+    background-color: #ffe3ef;
+    background-image:
+      radial-gradient(8px 3px at  24px  36px, #cf2d68 0 99%, transparent 100%),
+      radial-gradient(3px 8px at 112px  16px, #1573c4 0 99%, transparent 100%),
+      radial-gradient(8px 3px at 196px  74px, #f2b705 0 99%, transparent 100%),
+      radial-gradient(3px 8px at 268px  30px, #cf3030 0 99%, transparent 100%),
+      radial-gradient(8px 3px at  58px 122px, #1573c4 0 99%, transparent 100%),
+      radial-gradient(3px 8px at 152px 160px, #cf2d68 0 99%, transparent 100%),
+      radial-gradient(8px 3px at 246px 138px, #f2b705 0 99%, transparent 100%),
+      radial-gradient(3px 8px at  20px 212px, #cf3030 0 99%, transparent 100%),
+      radial-gradient(8px 3px at  96px 258px, #1573c4 0 99%, transparent 100%),
+      radial-gradient(3px 8px at 188px 232px, #f2b705 0 99%, transparent 100%),
+      radial-gradient(8px 3px at 276px 274px, #cf2d68 0 99%, transparent 100%),
+      radial-gradient(3px 8px at 132px  88px, #cf3030 0 99%, transparent 100%);
+    background-size: 300px 300px;
+    background-attachment: fixed;
+  }
+
   /* Forest — the dashboard's fourth theme, matched here for the same reason
      cloud is: signing in should not look like a different server. */
   :root[data-theme="forest"] {
@@ -166,7 +201,7 @@
   (function () {
     try {
       var t = localStorage.getItem("j0kers-theme");
-      if (t === "light" || t === "dark" || t === "cloud" || t === "forest") document.documentElement.setAttribute("data-theme", t);
+      if (["light", "dark", "cloud", "forest", "donut"].indexOf(t) >= 0) document.documentElement.setAttribute("data-theme", t);
     } catch (e) { /* storage blocked — fall back to the system preference */ }
   })();
 </script>

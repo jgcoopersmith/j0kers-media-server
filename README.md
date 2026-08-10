@@ -160,12 +160,15 @@ byte counter so a viewer leaving can't push the rate negative.
 The header has a **⏻ Start/Stop** button that stops or starts the streaming
 services (RTSP + HLS) while the dashboard stays up, a **👥 Users** dialog for
 accounts and keys, a **👤 Account** panel for your own password and keys, and
-a **theme button** that cycles dark → light → **cloud** → **forest**
-(cloud is a bright sky: whites and pale blues, a sunlit gradient and gold
-accents. Forest is dark but warm: deep green under canopy, moss where the
-others use grey, and low sun through the leaves. Both are remembered per
-browser and followed by the sign-in page; the button tracks your system
-setting until you pick one), and a
+a **theme button** that cycles dark → light → **cloud** → **forest** →
+**donut sprinkles** (cloud is a bright sky: whites and pale blues, a sunlit
+gradient and gold accents. Forest is dark but warm: deep green under
+canopy, moss where the others use grey, low sun through the leaves. Donut
+sprinkles is strawberry frosting with pink, blue, yellow and red sprinkles
+scattered across the page — behind the cards, never under text, so the
+cards stay plain white and everything you read sits on a flat surface. All
+are remembered per browser and followed by the sign-in page; the button
+tracks your system setting until you pick one), and a
 **⚙ Config**
 dialog for the hostname/bind address, the RTSP/HLS/control ports, and how
 long share links live — saved to a `settings.json` sidecar and applied by restarting the

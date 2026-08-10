@@ -118,6 +118,62 @@
   :root[data-theme="forest"] .tile .k { color: var(--series-1); }
   :root[data-theme="forest"] .root-chip.active { border-color: var(--accent); }
 
+  /* Donut sprinkles: strawberry frosting, and the sprinkles are real —
+     scattered across the page in pink, blue, yellow and red. They live on
+     the page behind the cards, never under text: the cards are plain white,
+     so everything you actually read sits on a flat surface and the fun
+     happens around it. */
+  :root[data-theme="donut"] {
+    color-scheme: light;
+    --page:      #ffe3ef;   /* frosting */
+    --surface:   #ffffff;
+    --surface-2: #fff2f7;
+    --ink:       #3b2230;   /* chocolate */
+    --ink-2:     #63394f;
+    --muted:     #7c5a6d;
+    --grid:      #f7d3e2;
+    --baseline:  #e9a9c6;
+    --border:    rgba(59,34,48,0.12);
+    --series-1:  #1573c4;   /* blue sprinkle */
+    --accent:    #cf2d68;   /* pink sprinkle */
+    --good:      #2b8047;
+    --warning:   #a06500;   /* yellow sprinkle, dark enough to read */
+    --critical:  #cf3030;   /* red sprinkle */
+  }
+  /* Each layer is one sprinkle: a rounded dash drawn at a fixed spot inside
+     a 300px tile, transparent everywhere else, so twelve layers scatter
+     twelve sprinkles per tile rather than twelve stripes. Lengthways and
+     upright ones mixed, in the four colours, at no particular rhythm. */
+  :root[data-theme="donut"] body {
+    background-color: #ffe3ef;
+    background-image:
+      radial-gradient(8px 3px at  24px  36px, #cf2d68 0 99%, transparent 100%),
+      radial-gradient(3px 8px at 112px  16px, #1573c4 0 99%, transparent 100%),
+      radial-gradient(8px 3px at 196px  74px, #f2b705 0 99%, transparent 100%),
+      radial-gradient(3px 8px at 268px  30px, #cf3030 0 99%, transparent 100%),
+      radial-gradient(8px 3px at  58px 122px, #1573c4 0 99%, transparent 100%),
+      radial-gradient(3px 8px at 152px 160px, #cf2d68 0 99%, transparent 100%),
+      radial-gradient(8px 3px at 246px 138px, #f2b705 0 99%, transparent 100%),
+      radial-gradient(3px 8px at  20px 212px, #cf3030 0 99%, transparent 100%),
+      radial-gradient(8px 3px at  96px 258px, #1573c4 0 99%, transparent 100%),
+      radial-gradient(3px 8px at 188px 232px, #f2b705 0 99%, transparent 100%),
+      radial-gradient(8px 3px at 276px 274px, #cf2d68 0 99%, transparent 100%),
+      radial-gradient(3px 8px at 132px  88px, #cf3030 0 99%, transparent 100%);
+    background-size: 300px 300px;
+    background-attachment: fixed;
+  }
+  :root[data-theme="donut"] .card > h2,
+  :root[data-theme="donut"] .lib-h { color: var(--accent); }
+  /* the four sprinkle colours, in a line, on every card */
+  :root[data-theme="donut"] .card {
+    border-top: 3px solid transparent;
+    border-image: repeating-linear-gradient(90deg,
+      #cf2d68 0 14px, #1573c4 14px 28px, #f2b705 28px 42px, #cf3030 42px 56px) 3;
+  }
+  :root[data-theme="donut"] .card-fold { color: var(--accent); }
+  :root[data-theme="donut"] .tile .k { color: var(--series-1); }
+  :root[data-theme="donut"] .root-chip.active { border-color: var(--accent); background: #fff0f6; }
+
   /* explicit dark has to be able to beat a system that prefers light */
   :root[data-theme="dark"] {
     color-scheme: dark;
@@ -536,7 +592,7 @@
   (function () {
     try {
       var t = localStorage.getItem("j0kers-theme");
-      if (t !== "light" && t !== "dark" && t !== "cloud" && t !== "forest")
+      if (["light", "dark", "cloud", "forest", "donut"].indexOf(t) < 0)
         t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
       document.documentElement.setAttribute("data-theme", t);
     } catch (e) { /* storage blocked — the CSS media query still applies */ }
@@ -1131,7 +1187,7 @@ function hidePasswords(root) {
 
 /* ---- theme: follows the system until you pick, then stays picked ---- */
 const THEME_KEY = "j0kers-theme";
-const THEMES = ["dark", "light", "cloud", "forest"];
+const THEMES = ["dark", "light", "cloud", "forest", "donut"];
 
 function currentTheme() {
   const t = document.documentElement.getAttribute("data-theme");
@@ -1145,7 +1201,8 @@ const THEME_NEXT = {
   dark:   { icon: "☀",  label: "Switch to the light theme" },
   light:  { icon: "☁",  label: "Switch to the cloud theme" },
   cloud:  { icon: "🍃", label: "Switch to the forest theme" },
-  forest: { icon: "🌙", label: "Switch to the dark theme" },
+  forest: { icon: "🍩", label: "Switch to the donut sprinkles theme" },
+  donut:  { icon: "🌙", label: "Switch to the dark theme" },
 };
 
 function paintThemeButton() {
