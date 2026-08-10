@@ -73,6 +73,26 @@
   :root[data-theme="cloud"] body {
     background: linear-gradient(180deg, #d4ebfc 0%, #e8f4fd 45%, #fdf8ec 100%) fixed;
   }
+  /* Assassin — midnight steel and blood, matched to the dashboard. */
+  :root[data-theme="assassin"] {
+    color-scheme: dark;
+    --page:      #080b12;
+    --surface:   #121826;
+    --surface-2: #1a2233;
+    --ink:       #eef3fb;
+    --ink-2:     #c3cede;
+    --muted:     #8b9ab1;
+    --grid:      #232d42;
+    --border:    rgba(238,243,251,0.10);
+    --series-1:  #5b93e0;
+    --good:      #3fa76a;
+    --warning:   #d99a2b;
+    --critical:  #e85248;
+  }
+  :root[data-theme="assassin"] body {
+    background: linear-gradient(180deg, #070b14 0%, #080b12 55%, #14070a 100%) fixed;
+  }
+
   /* Donut sprinkles — same palette and the same scatter as the dashboard. */
   :root[data-theme="donut"] {
     color-scheme: light;
@@ -201,7 +221,7 @@
   (function () {
     try {
       var t = localStorage.getItem("j0kers-theme");
-      if (["light", "dark", "cloud", "forest", "donut"].indexOf(t) >= 0) document.documentElement.setAttribute("data-theme", t);
+      if (["light", "dark", "cloud", "forest", "donut", "assassin"].indexOf(t) >= 0) document.documentElement.setAttribute("data-theme", t);
     } catch (e) { /* storage blocked — fall back to the system preference */ }
   })();
 </script>

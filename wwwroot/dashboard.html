@@ -174,6 +174,42 @@
   :root[data-theme="donut"] .tile .k { color: var(--series-1); }
   :root[data-theme="donut"] .root-chip.active { border-color: var(--accent); background: #fff0f6; }
 
+  /* Assassin: midnight blue steel, with deep red where attention is owed.
+     Dark like the default theme but cold rather than neutral — the blues do
+     the structure, the red is kept for the accent so it stays a warning
+     rather than a wash. */
+  :root[data-theme="assassin"] {
+    color-scheme: dark;
+    --page:      #080b12;   /* nightfall */
+    --surface:   #121826;
+    --surface-2: #1a2233;
+    --ink:       #eef3fb;
+    --ink-2:     #c3cede;
+    --muted:     #8b9ab1;
+    --grid:      #232d42;
+    --baseline:  #33415c;
+    --border:    rgba(238,243,251,0.10);
+    --series-1:  #5b93e0;   /* steel */
+    --accent:    #e85248;   /* blood */
+    --good:      #3fa76a;
+    --warning:   #d99a2b;
+    --critical:  #e85248;
+  }
+  /* blue at the top bleeding to red at the foot */
+  :root[data-theme="assassin"] body {
+    background: linear-gradient(180deg, #070b14 0%, #080b12 55%, #14070a 100%) fixed;
+  }
+  :root[data-theme="assassin"] .card > h2,
+  :root[data-theme="assassin"] .lib-h { color: var(--accent); }
+  /* the two colours meeting, edge on */
+  :root[data-theme="assassin"] .card {
+    border-top: 2px solid transparent;
+    border-image: linear-gradient(90deg, #e0483c 0%, #7a2430 45%, #2b4a7d 55%, #5b93e0 100%) 2;
+  }
+  :root[data-theme="assassin"] .card-fold { color: var(--accent); }
+  :root[data-theme="assassin"] .tile .k { color: var(--series-1); }
+  :root[data-theme="assassin"] .root-chip.active { border-color: var(--accent); }
+
   /* explicit dark has to be able to beat a system that prefers light */
   :root[data-theme="dark"] {
     color-scheme: dark;
@@ -592,7 +628,7 @@
   (function () {
     try {
       var t = localStorage.getItem("j0kers-theme");
-      if (["light", "dark", "cloud", "forest", "donut"].indexOf(t) < 0)
+      if (["light", "dark", "cloud", "forest", "donut", "assassin"].indexOf(t) < 0)
         t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
       document.documentElement.setAttribute("data-theme", t);
     } catch (e) { /* storage blocked — the CSS media query still applies */ }
@@ -1229,7 +1265,7 @@ setInterval(tickClock, 1000);
 
 /* ---- theme: follows the system until you pick, then stays picked ---- */
 const THEME_KEY = "j0kers-theme";
-const THEMES = ["dark", "light", "cloud", "forest", "donut"];
+const THEMES = ["dark", "light", "cloud", "forest", "donut", "assassin"];
 
 function currentTheme() {
   const t = document.documentElement.getAttribute("data-theme");
@@ -1244,7 +1280,8 @@ const THEME_NEXT = {
   light:  { icon: "☁",  label: "Switch to the cloud theme" },
   cloud:  { icon: "🍃", label: "Switch to the forest theme" },
   forest: { icon: "🍩", label: "Switch to the donut sprinkles theme" },
-  donut:  { icon: "🌙", label: "Switch to the dark theme" },
+  donut:  { icon: "🗡", label: "Switch to the assassin theme" },
+  assassin: { icon: "🌙", label: "Switch to the dark theme" },
 };
 
 function paintThemeButton() {

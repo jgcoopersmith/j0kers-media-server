@@ -174,12 +174,14 @@ The header has a **⏻ Start/Stop** button that stops or starts the streaming
 services (RTSP + HLS) while the dashboard stays up, a **👥 Users** dialog for
 accounts and keys, a **👤 Account** panel for your own password and keys, and
 a **theme button** that cycles dark → light → **cloud** → **forest** →
-**donut sprinkles** (cloud is a bright sky: whites and pale blues, a sunlit
+**donut sprinkles** → **assassin** (cloud is a bright sky: whites and pale blues, a sunlit
 gradient and gold accents. Forest is dark but warm: deep green under
 canopy, moss where the others use grey, low sun through the leaves. Donut
 sprinkles is strawberry frosting with pink, blue, yellow and red sprinkles
 scattered across the page — behind the cards, never under text, so the
-cards stay plain white and everything you read sits on a flat surface. All
+cards stay plain white and everything you read sits on a flat surface.
+Assassin is midnight blue steel bleeding to red at the foot of the page,
+with the red kept for accents so it stays a warning rather than a wash. All
 are remembered per browser and followed by the sign-in page; the button
 tracks your system setting until you pick one), a **clock** showing the
 date, the time to the second and the timezone — the **server's** clock, so
