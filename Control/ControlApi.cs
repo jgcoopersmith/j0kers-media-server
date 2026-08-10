@@ -60,6 +60,35 @@ public sealed partial class ControlApi : IDisposable
     /// </summary>
     private readonly Dlna.DlnaShare _dlnaShare;
 
+    /// <summary>
+    /// The file a stream was transcoded from, or empty when it wasn't one —
+    /// a live channel, or a directory of segments dropped in by hand.
+    ///
+    /// The transcoder already leaves a source.txt in each stream directory
+    /// (SubtitleManager reads it too), so this needs no bookkeeping of its
+    /// own and keeps working across a restart, which an in-memory map of
+    /// "streams prepared this run" would not.
+    /// </summary>
+    private string SourceFileFor(string stream)
+    {
+        if (string.IsNullOrWhiteSpace(stream) || stream.Contains("..")
+            || stream.Contains('/') || stream.Contains('\\')) return "";
+        try
+        {
+            var root = Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
+                ? _serverConfig.Hls.MediaRoot
+                : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
+            var marker = Path.Combine(root, stream, "source.txt");
+            if (!File.Exists(marker)) return "";
+            var file = File.ReadAllText(marker).Trim();
+            return File.Exists(file) ? file : "";
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
     private Dlna.DlnaService NewDlna() => new(
         _library, _dlnaShare, () => _serverConfig.ServerName,
         Discovery?.Uuid ?? _serverConfig.Discovery.HostName);
@@ -106,8 +135,16 @@ public sealed partial class ControlApi : IDisposable
         // through /api/play records it too, but most playback never touches
         // that endpoint: an existing stream is simply requested.
         _services.Viewers.ViewingStarted += (stream, user) =>
-            _history.Record(Media.StreamTitle.Prettify(stream), "", stream, "stream",
+        {
+            // The file behind it, when there is one — that is what makes the
+            // entry replayable after the transcode cache has been swept.
+            var file = SourceFileFor(stream);
+            var name = file.Length > 0
+                ? Media.StreamTitle.PrettifyFile(Path.GetFileName(file))
+                : Media.StreamTitle.Prettify(stream);
+            _history.Record(name, file, stream, file.Length > 0 ? "file" : "stream",
                             user.Length > 0 ? user : "share link");
+        };
 
         _providerHttp = new HttpClient(new SocketsHttpHandler
         {
@@ -1853,9 +1890,10 @@ public sealed partial class ControlApi : IDisposable
             }
             if (DenyUnshared(ctx, auth, file)) return;
             var (stream, ready) = _ffmpeg.StartVod(file, height);
-            // this is the one place that knows the file behind a stream, so
-            // it is what makes the entry replayable from disk later
-            _history.Record(Media.StreamTitle.PrettifyFile(Path.GetFileName(file)), file, stream, "file", auth.Name);
+            // Deliberately not history: preparing a stream is not watching
+            // it, and adding one to the HLS list would otherwise show up as
+            // watched before anyone pressed play. The viewing that may follow
+            // records itself, and finds this file again through source.txt.
             WriteJson(res, 200, new { stream, ready, playlist = $"/{stream}/index.m3u8" });
         }
         catch (FileNotFoundException)
