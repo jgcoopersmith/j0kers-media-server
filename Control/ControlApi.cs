@@ -139,16 +139,23 @@ public sealed partial class ControlApi : IDisposable
         // VLC, a shared link — it goes in the history. Preparing a file
         // through /api/play records it too, but most playback never touches
         // that endpoint: an existing stream is simply requested.
-        _services.Viewers.ViewingStarted += (stream, user) =>
+        _services.Viewers.ViewingStarted += v =>
         {
             // The file behind it, when there is one — that is what makes the
-            // entry replayable after the transcode cache has been swept.
-            var file = SourceFileFor(stream);
+            // entry replayable after the transcode cache has been swept. DLNA
+            // hands over the file directly, so there is nothing to look up;
+            // an HLS stream keeps it in a source.txt beside the segments.
+            var file = v.File ?? SourceFileFor(v.Stream);
             var name = file.Length > 0
                 ? Media.StreamTitle.PrettifyFile(Path.GetFileName(file))
-                : Media.StreamTitle.Prettify(stream);
-            _history.Record(name, file, stream, file.Length > 0 ? "file" : "stream",
-                            user.Length > 0 ? user : "share link");
+                : Media.StreamTitle.Prettify(v.Stream);
+            // a DLNA viewing has no stream directory, and recording the file
+            // path as one would make the entry unplayable from the dashboard
+            var stream = v.Protocol == "dlna" ? "" : v.Stream;
+            // and no account either — v.User carries a label for the sessions
+            // table, not a name the history can file anything under
+            var user = v.Protocol == "dlna" ? "" : v.User;
+            _history.Record(name, file, stream, file.Length > 0 ? "file" : "stream", user);
         };
 
         _providerHttp = new HttpClient(new SocketsHttpHandler
@@ -822,12 +829,16 @@ public sealed partial class ControlApi : IDisposable
                             rtp = new { packetsSent = s.Sender.Stats.packets, octetsSent = s.Sender.Stats.octets },
                         }).Concat<object>(_services.Viewers.Active.Select(v => new
                         {
-                            protocol = "hls",
+                            protocol = v.Protocol,
                             id = v.Id,
-                            mount = v.Stream,
+                            // a DLNA viewing is identified by the file itself;
+                            // the folder above it is the useful part to show
+                            mount = v.File is not null ? Path.GetFileName(v.File) : v.Stream,
                             // "vod-skyfall-2012-1080p-brrip-df019bf7" tells
                             // you nothing at a glance; "Skyfall (2012)" does
-                            title = Media.StreamTitle.Prettify(v.Stream),
+                            title = v.File is not null
+                                ? Media.StreamTitle.PrettifyFile(Path.GetFileName(v.File))
+                                : Media.StreamTitle.Prettify(v.Stream),
                             state = v.State,
                             client = v.Client,
                             player = v.Player,
@@ -1025,6 +1036,10 @@ public sealed partial class ControlApi : IDisposable
                         kind = e.Kind,
                         plays = e.Plays,
                         startedUtc = e.StartedUtc,
+                        // empty = watched with no account, which today means
+                        // a television over DLNA; the list says so rather
+                        // than leaving it looking like the caller's own play
+                        viaDlna = e.User.Length == 0,
                         // a file that has been deleted, or a stream that has
                         // since been evicted from the cache: either way there
                         // is nothing left to replay
@@ -2417,7 +2432,26 @@ public sealed partial class ControlApi : IDisposable
                     res.Close();
                     return;
                 }
-                dlna.ServeFile(ctx, file);
+                // A HEAD is the TV asking how big the file is and whether it
+                // may seek — the same reasoning as an HLS playlist fetch, and
+                // not yet anybody watching. The GET that follows is.
+                if (method == "HEAD") { dlna.ServeFile(ctx, file); return; }
+
+                // The viewing is opened before a byte goes out, so a two-hour
+                // film shows up as a session while it plays rather than when
+                // it ends — and it lands in Recently Watched at the moment
+                // somebody presses play, as every other protocol does.
+                var viewing = _services.Viewers.Note(
+                    ctx, file, user: null, bytes: 0, create: true, protocol: "dlna", file: file);
+                dlna.ServeFile(ctx, file, sent =>
+                {
+                    _services.Served.Add(sent);
+                    // the sweep can retire a viewing the TV left paused past
+                    // the window; the response is still open, so start it again
+                    if (!_services.Viewers.Progress(viewing, sent))
+                        viewing = _services.Viewers.Note(
+                            ctx, file, user: null, bytes: sent, create: true, protocol: "dlna", file: file);
+                });
                 return;
             }
 

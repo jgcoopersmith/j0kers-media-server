@@ -48,11 +48,22 @@ public sealed class WatchHistory
     /// The most recent entries for one account, newest first. Everyone sees
     /// their own history and no one else's — what somebody watched is theirs.
     /// </summary>
+    /// <summary>
+    /// One account's history, plus everything watched without an account.
+    ///
+    /// DLNA is the reason for the second half: a television browsing the
+    /// library presents no credential — the protocol has none — so those
+    /// plays belong to nobody and would otherwise be recorded and never
+    /// shown. They are already visible to any signed-in account in the
+    /// sessions table while they are playing, so listing them afterwards
+    /// reveals nothing new; leaving them out just made the list wrong.
+    /// </summary>
     public IReadOnlyList<Entry> Recent(string user, int count)
     {
         lock (_lock)
             return _entries
-                .Where(e => string.Equals(e.User, user, StringComparison.OrdinalIgnoreCase))
+                .Where(e => e.User.Length == 0
+                            || string.Equals(e.User, user, StringComparison.OrdinalIgnoreCase))
                 .OrderByDescending(e => e.StartedUtc)
                 .Take(count)
                 .ToList();
@@ -116,13 +127,17 @@ public sealed class WatchHistory
     /// Forgets one entry — named by its file path or its stream, since the
     /// caller may only have one of them — or the caller's whole history when
     /// the key is empty.
+    ///
+    /// Reaches the no-account entries as well, matching what
+    /// <see cref="Recent"/> shows: a DLNA row the caller can see is a row the
+    /// caller must be able to clear.
     /// </summary>
     public bool Forget(string user, string key)
     {
         lock (_lock)
         {
             var removed = _entries.RemoveAll(e =>
-                string.Equals(e.User, user, StringComparison.OrdinalIgnoreCase) &&
+                (e.User.Length == 0 || string.Equals(e.User, user, StringComparison.OrdinalIgnoreCase)) &&
                 (key.Length == 0
                  || e.Path.Equals(key, StringComparison.OrdinalIgnoreCase)
                  || e.Stream.Equals(key, StringComparison.OrdinalIgnoreCase))) > 0;

@@ -1709,17 +1709,20 @@ function renderSessions(list) {
   }
   let h = '<table><tr><th>Via</th><th>Stream</th><th>State</th><th>Client</th><th>Watching</th><th>Sent</th><th></th></tr>';
   for (const s of list) {
-    const hls = s.protocol === "hls";
+    // rtsp is the odd one out: it has a real session with an id worth
+    // showing. hls and dlna are both inferred from request traffic, and for
+    // those the device and the account are what identify a viewer.
+    const rtsp = s.protocol === "rtsp";
     // for HLS the useful identity is the device and the account, not an
     // opaque id — "Android · kid" tells you who is streaming what
-    const who = hls
+    const who = !rtsp
       ? esc(s.client) + '<div style="color:var(--muted);font-size:11px">' + esc(s.player)
         + (s.user ? " · " + esc(s.user) : "") + "</div>"
       : esc(s.client) + '<div style="color:var(--muted);font-size:11px">' + esc(s.id) + "</div>";
-    h += '<tr><td><span class="badge' + (hls ? "" : " admin") + '">' + (hls ? "hls" : "rtsp") + "</span></td>"
+    h += '<tr><td><span class="badge' + (rtsp ? " admin" : "") + '">' + esc(s.protocol) + "</span></td>"
       // the readable title, with the stream id a hover away for when the
       // exact directory is what you actually need
-      + '<td' + (hls ? '' : ' class="mono"') + ' title="' + esc(s.mount) + '">'
+      + '<td' + (rtsp ? ' class="mono"' : '') + ' title="' + esc(s.mount) + '">'
       + esc(s.title || s.mount) + '</td>'
       + '<td><span class="state ' + esc(s.state) + '"><span class="dot"></span>' + esc(s.state) + '</span></td>'
       + '<td class="mono">' + who + '</td>'
@@ -1728,7 +1731,11 @@ function renderSessions(list) {
       + '<td style="text-align:right">'
       + (s.terminable
           ? '<button class="danger" data-act="session-kill" data-arg="' + esc(s.id) + '">Terminate</button>'
-          : '<span style="color:var(--muted);font-size:11px" title="An HLS viewer is a series of file requests — there is no connection to cut. Revoke their key or account to stop them.">—</span>')
+          : '<span style="color:var(--muted);font-size:11px" title="'
+            + (s.protocol === "dlna"
+                ? "DLNA has no session to end. Untick the folder, or switch DLNA off, to stop it."
+                : "An HLS viewer is a series of file requests — there is no connection to cut. Revoke their key or account to stop them.")
+            + '">—</span>')
       + "</td></tr>";
   }
   $("sessions").innerHTML = h + '</table>';
@@ -1833,7 +1840,7 @@ function renderHistory() {
   // again until the page was reloaded.)
   // the rendered "ago" text, not the timestamp — it changes on its own
   const sig = JSON.stringify(lastHistory.map(e =>
-    [e.name, fmtSince(e.startedUtc), e.plays, e.missing])) + "|" + currentMediaPath + "|" + currentHlsStream;
+    [e.name, fmtSince(e.startedUtc), e.plays, e.missing, e.viaDlna])) + "|" + currentMediaPath + "|" + currentHlsStream;
   if (sig === historySig) return;
   historySig = sig;
 
@@ -1845,10 +1852,12 @@ function renderHistory() {
     // the exception, so mark that rather than repeating "viewed" ten times
     const playing = (currentMediaPath && e.path === currentMediaPath)
       || (e.stream && currentHlsStream === e.stream);
-    const mark = playing ? "▶" : "✓";
-    const note = e.missing ? " · no longer available"
+    // a TV over DLNA is nobody's account, so it would otherwise read as
+    // something this user watched — the icon says where it was played
+    const mark = playing ? "▶" : e.viaDlna ? "📺" : "✓";
+    const note = (e.missing ? " · no longer available"
       : e.plays > 1 ? " · watched ×" + e.plays
-      : "";
+      : "") + (e.viaDlna ? " · on a TV" : "");
     // the index, not the path: an entry may be replayable by file or by
     // stream, and the row itself knows which
     h += '<option value="' + i + '"' + (e.missing ? " disabled" : "") + ">"

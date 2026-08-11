@@ -36,6 +36,9 @@ public sealed class HlsViewers
         public required string Stream { get; init; }
         public required string Client { get; init; }
         public required string Player { get; init; }
+        public required string Protocol { get; init; }
+        /// <summary>The file on disk, when the viewing is of one directly (DLNA).</summary>
+        public string? File { get; init; }
         public string User { get; set; } = "";
         public DateTime StartedUtc { get; init; }
         public DateTime LastSeenUtc { get; set; }
@@ -45,7 +48,8 @@ public sealed class HlsViewers
 
     public sealed record Viewer(
         string Id, string Stream, string Client, string Player, string User,
-        DateTime StartedUtc, DateTime LastSeenUtc, long Bytes, int Requests, string State);
+        DateTime StartedUtc, DateTime LastSeenUtc, long Bytes, int Requests, string State,
+        string Protocol, string? File);
 
     private readonly ConcurrentDictionary<string, Entry> _entries = new(StringComparer.Ordinal);
 
@@ -53,9 +57,9 @@ public sealed class HlsViewers
     /// Raised the moment a new viewing begins — the first request of a
     /// client/stream/player combination. This is the only place that knows a
     /// session *started*, as opposed to that one exists: everything else here
-    /// is a running count. (stream, user)
+    /// is a running count.
     /// </summary>
-    public event Action<string, string>? ViewingStarted;
+    public event Action<Viewer>? ViewingStarted;
 
     /// <summary>
     /// Records a request against a viewing. <paramref name="bytes"/> is the
@@ -71,14 +75,30 @@ public sealed class HlsViewers
     /// that already exists alive, which matters for a paused-but-buffering
     /// player still polling for the next segment.
     /// </param>
-    public void Note(HttpListenerContext ctx, string stream, string? user, long bytes, bool create = true)
+    /// <param name="protocol">
+    /// How this viewing reaches the media — "hls" for the streaming path,
+    /// "dlna" for a television pulling the file whole. It separates the two
+    /// in the sessions table, and it keeps their ids from colliding.
+    /// </param>
+    /// <param name="file">
+    /// The file being watched, when the protocol serves one directly. HLS
+    /// infers it later from the stream directory; DLNA already knows it, and
+    /// without it the history entry would not be replayable.
+    /// </param>
+    /// <returns>
+    /// The viewing's id, for <see cref="Progress"/>. DLNA sends a whole film
+    /// as one HTTP response, so the bytes arrive over the life of the
+    /// response rather than at the end of it.
+    /// </returns>
+    public string Note(HttpListenerContext ctx, string stream, string? user, long bytes, bool create = true,
+                       string protocol = "hls", string? file = null)
     {
         var client = ctx.Request.RemoteEndPoint?.Address.ToString() ?? "unknown";
         var player = DescribePlayer(ctx.Request.UserAgent);
         // one viewing = one client watching one stream with one player; two
         // tabs on the same phone are indistinguishable at this level and
         // deliberately count as one
-        var id = Id(client, stream, player);
+        var id = Id(client, stream, player, protocol);
 
         var started = false;
         Entry? entry;
@@ -97,6 +117,8 @@ public sealed class HlsViewers
                     Stream = stream,
                     Client = client,
                     Player = player,
+                    Protocol = protocol,
+                    File = file,
                     StartedUtc = DateTime.UtcNow,
                     LastSeenUtc = DateTime.UtcNow,
                 };
@@ -106,7 +128,7 @@ public sealed class HlsViewers
         }
         else if (!_entries.TryGetValue(id, out entry))
         {
-            return;   // looking at a stream is not watching it
+            return id;   // looking at a stream is not watching it
         }
 
         entry.LastSeenUtc = DateTime.UtcNow;
@@ -118,11 +140,37 @@ public sealed class HlsViewers
         // that can run more than once under contention
         if (started)
         {
-            try { ViewingStarted?.Invoke(stream, user ?? ""); }
+            try { ViewingStarted?.Invoke(Describe(entry, DateTime.UtcNow)); }
             catch { /* a subscriber must never break the media path */ }
         }
 
         MaybePrune();
+        return id;
+    }
+
+    /// <summary>
+    /// Adds bytes to a viewing already under way, and keeps it alive.
+    ///
+    /// For HLS every segment is its own request, so <see cref="Note"/> counts
+    /// the traffic as it goes. DLNA is one response for the whole film: with
+    /// nothing reported until it ends, a television watching for two hours
+    /// would show as a session that has sent nothing, then vanish. This is
+    /// how the transfer reports itself while it is still running. It does not
+    /// count as another request — it is the same one, still going.
+    /// </summary>
+    /// <returns>
+    /// False when the viewing is no longer known, which happens if the
+    /// television paused for longer than the window and the sweep took it:
+    /// the response is still open, so the caller should start a fresh viewing
+    /// rather than let the rest of the film go uncounted.
+    /// </returns>
+    public bool Progress(string id, long bytes)
+    {
+        if (!_entries.TryGetValue(id, out var entry)) return false;
+        if (bytes <= 0) return true;
+        entry.LastSeenUtc = DateTime.UtcNow;
+        Interlocked.Add(ref entry.Bytes, bytes);
+        return true;
     }
 
     private long _lastPruneTicks = DateTime.UtcNow.Ticks;
@@ -152,16 +200,21 @@ public sealed class HlsViewers
             return _entries.Values
                 .Where(e => now - e.LastSeenUtc <= Window)
                 .OrderByDescending(e => e.LastSeenUtc)
-                .Select(e => new Viewer(
-                    Id(e.Client, e.Stream, e.Player),
-                    e.Stream, e.Client, e.Player,
-                    e.User.Length > 0 ? e.User : "share link",
-                    e.StartedUtc, e.LastSeenUtc,
-                    Interlocked.Read(ref e.Bytes), e.Requests,
-                    now - e.LastSeenUtc <= Fresh ? "playing" : "buffered"))
+                .Select(e => Describe(e, now))
                 .ToArray();
         }
     }
+
+    private static Viewer Describe(Entry e, DateTime now) => new(
+        Id(e.Client, e.Stream, e.Player, e.Protocol),
+        e.Stream, e.Client, e.Player,
+        // DLNA has no account to name — the protocol carries no credential
+        // at all — so saying "share link" there would be a fiction
+        e.User.Length > 0 ? e.User : e.Protocol == "dlna" ? "no sign-in (DLNA)" : "share link",
+        e.StartedUtc, e.LastSeenUtc,
+        Interlocked.Read(ref e.Bytes), e.Requests,
+        now - e.LastSeenUtc <= Fresh ? "playing" : "buffered",
+        e.Protocol, e.File);
 
     public int Count => Active.Count;
 
@@ -174,8 +227,8 @@ public sealed class HlsViewers
 
     // cast rather than Math.Abs: Math.Abs(int.MinValue) throws, and this
     // runs on every media request
-    private static string Id(string client, string stream, string player) =>
-        $"hls-{(uint)System.HashCode.Combine(client, stream, player):x8}";
+    private static string Id(string client, string stream, string player, string protocol) =>
+        $"{protocol}-{(uint)System.HashCode.Combine(client, stream, player, protocol):x8}";
 
     /// <summary>A short, readable name for whatever is playing — for the dashboard's client column.</summary>
     private static string DescribePlayer(string? userAgent)
@@ -193,10 +246,26 @@ public sealed class HlsViewers
         if (ua.Contains("Android", StringComparison.OrdinalIgnoreCase)) return "Android";
         if (ua.Contains("iPhone", StringComparison.OrdinalIgnoreCase)) return "iPhone";
         if (ua.Contains("iPad", StringComparison.OrdinalIgnoreCase)) return "iPad";
+        // televisions, which arrive over DLNA and name themselves in their
+        // own way rather than pretending to be a browser
+        if (ua.Contains("SEC_HHP", StringComparison.OrdinalIgnoreCase)
+            || ua.Contains("Samsung", StringComparison.OrdinalIgnoreCase)) return "Samsung TV";
+        if (ua.Contains("webOS", StringComparison.OrdinalIgnoreCase)
+            || ua.Contains("LG Browser", StringComparison.OrdinalIgnoreCase)) return "LG TV";
+        if (ua.Contains("BRAVIA", StringComparison.OrdinalIgnoreCase)
+            || ua.Contains("Sony", StringComparison.OrdinalIgnoreCase)) return "Sony TV";
+        if (ua.Contains("Roku", StringComparison.OrdinalIgnoreCase)) return "Roku";
+        if (ua.Contains("Xbox", StringComparison.OrdinalIgnoreCase)) return "Xbox";
+        if (ua.Contains("PLAYSTATION", StringComparison.OrdinalIgnoreCase)) return "PlayStation";
+        if (ua.Contains("Kodi", StringComparison.OrdinalIgnoreCase)
+            || ua.Contains("XBMC", StringComparison.OrdinalIgnoreCase)) return "Kodi";
         if (ua.Contains("Edg/", StringComparison.OrdinalIgnoreCase)) return "Edge";
         if (ua.Contains("Firefox", StringComparison.OrdinalIgnoreCase)) return "Firefox";
         if (ua.Contains("Chrome", StringComparison.OrdinalIgnoreCase)) return "Chrome";
         if (ua.Contains("Safari", StringComparison.OrdinalIgnoreCase)) return "Safari";
+        // a UPnP client that named nothing recognisable is still a TV-ish box
+        if (ua.Contains("DLNADOC", StringComparison.OrdinalIgnoreCase)
+            || ua.Contains("UPnP", StringComparison.OrdinalIgnoreCase)) return "DLNA device";
         return "player";
     }
 }

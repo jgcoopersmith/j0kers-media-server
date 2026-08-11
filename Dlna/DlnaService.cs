@@ -461,7 +461,13 @@ public sealed class DlnaService
     /// film sends ranges constantly, and one that gets the whole file back
     /// each time either stalls or refuses to seek at all.
     /// </summary>
-    public void ServeFile(HttpListenerContext ctx, string path)
+    /// <param name="onBytes">
+    /// Called with each chunk actually written, so the dashboard can show a
+    /// television as a live session. A DLNA transfer is one HTTP response for
+    /// the whole film — often hours long — so nothing reported until it
+    /// finishes would mean nothing reported at all while it matters.
+    /// </param>
+    public void ServeFile(HttpListenerContext ctx, string path, Action<long>? onBytes = null)
     {
         var res = ctx.Response;
         FileInfo info;
@@ -508,6 +514,11 @@ public sealed class DlnaService
         // HEAD is how a client checks size and seekability before playing
         if (ctx.Request.HttpMethod == "HEAD") { res.Close(); return; }
 
+        // reported in batches rather than per 64 KB chunk: at streaming rates
+        // that is dozens of calls a second, and the dashboard polls once a
+        // second — the extra precision would be thrown away. Declared out
+        // here so a transfer the TV cuts short still reports what did go out.
+        long pending = 0;
         try
         {
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 64 * 1024);
@@ -519,6 +530,12 @@ public sealed class DlnaService
                 if (read <= 0) break;
                 res.OutputStream.Write(buffer, 0, read);
                 count -= read;
+                pending += read;
+                if (onBytes is not null && pending >= 1024 * 1024)
+                {
+                    onBytes(pending);
+                    pending = 0;
+                }
             }
         }
         catch (HttpListenerException) { /* the TV stopped or seeked away */ }
@@ -526,6 +543,10 @@ public sealed class DlnaService
         catch (Exception ex) { Log.Debug("dlna", $"serving {Path.GetFileName(path)} failed: {ex.Message}"); }
         finally
         {
+            if (onBytes is not null && pending > 0)
+            {
+                try { onBytes(pending); } catch { }
+            }
             try { res.Close(); } catch { }
         }
     }
