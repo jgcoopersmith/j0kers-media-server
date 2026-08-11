@@ -125,6 +125,7 @@ public sealed class ServerConfig
         [JsonPropertyName("linkLifetimeHours")] public int? LinkLifetimeHours { get; set; }
         [JsonPropertyName("discoveryEnabled")] public bool? DiscoveryEnabled { get; set; }
         [JsonPropertyName("dlnaEnabled")] public bool? DlnaEnabled { get; set; }
+        [JsonPropertyName("httpsEnabled")] public bool? HttpsEnabled { get; set; }
         [JsonPropertyName("logLevel")] public string? LogLevel { get; set; }
         [JsonPropertyName("logToFile")] public bool? LogToFile { get; set; }
         [JsonPropertyName("logDirectory")] public string? LogDirectory { get; set; }
@@ -168,6 +169,7 @@ public sealed class ServerConfig
         if (s.LinkLifetimeHours is not null) _persistedSettings.LinkLifetimeHours = s.LinkLifetimeHours;
         if (s.DiscoveryEnabled is not null) _persistedSettings.DiscoveryEnabled = s.DiscoveryEnabled;
         if (s.DlnaEnabled is not null) _persistedSettings.DlnaEnabled = s.DlnaEnabled;
+        if (s.HttpsEnabled is not null) _persistedSettings.HttpsEnabled = s.HttpsEnabled;
         if (s.LogLevel is not null) _persistedSettings.LogLevel = s.LogLevel;
         if (s.LogToFile is not null) _persistedSettings.LogToFile = s.LogToFile;
         if (s.LogDirectory is not null) _persistedSettings.LogDirectory = s.LogDirectory;
@@ -195,6 +197,9 @@ public sealed class ServerConfig
         if (s.LinkLifetimeHours is int hours) Hls.LinkLifetimeHours = hours;
         if (s.DiscoveryEnabled is bool announce) Discovery.Enabled = announce;
         if (s.DlnaEnabled is bool dlna) Discovery.Dlna = dlna;
+        // takes effect at the next start: the listeners are already bound, and
+        // the certificate binding needs the elevation prompt startup does
+        if (s.HttpsEnabled is bool tls) Https.Enabled = tls;
         if (!string.IsNullOrWhiteSpace(s.LogLevel)) Logging.Level = s.LogLevel;
         if (s.LogToFile is bool toFile) Logging.ToFile = toFile;
         if (!string.IsNullOrWhiteSpace(s.LogDirectory)) Logging.Directory = s.LogDirectory;

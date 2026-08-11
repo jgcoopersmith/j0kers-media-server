@@ -803,6 +803,11 @@ public sealed partial class ControlApi : IDisposable
                     discoveryEnabled = _serverConfig.Discovery.Enabled,
                     discoveryHostName = Discovery?.HostName ?? _serverConfig.Discovery.HostName,
                     dlnaEnabled = _serverConfig.Discovery.Dlna,
+                    // what is configured, and what is actually being served
+                    // right now — they differ between saving and restarting
+                    httpsEnabled = _serverConfig.Https.Enabled,
+                    httpsActive = Services.UrlScheme.Https,
+                    httpsOwnCertificate = string.IsNullOrWhiteSpace(_serverConfig.Https.Certificate),
                     // DLNA serves the library folders and nothing else, so an
                     // empty library is worth saying before the switch is
                     // thrown rather than after a TV shows an empty list
@@ -1418,6 +1423,10 @@ public sealed partial class ControlApi : IDisposable
         }
 
         var controlPortChanged = s.ControlPort is int ncp && ncp != _serverConfig.Control.Port;
+        // TLS is a restart: the listeners are bound already, and binding the
+        // certificate to the ports needs the elevation prompt that startup
+        // asks for. Saving it here only records the decision.
+        var httpsChanged = s.HttpsEnabled is bool wantTls && wantTls != _serverConfig.Https.Enabled;
 
         // background/tray mode toggles live — no restart needed
         bool? trayNow = null;
@@ -1510,11 +1519,18 @@ public sealed partial class ControlApi : IDisposable
         }
 
         Log.Info("control", $"settings saved: bind={_serverConfig.Rtsp.BindAddress} rtsp={_serverConfig.Rtsp.Port} hls={_serverConfig.Hls.Port} control={_serverConfig.Control.Port} tray={_serverConfig.MinimizeToTray}");
+        if (httpsChanged)
+            Log.Info("tls", _serverConfig.Https.Enabled
+                ? "HTTPS switched on — takes effect when the server restarts"
+                : "HTTPS switched off — takes effect when the server restarts");
+
         WriteJson(res, 200, new
         {
             saved = true,
             servicesRestarted = needsRestart,
             controlPortChanged,
+            httpsChanged,
+            httpsEnabled = _serverConfig.Https.Enabled,
             minimizeToTray = trayNow,
             note = controlPortChanged ? "control port applies after the server process restarts" : null,
         });

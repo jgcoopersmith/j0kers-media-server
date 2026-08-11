@@ -957,6 +957,13 @@
     </label>
     <div id="cfg-announce-note" style="color:var(--muted);font-size:11.5px;margin-top:3px"></div>
 
+    <label style="margin-top:12px">HTTPS</label>
+    <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;color:var(--ink);font-size:13px;cursor:pointer;margin:0">
+      <input id="cfg-https" type="checkbox" style="width:16px;height:16px" onchange="renderHttpsNote()">
+      <span>Serve the dashboard and media over TLS</span>
+    </label>
+    <div id="cfg-https-note" style="color:var(--muted);font-size:11.5px;margin-top:3px"></div>
+
     <label style="margin-top:12px">DLNA (TVs and players with no browser)</label>
     <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;color:var(--ink);font-size:13px;cursor:pointer;margin:0">
       <input id="cfg-dlna" type="checkbox" style="width:16px;height:16px" onchange="renderDlnaNote()">
@@ -2776,6 +2783,11 @@ async function openConfig() {
         + "in Windows' Network folder. Announcing says only that the server exists — signing in is still required."
       : "Applies immediately. Announcing says only that the server exists — signing in is still required.";
 
+    $("cfg-https").checked = !!s.httpsEnabled;
+    httpsActive = !!s.httpsActive;
+    httpsOwnCert = s.httpsOwnCertificate !== false;
+    renderHttpsNote();
+
     $("cfg-dlna").checked = !!s.dlnaEnabled;
     cfgDlnaFolders = s.dlnaFolders || 0;
     try {
@@ -2834,6 +2846,33 @@ function renderCfgInterfaces() {
       + '</div>';
   }
   box.innerHTML = h;
+}
+
+/* HTTPS is the one switch that cannot apply itself: the listeners are bound
+   already, and binding the certificate to the ports needs the elevation
+   prompt that only startup asks for. So the note is mostly about what
+   happens next, and what the switch will cost. */
+let httpsActive = false, httpsOwnCert = true;
+
+function renderHttpsNote() {
+  const want = $("cfg-https").checked;
+  const note = $("cfg-https-note");
+  if (want === httpsActive) {
+    note.innerHTML = want
+      ? "On. The dashboard and the media port are served over TLS."
+      : "Off. The dashboard and the media port are served over plain HTTP — fine on a "
+        + "trusted network, readable by anything on the wire beyond one.";
+    return;
+  }
+  note.innerHTML = want
+    ? "<b>Takes effect when the server restarts</b>, and Windows will ask for administrator "
+      + "once to bind the certificate to the ports."
+      + (httpsOwnCert ? " The server will use a certificate it made itself, so browsers warn "
+                      + "until you trust it." : "")
+      + " Everyone signs in again — <code>https://…</code> is a different origin from "
+      + "<code>http://…</code> — and DLNA clients, which mostly cannot do TLS, will stop seeing it."
+    : "<b>Takes effect when the server restarts.</b> Everyone signs in again, and links "
+      + "you have saved with <code>https://</code> will need changing back.";
 }
 
 /* DLNA is the one switch here that gives something away, so the note says
@@ -3010,6 +3049,7 @@ async function saveConfig() {
     minimizeToTray: $("cfg-tray").checked,
     discoveryEnabled: $("cfg-announce").checked,
     dlnaEnabled: $("cfg-dlna").checked,
+    httpsEnabled: $("cfg-https").checked,
     logLevel: $("cfg-loglevel").value,
     logToFile: $("cfg-logfile").checked,
     logDirectory: $("cfg-logdir").value.trim() || "logs",
@@ -3040,6 +3080,14 @@ async function saveConfig() {
     closeConfig();
     if (data.controlPortChanged)
       alert("Saved. RTSP/HLS are already on the new settings; the control port (this dashboard) moves to :" + body.controlPort + " the next time you restart the server.");
+    // saying it once, plainly: this is the setting that does nothing until
+    // the server is restarted, and it changes the address you come back to
+    if (data.httpsChanged)
+      alert(data.httpsEnabled
+        ? "Saved. HTTPS starts with the next restart of the server — accept the administrator "
+          + "prompt when it does, then come back on https:// instead of http://. Everyone signs "
+          + "in again, and DLNA clients will most likely stop seeing the server."
+        : "Saved. HTTPS stops with the next restart of the server — come back on http:// then.");
     mountsLoaded = 0; channelsLoaded = 0;
     // a new lifetime only reaches URLs via a freshly minted token
     if (body.linkLifetimeHours !== undefined) await refreshMediaToken();
