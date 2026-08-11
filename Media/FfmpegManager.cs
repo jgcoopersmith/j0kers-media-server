@@ -868,6 +868,37 @@ public sealed class FfmpegManager : IDisposable
         "-protocol_whitelist", "crypto,data,http,https,tcp,tls,udp,rtp,rtsp,srt,rtmp,rtmps,pipe",
     };
 
+    /// <summary>
+    /// Corrects the scheme of a channel that points back at this server.
+    ///
+    /// Pinning a free-TV channel stores an absolute URL through our own
+    /// proxy — <c>http://127.0.0.1:9090/api/tv/watch?…</c> — captured at the
+    /// moment it was pinned. Turning TLS on later changes what that port
+    /// speaks, and the saved URL becomes unplayable: ffmpeg connects and
+    /// gets a TLS handshake where it expected HTTP. Rewriting at use rather
+    /// than at save means switching TLS on or off keeps every pinned channel
+    /// working, with nothing to re-pin.
+    ///
+    /// Only loopback URLs into our own API are touched. Anything else — a
+    /// tuner, a camera, someone's IPTV feed — is left exactly as given.
+    /// </summary>
+    private static string OwnSchemeFor(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var u)) return url;
+        if (u.Scheme is not ("http" or "https")) return url;
+        var loopback = u.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+                       || (System.Net.IPAddress.TryParse(u.Host, out var ip)
+                           && System.Net.IPAddress.IsLoopback(ip));
+        if (!loopback) return url;
+        if (!u.AbsolutePath.StartsWith("/api/", StringComparison.OrdinalIgnoreCase)) return url;
+
+        var want = Services.UrlScheme.Name;
+        if (u.Scheme.Equals(want, StringComparison.OrdinalIgnoreCase)) return url;
+        var fixedUp = new UriBuilder(u) { Scheme = want }.Uri.ToString();
+        Log.Debug("ffmpeg", $"channel points at this server — using {want} for it");
+        return fixedUp;
+    }
+
     private void StartLiveJob(string name, string url)
     {
         var stream = ChannelStream(name);
@@ -878,7 +909,7 @@ public sealed class FfmpegManager : IDisposable
         if (url.StartsWith("rtsp://", StringComparison.OrdinalIgnoreCase))
             args.AddRange(new[] { "-rtsp_transport", "tcp" });
         args.AddRange(RemoteProtocolWhitelist);
-        args.AddRange(new[] { "-i", url });
+        args.AddRange(new[] { "-i", OwnSchemeFor(url) });
 
         var remuxAll = _config.LiveVideoMode.Equals("copy", StringComparison.OrdinalIgnoreCase);
         if (remuxAll)
@@ -1006,20 +1037,34 @@ public sealed class FfmpegManager : IDisposable
             var defs = JsonSidecar.Load<List<ChannelDef>>(_channelsFile, "ffmpeg");
             if (defs is null) return;
             _channels.AddRange(defs);
-            if (!Available) return;
-            // only the ones that were actually running: a pinned-but-idle
-            // channel must not wake up a transcode just because we rebooted
-            foreach (var c in defs.Where(c => c.Started))
-            {
-                Log.Info("ffmpeg", $"restoring channel: {c.Name}");
-                StartLiveJob(c.Name, c.Url);
-            }
             var idle = defs.Count(c => !c.Started);
             if (idle > 0) Log.Info("ffmpeg", $"{idle} saved channel(s) idle — start them from the dashboard");
         }
         catch (Exception ex)
         {
             Log.Warn("ffmpeg", $"could not load channels.json: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Restarts the channels that were running when the server last stopped.
+    ///
+    /// Called once the listeners are up, not while loading: a pinned free-TV
+    /// channel pulls through this server's own proxy, so starting it before
+    /// the control API answers means ffmpeg connecting to a port with
+    /// nothing behind it. That was survivable while startup took
+    /// milliseconds, and stopped being survivable when the TLS setup put
+    /// several seconds — and an elevation prompt — in between.
+    /// </summary>
+    public void RestoreRunningChannels()
+    {
+        if (!Available) return;
+        List<ChannelDef> running;
+        lock (_lock) running = _channels.Where(c => c.Started).ToList();
+        foreach (var c in running)
+        {
+            Log.Info("ffmpeg", $"restoring channel: {c.Name}");
+            lock (_lock) StartLiveJob(c.Name, c.Url);
         }
     }
 

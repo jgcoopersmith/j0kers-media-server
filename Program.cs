@@ -329,6 +329,11 @@ try
         services.OnHlsActivity = control.NoteActivity; // streaming keeps the server up
         control.Start();
 
+        // Now that this server answers, the channels that were running when
+        // it stopped can be restarted — a pinned free-TV channel pulls
+        // through our own proxy, so it needs the control API to exist.
+        ffmpeg.RestoreRunningChannels();
+
         // Announce on the network. Started after the control API is listening,
         // since everything advertised points at it — a client that found us
         // first and knocked immediately would otherwise get nothing.
