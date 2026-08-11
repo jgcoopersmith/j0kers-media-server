@@ -135,6 +135,14 @@
     "ssdp": true,                     // Windows' Network folder, smart TVs
     "udpProbe": true,                 // one-packet JSON answer, for scripts
     "udpProbePort": 7359,             // the port Jellyfin uses, so its clients find this too
-    "dlna": false                     // serve the library to TVs — no sign-in; see the note above
+    "dlna": false,                    // serve the library to TVs — no sign-in; see the note above
+
+    // Which port DLNA answers on. 0 = decide automatically: the control port
+    // while the server is plain HTTP, and the control port + 1 once HTTPS is
+    // on. That second port is served in the clear on purpose — televisions
+    // cannot do TLS, and DLNA has no sign-in for TLS to protect. Only
+    // /dlna/* and the UPnP description are served there; the dashboard, the
+    // API and the signed media links stay on the encrypted port.
+    "dlnaPort": 0
   }
 }

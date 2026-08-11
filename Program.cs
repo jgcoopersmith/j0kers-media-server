@@ -338,7 +338,8 @@ try
         // since everything advertised points at it — a client that found us
         // first and knocked immediately would otherwise get nothing.
         discovery = new J0kersMediaServer.Discovery.DiscoveryService(
-            config.Discovery, config.ServerName, config.Control.Port, baseDirectory);
+            config.Discovery, config.ServerName, config.Control.Port, baseDirectory,
+            J0kersMediaServer.Services.DlnaEndpoint.PortFor(config));
         discovery.Start();
         control.Discovery = discovery;
 

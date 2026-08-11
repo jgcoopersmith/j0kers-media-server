@@ -117,6 +117,17 @@ public static class WindowsUrlAcl
         commands.AddRange(aclPorts.Select(p =>
             $"netsh http add urlacl url={UrlScheme.Prefix}+:{p}/ sddl=D:(A;;GX;;;WD)"));
 
+        // --- the DLNA port, which stays in the clear even under TLS ---
+        // Its own reservation, spelled http:// regardless of the scheme
+        // everything else moved to: televisions cannot do a TLS handshake, so
+        // encrypting the one service they use would remove it.
+        var dlnaPort = DlnaEndpoint.PortFor(config);
+        var separateDlna = config.Discovery.Dlna
+                        && DlnaEndpoint.IsSeparate(config)
+                        && config.Control.BindAddress == "0.0.0.0";
+        if (separateDlna && NeedsAcl(dlnaPort, "http"))
+            commands.Add($"netsh http add urlacl url=http://+:{dlnaPort}/ sddl=D:(A;;GX;;;WD)");
+
         // --- port-based firewall rules when anything binds wide ---
         var anyWide = (config.Rtsp.Enabled && config.Rtsp.BindAddress == "0.0.0.0")
                    || (config.Hls.Enabled && config.Hls.BindAddress == "0.0.0.0")
@@ -127,6 +138,7 @@ public static class WindowsUrlAcl
             if (config.Rtsp.Enabled) tcpPorts.Add(config.Rtsp.Port);
             if (config.Hls.Enabled) tcpPorts.Add(config.Hls.Port);
             if (config.Control.Enabled) tcpPorts.Add(config.Control.Port);
+            if (separateDlna) tcpPorts.Add(dlnaPort);
             var tcpList = string.Join(",", tcpPorts.Distinct());
             var udpRange = $"{config.Rtp.PortRangeMin}-{config.Rtp.PortRangeMax}";
 
@@ -309,12 +321,14 @@ public static class WindowsUrlAcl
         }
     }
 
-    private static bool NeedsAcl(int port)
+    private static bool NeedsAcl(int port) => NeedsAcl(port, UrlScheme.Name);
+
+    private static bool NeedsAcl(int port, string scheme)
     {
         try
         {
             using var probe = new HttpListener();
-            probe.Prefixes.Add($"{UrlScheme.Prefix}+:{port}/");
+            probe.Prefixes.Add($"{scheme}://+:{port}/");
             probe.Start();
             probe.Stop();
             return false;

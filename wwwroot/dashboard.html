@@ -2793,7 +2793,9 @@ async function openConfig() {
     try {
       const d = await api("/api/dlna");
       cfgDlnaShare = d.folders || [];
-    } catch { cfgDlnaShare = []; }
+      cfgDlnaPort = d.port || 0;
+      cfgDlnaPlain = !!d.plainPort;
+    } catch { cfgDlnaShare = []; cfgDlnaPort = 0; cfgDlnaPlain = false; }
     renderDlnaNote();
 
     $("cfg-loglevel").value = (s.logLevel || "info").toLowerCase();
@@ -2919,7 +2921,8 @@ function renderHttpsNote() {
       + (httpsOwnCert ? " The server will use a certificate it made itself, so browsers warn "
                       + "until you trust it." : "")
       + " Everyone signs in again — <code>https://…</code> is a different origin from "
-      + "<code>http://…</code> — and DLNA clients, which mostly cannot do TLS, will stop seeing it."
+      + "<code>http://…</code>. DLNA keeps working: it moves to a plain-HTTP port of its own, "
+      + "since TVs cannot do TLS and DLNA has no sign-in to protect anyway."
     : "<b>Takes effect when the server restarts.</b> Everyone signs in again, and links "
       + "you have saved with <code>https://</code> will need changing back.";
 }
@@ -2927,7 +2930,7 @@ function renderHttpsNote() {
 /* DLNA is the one switch here that gives something away, so the note says
    so plainly rather than describing a feature — and names the folders that
    would actually go out, since that is the decision being made. */
-let cfgDlnaFolders = 0, cfgDlnaShare = [];
+let cfgDlnaFolders = 0, cfgDlnaShare = [], cfgDlnaPort = 0, cfgDlnaPlain = false;
 
 function renderDlnaNote() {
   const on = $("cfg-dlna").checked;
@@ -2937,6 +2940,10 @@ function renderDlnaNote() {
   $("cfg-dlna-note").innerHTML = on
     ? "Applies immediately. <b>DLNA has no sign-in</b> — every device on this network can browse and play "
       + "whatever is ticked below, with no account. Requests from outside the local network are refused."
+      + (cfgDlnaPlain
+          ? " While the server is on HTTPS this runs on plain HTTP at port <b>" + cfgDlnaPort
+            + "</b>, because televisions cannot do TLS. Nothing else is served there."
+          : "")
     : "Lets a TV browse the library from its own <i>Media Server</i> input, for devices with no browser "
       + "and no VLC. Files are served whole, so what plays is whatever the device can decode itself.";
 

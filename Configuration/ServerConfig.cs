@@ -610,4 +610,18 @@ public sealed class DiscoveryConfig
     /// address, which is the only boundary the protocol allows.
     /// </summary>
     [JsonPropertyName("dlna")] public bool Dlna { get; set; }
+
+    /// <summary>
+    /// A port of its own for DLNA, in the clear.
+    ///
+    /// TVs and set-top boxes overwhelmingly cannot do TLS, so switching the
+    /// server to HTTPS would otherwise take DLNA away with it. Since DLNA
+    /// has no authentication in the first place — that is the protocol, not
+    /// a choice made here — serving it over plain HTTP alongside a TLS
+    /// dashboard gives up nothing that DLNA had.
+    ///
+    /// 0 means "decide for me": the control port while the server is plain
+    /// HTTP (no extra port at all), and the control port + 1 once TLS is on.
+    /// </summary>
+    [JsonPropertyName("dlnaPort")] public int DlnaPort { get; set; }
 }

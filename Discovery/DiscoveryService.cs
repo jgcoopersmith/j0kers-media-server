@@ -39,11 +39,25 @@ public sealed class DiscoveryService : IDisposable
 
     public string HostName => string.IsNullOrWhiteSpace(_config.HostName) ? "j0kers" : _config.HostName.Trim();
 
-    public DiscoveryService(DiscoveryConfig config, string serverName, int port, string baseDirectory)
+    /// <summary>
+    /// Where the UPnP description document lives. Normally the control port,
+    /// on whatever scheme the server is using — but when DLNA has been given
+    /// a plain-HTTP port of its own (because TVs cannot do TLS), the document
+    /// has to be fetchable there instead: it is what names the DLNA service
+    /// URLs, and a client that cannot fetch it never browses anything.
+    /// </summary>
+    private int DescriptionPort => _config.Dlna && _dlnaPort > 0 ? _dlnaPort : _port;
+    private string DescriptionScheme => _config.Dlna && _dlnaPort > 0 ? "http" : Services.UrlScheme.Name;
+
+    private readonly int _dlnaPort;
+
+    public DiscoveryService(DiscoveryConfig config, string serverName, int port, string baseDirectory, int dlnaPort = 0)
     {
         _config = config;
         _serverName = string.IsNullOrWhiteSpace(serverName) ? "j0kers Media Server" : serverName;
         _port = port;
+        // 0 or the control port itself both mean "no separate DLNA listener"
+        _dlnaPort = dlnaPort == port ? 0 : dlnaPort;
         _baseDirectory = baseDirectory;
         Uuid = LoadOrCreateUuid();
     }
@@ -108,7 +122,7 @@ public sealed class DiscoveryService : IDisposable
         }
         if (_config.Ssdp)
         {
-            _ssdp = new SsdpResponder(_serverName, Uuid, _port, _config.Dlna);
+            _ssdp = new SsdpResponder(_serverName, Uuid, DescriptionPort, _config.Dlna, DescriptionScheme);
             _ssdp.Start();
         }
         if (_config.UdpProbe)
@@ -126,12 +140,20 @@ public sealed class DiscoveryService : IDisposable
     /// A device that answers a search but serves no description is dropped
     /// again, so this is not optional.
     /// </summary>
-    public string DescriptionXml(string host) =>
+    public string DescriptionXml(string host) => DescriptionXml(host, DescriptionPort, DescriptionScheme);
+
+    /// <summary>
+    /// The same document, told explicitly which port and scheme it was
+    /// fetched over. The plain-HTTP DLNA listener serves it for itself, so
+    /// the service URLs inside resolve back to that listener rather than to
+    /// the TLS port a television cannot reach.
+    /// </summary>
+    public string DescriptionXml(string host, int port, string scheme) =>
         $"""
         <?xml version="1.0" encoding="utf-8"?>
         <root xmlns="urn:schemas-upnp-org:device-1-0"{(_config.Dlna ? " xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\"" : "")}>
           <specVersion><major>1</major><minor>0</minor></specVersion>
-          <URLBase>{Services.UrlScheme.Prefix}{host}:{_port}/</URLBase>
+          <URLBase>{scheme}://{host}:{port}/</URLBase>
           <device>
             <deviceType>urn:schemas-upnp-org:device:{(_config.Dlna ? "MediaServer:1" : "Basic:1")}</deviceType>
             <friendlyName>{Escape(_serverName)}</friendlyName>

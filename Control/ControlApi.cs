@@ -97,6 +97,11 @@ public sealed partial class ControlApi : IDisposable
     public bool SetDlna(bool on)
     {
         _dlna = on ? (_dlna ?? NewDlna()) : null;
+        // Under TLS, DLNA lives on a plain-HTTP port of its own, which only
+        // exists while DLNA does. Switching it on in the dashboard has to
+        // open that port too, or the switch would do nothing until a restart.
+        if (_dlna is not null) StartDlnaListener();
+        else StopDlnaListener();
         return _dlna is not null;
     }
 
@@ -211,6 +216,112 @@ public sealed partial class ControlApi : IDisposable
         BoundHost = bound;
         Log.Info("control", $"listening on {Services.UrlScheme.Prefix}{bound}:{_config.Port}/api/");
         _ = AcceptLoopAsync();
+        StartDlnaListener();
+    }
+
+    /// <summary>
+    /// The port DLNA is actually served on: its own when the dashboard has
+    /// moved to TLS, otherwise the control port like everything else.
+    /// </summary>
+    public int DlnaPort => Services.DlnaEndpoint.PortFor(_serverConfig);
+
+    private HttpListener? _dlnaListener;
+
+    /// <summary>
+    /// A second listener, in the clear, carrying nothing but DLNA.
+    ///
+    /// Only when the control port has gone to TLS: a TV cannot speak it, and
+    /// DLNA has no credentials to protect anyway. Everything else — the
+    /// dashboard, the API, the media — stays on the encrypted port. This one
+    /// answers /dlna/* and the UPnP description that points at them, refuses
+    /// anything else outright, and is still restricted to private addresses.
+    /// </summary>
+    private void StartDlnaListener()
+    {
+        if (_dlna is null || DlnaPort == _config.Port || _dlnaListener is not null) return;
+        try
+        {
+            var (listener, bound) = Hls.HttpListenerBinder.StartPlain(_config.BindAddress, DlnaPort, "dlna");
+            _dlnaListener = listener;
+            Log.Info("dlna", $"serving DLNA in the clear on http://{bound}:{DlnaPort}/ — " +
+                             "TVs cannot do TLS, and DLNA has no sign-in to protect");
+            _ = DlnaAcceptLoopAsync(listener);
+        }
+        catch (Exception ex)
+        {
+            Log.Error("dlna", $"could not open the DLNA port {DlnaPort}: {ex.Message}");
+        }
+    }
+
+    private void StopDlnaListener()
+    {
+        var listener = Interlocked.Exchange(ref _dlnaListener, null);
+        if (listener is null) return;
+        try { listener.Close(); } catch { }
+        Log.Info("dlna", $"closed the plain-HTTP DLNA port {DlnaPort}");
+    }
+
+    /// <summary>
+    /// Takes its listener as an argument rather than reading the field: the
+    /// field is cleared when DLNA is switched off, and a loop still awaiting
+    /// the old listener must end rather than spin on a disposed object.
+    /// </summary>
+    private async Task DlnaAcceptLoopAsync(HttpListener listener)
+    {
+        while (!_cts.IsCancellationRequested && listener.IsListening)
+        {
+            HttpListenerContext ctx;
+            try { ctx = await listener.GetContextAsync(); }
+            catch (Exception) when (_cts.IsCancellationRequested || !listener.IsListening) { break; }
+            catch (Exception ex) { Log.Warn("dlna", $"accept failed: {ex.Message}"); continue; }
+            _ = Task.Run(() => HandleDlnaOnly(ctx));
+        }
+    }
+
+    /// <summary>
+    /// This port's entire vocabulary: the description document a client
+    /// fetches after discovery, and the DLNA services it names. Anything
+    /// else here is a 404 — the dashboard, the API and the media are on the
+    /// TLS port and are not reachable through this door.
+    /// </summary>
+    private void HandleDlnaOnly(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        try
+        {
+            var path = ctx.Request.Url?.AbsolutePath ?? "/";
+            var dlna = _dlna;
+            if (dlna is null) { res.StatusCode = 404; res.Close(); return; }
+
+            if (!Dlna.DlnaService.IsLocalClient(ctx.Request.RemoteEndPoint?.Address))
+            {
+                Log.Warn("dlna", $"refused a non-local request from {ctx.Request.RemoteEndPoint?.Address}");
+                res.StatusCode = 403;
+                res.Close();
+                return;
+            }
+
+            if (ctx.Request.HttpMethod == "GET" && path == "/description.xml" && Discovery is not null)
+            {
+                var host = ctx.Request.Headers["Host"] ?? $"{BoundHost}:{DlnaPort}";
+                WriteXml(res, 200, Discovery.DescriptionXml(host.Split(':')[0], DlnaPort, "http"));
+                return;
+            }
+
+            if (path.StartsWith("/dlna/", StringComparison.OrdinalIgnoreCase))
+            {
+                ServeDlna(ctx, path, ctx.Request.HttpMethod, dlna);
+                return;
+            }
+
+            res.StatusCode = 404;
+            res.Close();
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("dlna", $"request failed: {ex.Message}");
+            try { res.StatusCode = 500; res.Close(); } catch { }
+        }
     }
 
     private async Task AcceptLoopAsync()
@@ -973,6 +1084,10 @@ public sealed partial class ControlApi : IDisposable
                 WriteJson(res, 200, new
                 {
                     enabled = _serverConfig.Discovery.Dlna,
+                    port = DlnaPort,
+                    // true when DLNA sits on a plain-HTTP port of its own
+                    // because the rest of the server moved to TLS
+                    plainPort = Services.DlnaEndpoint.IsSeparate(_serverConfig),
                     sharingAll = _dlnaShare.SharingAll(roots),
                     folders = roots.Select(f => new
                     {
@@ -2259,8 +2374,14 @@ public sealed partial class ControlApi : IDisposable
                 if (method != "POST") { res.StatusCode = 405; res.Close(); return; }
                 var action = ctx.Request.Headers["SOAPACTION"] ?? "";
                 var body = ReadBody(ctx);
-                var host = ctx.Request.Headers["Host"] ?? $"{BoundHost}:{_config.Port}";
-                var (status, xml) = dlna.HandleSoap(action, body, $"{Services.UrlScheme.Prefix}{host}");
+                // From the request, not from UrlScheme: this same handler
+                // answers on the encrypted control port and on the plain
+                // DLNA port, and the media URLs it hands back have to point
+                // at whichever one the client actually reached us on.
+                var host = ctx.Request.Headers["Host"]
+                           ?? $"{BoundHost}:{ctx.Request.LocalEndPoint?.Port ?? _config.Port}";
+                var scheme = ctx.Request.Url?.Scheme ?? Services.UrlScheme.Name;
+                var (status, xml) = dlna.HandleSoap(action, body, $"{scheme}://{host}");
                 WriteXml(res, status, xml);
                 return;
             }
@@ -3030,6 +3151,7 @@ public sealed partial class ControlApi : IDisposable
     {
         _cts.Cancel();
         try { _listener?.Stop(); } catch { }
+        try { StopDlnaListener(); } catch { }
         try { _providers.Dispose(); } catch { }
         try { _providerHttp.Dispose(); } catch { }
     }

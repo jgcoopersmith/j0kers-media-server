@@ -23,23 +23,33 @@ public static class HttpListenerBinder
     private static readonly string[] LoopbackNames = { "localhost", "127.0.0.1" };
 
     /// <returns>A started listener and the host actually bound.</returns>
-    public static (HttpListener listener, string boundHost) Start(string bindAddress, int port, string area)
+    public static (HttpListener listener, string boundHost) Start(string bindAddress, int port, string area) =>
+        Start(bindAddress, port, area, Services.UrlScheme.Name);
+
+    /// <summary>
+    /// Binds in the clear regardless of whether the rest of the server has
+    /// moved to TLS — for the DLNA port, whose clients are televisions that
+    /// cannot do a handshake.
+    /// </summary>
+    public static (HttpListener listener, string boundHost) StartPlain(string bindAddress, int port, string area) =>
+        Start(bindAddress, port, area, "http");
+
+    private static (HttpListener listener, string boundHost) Start(string bindAddress, int port, string area, string scheme)
     {
         if (bindAddress is "127.0.0.1" or "localhost" or "::1")
-            return (StartLoopback(port), "localhost");
+            return (StartLoopback(port, scheme), "localhost");
 
         var listener = new HttpListener();
         if (bindAddress == "0.0.0.0")
         {
             // '+' is http.sys syntax; the managed listener on Unix wants '*'
-            var scheme = Services.UrlScheme.Name;
             listener.Prefixes.Add(OperatingSystem.IsWindows()
                 ? $"{scheme}://+:{port}/"
                 : $"{scheme}://*:{port}/");
         }
         else
         {
-            listener.Prefixes.Add($"{Services.UrlScheme.Name}://{bindAddress}:{port}/");
+            listener.Prefixes.Add($"{scheme}://{bindAddress}:{port}/");
         }
 
         try
@@ -50,18 +60,18 @@ public static class HttpListenerBinder
         catch (HttpListenerException ex) when (OperatingSystem.IsWindows() && ex.ErrorCode == 5) // ERROR_ACCESS_DENIED
         {
             Log.Warn(area,
-                $"binding {Services.UrlScheme.Prefix}{bindAddress}:{port}/ denied (URL ACL); falling back to localhost. " +
-                $"To listen on all interfaces run elevated once: netsh http add urlacl url={Services.UrlScheme.Prefix}+:{port}/ user=Everyone");
-            return (StartLoopback(port), "localhost");
+                $"binding {scheme}://{bindAddress}:{port}/ denied (URL ACL); falling back to localhost. " +
+                $"To listen on all interfaces run elevated once: netsh http add urlacl url={scheme}://+:{port}/ user=Everyone");
+            return (StartLoopback(port, scheme), "localhost");
         }
     }
 
-    private static HttpListener StartLoopback(int port)
+    private static HttpListener StartLoopback(int port, string scheme)
     {
         // A failed Start() disposes the listener, so always build fresh here.
         var listener = new HttpListener();
         foreach (var name in LoopbackNames)
-            listener.Prefixes.Add($"{Services.UrlScheme.Name}://{name}:{port}/");
+            listener.Prefixes.Add($"{scheme}://{name}:{port}/");
         try
         {
             listener.Start();
@@ -77,7 +87,7 @@ public static class HttpListenerBinder
                 $"loopback bind on port {port} denied because an all-interfaces URL ACL exists; " +
                 "listening on the wildcard with loopback-only enforcement in the app");
             var wide = new HttpListener();
-            wide.Prefixes.Add($"{Services.UrlScheme.Name}://+:{port}/");
+            wide.Prefixes.Add($"{scheme}://+:{port}/");
             wide.Start();
             return wide;
         }

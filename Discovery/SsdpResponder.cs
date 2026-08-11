@@ -56,11 +56,19 @@ public sealed class SsdpResponder : IDisposable
 
     private readonly bool _mediaServer;
 
-    public SsdpResponder(string serverName, string uuid, int port, bool mediaServer = false)
+    /// <summary>
+    /// The scheme LOCATION is announced with. Not always the server's own:
+    /// when DLNA has been moved to a plain-HTTP port so televisions can
+    /// reach it, this is where the description document actually lives.
+    /// </summary>
+    private readonly string _scheme;
+
+    public SsdpResponder(string serverName, string uuid, int port, bool mediaServer = false, string? scheme = null)
     {
         _serverName = serverName;
         _uuid = uuid;
         _port = port;
+        _scheme = scheme ?? Services.UrlScheme.Name;
         _mediaServer = mediaServer;
         _deviceType = mediaServer ? MediaServerDevice : BasicDevice;
     }
@@ -199,7 +207,7 @@ public sealed class SsdpResponder : IDisposable
         // service by name, never for ssdp:all
         || (_mediaServer && st is ContentDirectory or ConnectionManager);
 
-    private string Location(IPAddress local) => $"{Services.UrlScheme.Prefix}{local}:{_port}/description.xml";
+    private string Location(IPAddress local) => $"{_scheme}://{local}:{_port}/description.xml";
 
     private string SearchResponse(IPAddress local, string st) =>
         "HTTP/1.1 200 OK\r\n" +
