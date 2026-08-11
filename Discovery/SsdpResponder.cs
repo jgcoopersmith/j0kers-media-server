@@ -199,7 +199,7 @@ public sealed class SsdpResponder : IDisposable
         // service by name, never for ssdp:all
         || (_mediaServer && st is ContentDirectory or ConnectionManager);
 
-    private string Location(IPAddress local) => $"http://{local}:{_port}/description.xml";
+    private string Location(IPAddress local) => $"{Services.UrlScheme.Prefix}{local}:{_port}/description.xml";
 
     private string SearchResponse(IPAddress local, string st) =>
         "HTTP/1.1 200 OK\r\n" +

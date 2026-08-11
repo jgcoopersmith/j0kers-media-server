@@ -118,7 +118,7 @@ public sealed class DiscoveryService : IDisposable
         }
 
         if (_mdns is not null)
-            Log.Info("discovery", $"reachable by name at http://{HostName}.local:{_port}/");
+            Log.Info("discovery", $"reachable by name at {Services.UrlScheme.Prefix}{HostName}.local:{_port}/");
     }
 
     /// <summary>
@@ -131,7 +131,7 @@ public sealed class DiscoveryService : IDisposable
         <?xml version="1.0" encoding="utf-8"?>
         <root xmlns="urn:schemas-upnp-org:device-1-0"{(_config.Dlna ? " xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\"" : "")}>
           <specVersion><major>1</major><minor>0</minor></specVersion>
-          <URLBase>http://{host}:{_port}/</URLBase>
+          <URLBase>{Services.UrlScheme.Prefix}{host}:{_port}/</URLBase>
           <device>
             <deviceType>urn:schemas-upnp-org:device:{(_config.Dlna ? "MediaServer:1" : "Basic:1")}</deviceType>
             <friendlyName>{Escape(_serverName)}</friendlyName>
@@ -142,7 +142,7 @@ public sealed class DiscoveryService : IDisposable
         {(_config.Dlna ? """
             <dlna:X_DLNADOC xmlns:dlna="urn:schemas-dlna-org:device-1-0">DMS-1.50</dlna:X_DLNADOC>
         """ + Dlna.DlnaService.ServiceListXml : "")}
-            <presentationURL>http://{host}:{_port}/</presentationURL>
+            <presentationURL>{Services.UrlScheme.Prefix}{host}:{_port}/</presentationURL>
           </device>
         </root>
         """;

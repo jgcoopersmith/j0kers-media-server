@@ -37,6 +37,9 @@ public sealed class ServerConfig
     [JsonPropertyName("logging")]
     public LoggingConfig Logging { get; set; } = new();
 
+    [JsonPropertyName("https")]
+    public HttpsConfig Https { get; set; } = new();
+
     [JsonPropertyName("discovery")]
     public DiscoveryConfig Discovery { get; set; } = new();
 
@@ -541,6 +544,29 @@ public sealed class LoggingConfig
             ? dir
             : System.IO.Path.Combine(baseDirectory, dir));
     }
+}
+
+/// <summary>
+/// TLS for the dashboard and the media port.
+///
+/// Both ports or neither: a dashboard on https that loads its video from
+/// http is mixed content, which browsers block outright — so turning this
+/// on moves the control port and the HLS port together, keeping the same
+/// port numbers and changing the scheme. RTSP is unaffected; it has its own
+/// transport and its own authentication.
+/// </summary>
+public sealed class HttpsConfig
+{
+    [JsonPropertyName("enabled")] public bool Enabled { get; set; }
+
+    /// <summary>
+    /// A PKCS#12 (.pfx) file holding the certificate and its private key.
+    /// Empty means "make one": a self-signed certificate is generated into
+    /// the config directory, valid for this machine's names and addresses.
+    /// </summary>
+    [JsonPropertyName("certificate")] public string Certificate { get; set; } = "";
+
+    [JsonPropertyName("password")] public string Password { get; set; } = "";
 }
 
 /// <summary>

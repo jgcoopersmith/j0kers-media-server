@@ -32,13 +32,14 @@ public static class HttpListenerBinder
         if (bindAddress == "0.0.0.0")
         {
             // '+' is http.sys syntax; the managed listener on Unix wants '*'
+            var scheme = Services.UrlScheme.Name;
             listener.Prefixes.Add(OperatingSystem.IsWindows()
-                ? $"http://+:{port}/"
-                : $"http://*:{port}/");
+                ? $"{scheme}://+:{port}/"
+                : $"{scheme}://*:{port}/");
         }
         else
         {
-            listener.Prefixes.Add($"http://{bindAddress}:{port}/");
+            listener.Prefixes.Add($"{Services.UrlScheme.Name}://{bindAddress}:{port}/");
         }
 
         try
@@ -49,8 +50,8 @@ public static class HttpListenerBinder
         catch (HttpListenerException ex) when (OperatingSystem.IsWindows() && ex.ErrorCode == 5) // ERROR_ACCESS_DENIED
         {
             Log.Warn(area,
-                $"binding http://{bindAddress}:{port}/ denied (URL ACL); falling back to localhost. " +
-                $"To listen on all interfaces run elevated once: netsh http add urlacl url=http://+:{port}/ user=Everyone");
+                $"binding {Services.UrlScheme.Prefix}{bindAddress}:{port}/ denied (URL ACL); falling back to localhost. " +
+                $"To listen on all interfaces run elevated once: netsh http add urlacl url={Services.UrlScheme.Prefix}+:{port}/ user=Everyone");
             return (StartLoopback(port), "localhost");
         }
     }
@@ -60,7 +61,7 @@ public static class HttpListenerBinder
         // A failed Start() disposes the listener, so always build fresh here.
         var listener = new HttpListener();
         foreach (var name in LoopbackNames)
-            listener.Prefixes.Add($"http://{name}:{port}/");
+            listener.Prefixes.Add($"{Services.UrlScheme.Name}://{name}:{port}/");
         try
         {
             listener.Start();
@@ -76,7 +77,7 @@ public static class HttpListenerBinder
                 $"loopback bind on port {port} denied because an all-interfaces URL ACL exists; " +
                 "listening on the wildcard with loopback-only enforcement in the app");
             var wide = new HttpListener();
-            wide.Prefixes.Add($"http://+:{port}/");
+            wide.Prefixes.Add($"{Services.UrlScheme.Name}://+:{port}/");
             wide.Start();
             return wide;
         }

@@ -209,7 +209,7 @@ public sealed partial class ControlApi : IDisposable
         (var listener, var bound) = Hls.HttpListenerBinder.Start(_config.BindAddress, _config.Port, "control");
         _listener = listener;
         BoundHost = bound;
-        Log.Info("control", $"listening on http://{bound}:{_config.Port}/api/");
+        Log.Info("control", $"listening on {Services.UrlScheme.Prefix}{bound}:{_config.Port}/api/");
         _ = AcceptLoopAsync();
     }
 
@@ -2211,7 +2211,7 @@ public sealed partial class ControlApi : IDisposable
                 var action = ctx.Request.Headers["SOAPACTION"] ?? "";
                 var body = ReadBody(ctx);
                 var host = ctx.Request.Headers["Host"] ?? $"{BoundHost}:{_config.Port}";
-                var (status, xml) = dlna.HandleSoap(action, body, $"http://{host}");
+                var (status, xml) = dlna.HandleSoap(action, body, $"{Services.UrlScheme.Prefix}{host}");
                 WriteXml(res, status, xml);
                 return;
             }
@@ -2425,7 +2425,7 @@ public sealed partial class ControlApi : IDisposable
 
             var name = string.IsNullOrWhiteSpace(req?.name) ? channel.Name : req!.name!.Trim();
             var sig = _mediaLinks.SignUrl(TvScope(provider.Id, channel.Id));
-            var url = $"http://127.0.0.1:{_config.Port}/api/tv/watch" +
+            var url = $"{Services.UrlScheme.Prefix}127.0.0.1:{_config.Port}/api/tv/watch" +
                       $"?provider={Uri.EscapeDataString(provider.Id)}&id={Uri.EscapeDataString(channel.Id)}" +
                       $"&s={Uri.EscapeDataString(sig)}";
 

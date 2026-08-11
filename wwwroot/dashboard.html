@@ -1059,8 +1059,13 @@ async function refreshMediaToken() {
 }
 /* Every media URL goes through here, so there is exactly one place the
    token can be forgotten. */
+/* The page's own scheme, not a hard-coded one: with TLS on, the media port
+   is https too, and a https dashboard fetching http video is mixed content —
+   which the browser blocks outright rather than warning about. */
+function mediaScheme() { return location.protocol === "https:" ? "https://" : "http://"; }
+
 function mediaUrlOn(host, pathAndQuery) {
-  const base = "http://" + host + ":" + hlsPort + pathAndQuery;
+  const base = mediaScheme() + host + ":" + hlsPort + pathAndQuery;
   if (!mediaToken) return base;
   return base + (base.includes("?") ? "&" : "?") + mediaToken;
 }
@@ -2766,7 +2771,7 @@ async function openConfig() {
 
     $("cfg-announce").checked = !!s.discoveryEnabled;
     $("cfg-announce-note").textContent = s.discoveryHostName
-      ? "Applies immediately. Lets devices find the server by name (http://"
+      ? "Applies immediately. Lets devices find the server by name (" + location.protocol + "//"
         + s.discoveryHostName + ".local:" + s.controlPort + "/) instead of by IP, and lists it "
         + "in Windows' Network folder. Announcing says only that the server exists — signing in is still required."
       : "Applies immediately. Announcing says only that the server exists — signing in is still required.";
@@ -2821,7 +2826,7 @@ function renderCfgInterfaces() {
   for (const i of cfgInterfaces) {
     h += '<div style="display:flex;align-items:center;gap:6px;padding:2px 0;font-size:12px">'
       + '<span>' + (i.kind === "wi-fi" ? "📶" : "🔌") + '</span>'
-      + '<a class="mono" href="http://' + esc(i.address) + ':' + port + '/" target="_blank" rel="noopener">'
+      + '<a class="mono" href="' + location.protocol + '//' + esc(i.address) + ':' + port + '/" target="_blank" rel="noopener">'
       + esc(i.address) + ':' + port + '</a>'
       + '<span style="color:var(--muted)">' + esc(i.name) + (i.primary ? " · default route" : "") + '</span>'
       + '<span style="flex:1"></span>'

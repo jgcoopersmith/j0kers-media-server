@@ -683,6 +683,40 @@ with a lot of things, and Windows runs its own SSDP service. That is
 expected and shared rather than exclusive; a mechanism that cannot start
 logs it and the others carry on.
 
+### HTTPS
+
+Set `https.enabled` and the dashboard and the media port both move to TLS,
+keeping their port numbers and changing the scheme. They move together on
+purpose: a dashboard on https loading video from http is mixed content, and
+browsers block it outright. RTSP is unaffected — different transport, its
+own authentication.
+
+```json
+"https": { "enabled": true, "certificate": "", "password": "" }
+```
+
+**With no certificate named, the server makes its own** — self-signed, two
+years, naming every way this machine can be reached: its hostname,
+`hostname.local`, `localhost`, loopback and each active address, so it does
+not become wrong the moment someone connects by IP instead of by name. It is
+written to `config/server.pfx` and restricted to the account running the
+server. Browsers will warn the first time, because nothing vouches for a
+certificate you signed yourself; trust it once per device, or point
+`https.certificate` at a real one (a `.pfx` with its private key, plus
+`https.password` if it has one).
+
+**Windows asks for administrator once.** http.sys — the kernel driver that
+actually owns these ports — will only present a certificate that is bound to
+an ip:port and held in the machine store, and only an administrator can do
+either. It rides the same prompt that grants the URL reservations and
+firewall rules, and the log says plainly whether the binding landed:
+`certificate bound to 9090/8080 — HTTPS is live`, or an error naming the
+`netsh` command to run by hand. A port that changes scheme also has its old
+reservation removed, since the leftover holds the port and the new
+registration would be refused.
+
+Session cookies pick up `Secure` automatically once TLS is on.
+
 ### Security posture
 
 Worth knowing what is and isn't defended, since this server hands out media

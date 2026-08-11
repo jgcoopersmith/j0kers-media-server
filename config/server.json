@@ -84,6 +84,25 @@
   // Also available as -t on the command line.
   "minimizeToTray": false,
 
+  // TLS for the dashboard and the media port. Both move together — a
+  // dashboard on https loading video from http is mixed content, which
+  // browsers block — keeping the same port numbers and changing the scheme.
+  // RTSP is unaffected.
+  //
+  // "certificate": a .pfx holding the certificate and its private key.
+  // Leave it blank and the server makes its own, valid for this machine's
+  // names and addresses; browsers will warn about it until you trust it,
+  // because nothing vouches for a certificate you signed yourself.
+  //
+  // Windows asks for administrator once to bind the certificate to the
+  // ports (http.sys requires it) — the same prompt that grants the URL
+  // reservations and firewall rules.
+  "https": {
+    "enabled": false,
+    "certificate": "",
+    "password": ""
+  },
+
   "logging": {
     "level": "info",                  // trace | debug | info | warn | error
     "logRtspMessages": false,

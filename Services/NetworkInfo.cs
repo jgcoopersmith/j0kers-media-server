@@ -79,14 +79,14 @@ public static class NetworkInfo
     public static string[] DashboardUrls(string bindAddress, int port)
     {
         if (bindAddress is "127.0.0.1" or "localhost" or "::1")
-            return new[] { $"http://localhost:{port}/" };
+            return new[] { $"{UrlScheme.Prefix}localhost:{port}/" };
         if (bindAddress != "0.0.0.0")
-            return new[] { $"http://{bindAddress}:{port}/" };
+            return new[] { $"{UrlScheme.Prefix}{bindAddress}:{port}/" };
 
         var active = Active();
         return active.Count == 0
-            ? new[] { $"http://localhost:{port}/" }
-            : active.Select(i => $"http://{i.Address}:{port}/").ToArray();
+            ? new[] { $"{UrlScheme.Prefix}localhost:{port}/" }
+            : active.Select(i => $"{UrlScheme.Prefix}{i.Address}:{port}/").ToArray();
     }
 
     private static bool IsVirtual(string s) =>

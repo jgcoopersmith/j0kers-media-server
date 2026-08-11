@@ -195,7 +195,10 @@ if (!portsFree)
         // opening http://localhost:9090/ when the server opened
         // http://10.0.0.191:9090/ lands on an origin that has neither — a
         // sign-in page every time.
-        var running = DashboardUrls(config.Control.BindAddress, config.Control.Port)[0];
+        // the scheme is decided further down (it needs the config directory), so
+    // say what this configuration means rather than what has been set so far
+    J0kersMediaServer.Services.UrlScheme.UseHttps(config.Https.Enabled);
+    var running = DashboardUrls(config.Control.BindAddress, config.Control.Port)[0];
         Console.WriteLine($"j0kers Media Server is already running — opening {running}");
         if (!TryOpenBrowser(running))
             J0kersMediaServer.Services.ConsoleWindow.Fatal(
@@ -225,17 +228,33 @@ Log.ConfigureFile(config.Logging.ToFile, config.Logging.ResolveDirectory(baseDir
 
 Log.Info("main", $"{config.ServerName} starting (config: {(File.Exists(configPath) ? configPath : "built-in defaults")})");
 
+// ---- TLS ----
+// Decided before anything binds, announces, or builds a URL: the scheme is
+// woven through all three, and the control and media ports move together
+// because a dashboard on https loading video from http is mixed content.
+J0kersMediaServer.Services.TlsCertificate.Loaded? tlsCertificate = null;
+if (config.Https.Enabled)
+{
+    tlsCertificate = J0kersMediaServer.Services.TlsCertificate.Ensure(config.Https, baseDirectory);
+    if (tlsCertificate is null)
+        Log.Error("tls", "HTTPS was asked for but no certificate could be prepared — " +
+                         "carrying on over plain HTTP");
+    else
+        J0kersMediaServer.Services.UrlScheme.UseHttps(true);
+}
+
 // Serving beyond this machine over plain HTTP means passwords and session
 // cookies cross the network in the clear. That is a legitimate choice on a
 // home LAN and it is what this server does by default — but it should be a
 // choice, not a surprise, so it is said once at every start.
 if (config.Control.Enabled
+    && !J0kersMediaServer.Services.UrlScheme.Https
     && !HttpListenerBinder.IsLoopbackBind(config.Control.BindAddress))
 {
     Log.Warn("main", "the dashboard is served over plain HTTP on " +
         $"{config.Control.BindAddress}:{config.Control.Port} — passwords and session cookies " +
-        "cross the network unencrypted. Put it behind a TLS reverse proxy for anything " +
-        "beyond a trusted LAN; the proxy's X-Forwarded-Proto is honoured from loopback.");
+        "cross the network unencrypted. Set https.enabled, or put it behind a TLS reverse " +
+        "proxy (X-Forwarded-Proto is honoured from loopback).");
 }
 
 if (config.Mounts.Count == 0)
@@ -294,7 +313,7 @@ var mediaRoot = Path.GetFullPath(Path.IsPathRooted(config.Hls.MediaRoot)
 try
 {
     ffmpeg = new J0kersMediaServer.Media.FfmpegManager(config.Ffmpeg, mediaRoot, baseDirectory);
-    J0kersMediaServer.Services.WindowsUrlAcl.EnsureFor(config);
+    J0kersMediaServer.Services.WindowsUrlAcl.EnsureFor(config, tlsCertificate);
     services = new J0kersMediaServer.Services.ServiceController(config, baseDirectory)
     {
         Subtitles = new J0kersMediaServer.Media.SubtitleManager(ffmpeg),

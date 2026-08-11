@@ -23,19 +23,88 @@ public static class WindowsUrlAcl
     private const string TcpRuleName = "j0kers Media Server (TCP)";
     private const string UdpRuleName = "j0kers Media Server (UDP)";
 
-    public static void EnsureFor(ServerConfig config)
+    /// <summary>
+    /// Fixed per-application id for the http.sys certificate bindings, so a
+    /// rebinding replaces ours rather than accumulating, and so ours can be
+    /// told apart from IIS's or anyone else's on the same machine.
+    /// </summary>
+    private const string AppId = "{7c0a5e11-2f4b-4c8e-9c6a-1de0f0a1c001}";
+
+    public static void EnsureFor(ServerConfig config) => EnsureFor(config, null);
+
+    /// <summary>
+    /// <paramref name="certificate"/> non-null adds the TLS half: importing
+    /// the certificate into the machine store and binding it to each HTTPS
+    /// port. It rides the same elevation prompt as the URL ACLs — one
+    /// approval for everything Windows insists an administrator do.
+    /// </summary>
+    public static void EnsureFor(ServerConfig config, TlsCertificate.Loaded? certificate)
     {
         if (!OperatingSystem.IsWindows()) return;
 
         var commands = new List<string>();
 
+        if (certificate is not null)
+        {
+            // http.sys binds a certificate to an ip:port and finds it by
+            // thumbprint in the machine's own store — a PFX on disk is not
+            // something it can be pointed at directly.
+            //
+            // Import-PfxCertificate rather than certutil: certutil asks for
+            // the password on stdin even when there isn't one, and inside a
+            // hidden elevated window that is not a prompt anyone can answer.
+            // It sits there until the wait times out and nothing is imported.
+            var pfx = certificate.Path.Replace("'", "''");
+            var import = "Import-PfxCertificate -FilePath '" + pfx + "' -CertStoreLocation Cert:\\LocalMachine\\My"
+                         + (certificate.Password.Length > 0
+                             ? " -Password (ConvertTo-SecureString '" + certificate.Password.Replace("'", "''") + "' -AsPlainText -Force)"
+                             : "");
+            commands.Add($"powershell -NoProfile -NonInteractive -Command \"{import}\"");
+
+            var tlsPorts = new List<int>();
+            if (config.Control.Enabled) tlsPorts.Add(config.Control.Port);
+            if (config.Hls.Enabled) tlsPorts.Add(config.Hls.Port);
+            foreach (var port in tlsPorts.Distinct())
+            {
+                // delete first: a binding already there is not replaced, and
+                // add would simply fail with "Cannot create a file when that
+                // file already exists"
+                commands.Add($"netsh http delete sslcert ipport=0.0.0.0:{port}");
+                commands.Add($"netsh http add sslcert ipport=0.0.0.0:{port} " +
+                             $"certhash={certificate.Certificate.Thumbprint} appid={AppId} certstorename=MY");
+            }
+        }
+
         // --- URL ACLs for wide HTTP binds ---
+        // Wide binds need one. So does every TLS port, whatever it binds:
+        // once a certificate is bound to a port, http.sys treats the port as
+        // claimed, and an unprivileged https registration on it — even
+        // loopback — is refused without a reservation of its own.
+        var tls = certificate is not null;
         var aclPorts = new List<int>();
-        if (config.Hls.Enabled && config.Hls.BindAddress == "0.0.0.0") aclPorts.Add(config.Hls.Port);
-        if (config.Control.Enabled && config.Control.BindAddress == "0.0.0.0") aclPorts.Add(config.Control.Port);
-        aclPorts = aclPorts.Where(NeedsAcl).Distinct().ToList();
-        // sddl WD = Everyone, locale-independent (user=Everyone breaks on non-English Windows)
-        commands.AddRange(aclPorts.Select(p => $"netsh http add urlacl url=http://+:{p}/ sddl=D:(A;;GX;;;WD)"));
+        if (config.Hls.Enabled && (tls || config.Hls.BindAddress == "0.0.0.0")) aclPorts.Add(config.Hls.Port);
+        if (config.Control.Enabled && (tls || config.Control.BindAddress == "0.0.0.0")) aclPorts.Add(config.Control.Port);
+        aclPorts = aclPorts.Distinct().ToList();
+
+        if (tls)
+        {
+            // A reservation belongs to a scheme, and these ports have just
+            // changed theirs. The leftover http one is not merely useless:
+            // it holds the port, so the https registration is refused with a
+            // conflict — which is also why the probe below cannot be trusted
+            // to spot a missing https reservation, and why TLS ports ask for
+            // one unconditionally.
+            foreach (var p in aclPorts)
+                commands.Add($"netsh http delete urlacl url=http://+:{p}/");
+        }
+        else
+        {
+            aclPorts = aclPorts.Where(NeedsAcl).ToList();
+        }
+        // sddl WD = Everyone, locale-independent (user=Everyone breaks on non-English Windows).
+        // The reservation is per scheme, so switching to TLS needs its own.
+        commands.AddRange(aclPorts.Select(p =>
+            $"netsh http add urlacl url={UrlScheme.Prefix}+:{p}/ sddl=D:(A;;GX;;;WD)"));
 
         // --- port-based firewall rules when anything binds wide ---
         var anyWide = (config.Rtsp.Enabled && config.Rtsp.BindAddress == "0.0.0.0")
@@ -80,6 +149,26 @@ public static class WindowsUrlAcl
                 Log.Info("main", "network permissions in place — server reachable from other devices");
             else
                 Log.Warn("main", $"URL ACL still missing for port(s) {string.Join(", ", aclMissing)} — HTTP will fall back to localhost");
+
+            // Say whether the certificate actually bound, rather than
+            // assuming it did: without a binding every TLS handshake is
+            // refused by http.sys and the server looks simply dead.
+            if (certificate is not null)
+            {
+                var unbound = new List<int>();
+                if (config.Control.Enabled && !SslCertBound(config.Control.Port, certificate.Certificate.Thumbprint))
+                    unbound.Add(config.Control.Port);
+                if (config.Hls.Enabled && !SslCertBound(config.Hls.Port, certificate.Certificate.Thumbprint))
+                    unbound.Add(config.Hls.Port);
+                if (unbound.Count == 0)
+                    Log.Info("tls", "certificate bound to " +
+                        $"{(config.Control.Enabled ? config.Control.Port.ToString() : "-")}" +
+                        $"/{(config.Hls.Enabled ? config.Hls.Port.ToString() : "-")} — HTTPS is live");
+                else
+                    Log.Error("tls", $"no certificate bound to port(s) {string.Join(", ", unbound)} — " +
+                        "HTTPS will refuse every connection. Bind it by hand with: netsh http add sslcert " +
+                        $"ipport=0.0.0.0:<port> certhash={certificate.Certificate.Thumbprint} appid={AppId} certstorename=MY");
+            }
         }
         catch (Exception ex)
         {
@@ -119,12 +208,35 @@ public static class WindowsUrlAcl
     }
 
     /// <summary>True when binding http://+:port/ is denied for lack of a URL ACL.</summary>
+    /// <summary>Whether http.sys has this certificate bound to the port.</summary>
+    private static bool SslCertBound(int port, string thumbprint)
+    {
+        try
+        {
+            using var p = Process.Start(new ProcessStartInfo("netsh",
+                $"http show sslcert ipport=0.0.0.0:{port}")
+            {
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
+            if (p is null) return false;
+            var output = p.StandardOutput.ReadToEnd();
+            p.WaitForExit(10_000);
+            return output.Contains(thumbprint, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static bool NeedsAcl(int port)
     {
         try
         {
             using var probe = new HttpListener();
-            probe.Prefixes.Add($"http://+:{port}/");
+            probe.Prefixes.Add($"{UrlScheme.Prefix}+:{port}/");
             probe.Start();
             probe.Stop();
             return false;

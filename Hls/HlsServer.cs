@@ -53,7 +53,7 @@ public sealed class HlsServer : IDisposable
         Directory.CreateDirectory(_mediaRoot);
         (var listener, var bound) = HttpListenerBinder.Start(_config.BindAddress, _config.Port, "hls");
         _listener = listener;
-        Log.Info("hls", $"listening on http://{bound}:{_config.Port}/ (media root: {_mediaRoot})");
+        Log.Info("hls", $"listening on {Services.UrlScheme.Prefix}{bound}:{_config.Port}/ (media root: {_mediaRoot})");
         _ = AcceptLoopAsync();
     }
 

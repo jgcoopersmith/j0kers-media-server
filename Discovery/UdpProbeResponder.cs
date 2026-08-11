@@ -120,11 +120,11 @@ public sealed class UdpProbeResponder : IDisposable
     /// </summary>
     private string Describe(IPAddress local) => JsonSerializer.Serialize(new
     {
-        Address = $"http://{local}:{_httpPort}",
+        Address = $"{Services.UrlScheme.Prefix}{local}:{_httpPort}",
         Id = _uuid,
         Name = _serverName,
         EndpointAddress = (string?)null,
-        Dashboard = $"http://{local}:{_httpPort}/",
+        Dashboard = $"{Services.UrlScheme.Prefix}{local}:{_httpPort}/",
         Product = "j0kers Media Server",
     });
 
