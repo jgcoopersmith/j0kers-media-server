@@ -2848,6 +2848,55 @@ function renderCfgInterfaces() {
   box.innerHTML = h;
 }
 
+/* The server can restart itself, so a setting that only applies at startup
+   should not end in "now go and restart it" — on a tray-mode server that
+   means hunting for an icon. Declining is fine: the setting is saved either
+   way and takes effect whenever the server next starts. */
+async function offerRestart(nowHttps) {
+  const what = nowHttps
+    ? "HTTPS starts when the server restarts.\n\n"
+      + "Restart it now?\n\n"
+      + "Windows may ask for administrator once to bind the certificate. You will come back "
+      + "on https:// — your browser will warn about the self-signed certificate the first "
+      + "time — everyone signs in again, and DLNA clients will most likely stop seeing the server."
+    : "HTTPS stops when the server restarts.\n\nRestart it now? You will come back on http://.";
+  if (!confirm(what)) return;
+
+  let where = null;
+  try {
+    const r = await fetch("/api/server/restart", { method: "POST", headers: headers() });
+    const data = await r.json();
+    if (!r.ok) { alert(data.error || "could not restart — start the server again yourself"); return; }
+    where = data.url;
+  } catch {
+    // the connection dropping *is* the restart beginning, so this is not
+    // necessarily a failure — carry on to the waiting screen
+  }
+  waitForRestart(where);
+}
+
+/* Nothing on this page survives the restart, so replace it with something
+   that says what is happening and sends them to the right address. The new
+   scheme is a different origin, so this cannot poll it — it counts down and
+   then goes, leaving a link for when it takes longer than expected. */
+function waitForRestart(url) {
+  const target = url || location.href;
+  document.body.innerHTML =
+    '<div style="display:grid;place-items:center;height:100vh;font-family:system-ui;text-align:center;gap:14px">'
+    + '<div><div style="font-size:15px;margin-bottom:6px">Restarting the server…</div>'
+    + '<div id="rs-count" style="color:#888;font-size:13px">taking you to ' + esc(target) + ' shortly</div>'
+    + '<div style="margin-top:14px"><a id="rs-go" href="' + esc(target) + '">go there now</a></div></div></div>';
+  let left = 8;
+  const tick = setInterval(() => {
+    left--;
+    const c = document.getElementById("rs-count");
+    if (c) c.textContent = left > 0
+      ? "taking you to " + target + " in " + left + "s"
+      : "taking you to " + target + "…";
+    if (left <= 0) { clearInterval(tick); location.href = target; }
+  }, 1000);
+}
+
 /* HTTPS is the one switch that cannot apply itself: the listeners are bound
    already, and binding the certificate to the ports needs the elevation
    prompt that only startup asks for. So the note is mostly about what
@@ -3080,14 +3129,10 @@ async function saveConfig() {
     closeConfig();
     if (data.controlPortChanged)
       alert("Saved. RTSP/HLS are already on the new settings; the control port (this dashboard) moves to :" + body.controlPort + " the next time you restart the server.");
-    // saying it once, plainly: this is the setting that does nothing until
-    // the server is restarted, and it changes the address you come back to
-    if (data.httpsChanged)
-      alert(data.httpsEnabled
-        ? "Saved. HTTPS starts with the next restart of the server — accept the administrator "
-          + "prompt when it does, then come back on https:// instead of http://. Everyone signs "
-          + "in again, and DLNA clients will most likely stop seeing the server."
-        : "Saved. HTTPS stops with the next restart of the server — come back on http:// then.");
+    // This setting does nothing until the server restarts, so offer to do
+    // it rather than leaving someone to hunt for the tray icon — and say
+    // where they will end up, since the address changes scheme.
+    if (data.httpsChanged) await offerRestart(data.httpsEnabled);
     mountsLoaded = 0; channelsLoaded = 0;
     // a new lifetime only reaches URLs via a freshly minted token
     if (body.linkLifetimeHours !== undefined) await refreshMediaToken();

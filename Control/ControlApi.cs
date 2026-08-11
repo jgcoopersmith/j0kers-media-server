@@ -286,6 +286,7 @@ public sealed partial class ControlApi : IDisposable
             case "/api/settings":
             case "/api/server/start":
             case "/api/server/stop":
+            case "/api/server/restart":
                 return AccessLevel.Admin;
 
             // picking a path off this machine, and the codec list that the
@@ -774,6 +775,38 @@ public sealed partial class ControlApi : IDisposable
                 catch (Exception ex) { WriteJson(res, 500, new { error = ex.Message }); return; }
                 Log.Info("control", "services started via dashboard");
                 WriteJson(res, 200, new { running = _services.Running });
+                return;
+            }
+
+            // Restarting the *process*, not the streaming services: the
+            // settings that only apply at startup — the control port, TLS —
+            // otherwise leave the dashboard telling someone to go and do it
+            // themselves, which on a tray-mode server means hunting for the
+            // icon. Not on Unix: there the server belongs to systemd or
+            // launchd, and relaunching itself would fight whatever supervises
+            // it.
+            if (method == "POST" && path == "/api/server/restart")
+            {
+                if (!OperatingSystem.IsWindows())
+                {
+                    WriteJson(res, 501, new { error = "restart the service through systemd/launchd on this platform" });
+                    return;
+                }
+                var comeBackTo = Services.NetworkInfo.DashboardUrls(_config.BindAddress, _config.Port)[0];
+                if (!ScheduleRestart())
+                {
+                    WriteJson(res, 500, new { error = "could not schedule the restart — start the server again yourself" });
+                    return;
+                }
+                // answered before the shutdown begins, or the caller sees the
+                // connection drop instead of the address to come back to
+                WriteJson(res, 200, new { restarting = true, url = comeBackTo });
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(400);      // let the response reach the browser
+                    Log.Info("control", "restarting at the dashboard's request");
+                    _requestShutdown?.Invoke();
+                });
                 return;
             }
 
@@ -2271,6 +2304,45 @@ public sealed partial class ControlApi : IDisposable
                 res.StatusCode = 404;
                 res.Close();
                 return;
+        }
+    }
+
+    /// <summary>
+    /// Arranges for this server to be started again once it has exited.
+    ///
+    /// A detached waiter rather than a launch-and-race: the new copy must not
+    /// start while this one still holds the ports, or it meets the
+    /// single-instance guard, decides a server is already running, and
+    /// helpfully opens the dashboard of the copy that is in the middle of
+    /// shutting down.
+    /// </summary>
+    private static bool ScheduleRestart()
+    {
+        try
+        {
+            var exe = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(exe)) return false;
+            var dir = Directory.GetCurrentDirectory();
+            var pid = Environment.ProcessId;
+
+            var script =
+                $"Wait-Process -Id {pid} -Timeout 60 -ErrorAction SilentlyContinue; " +
+                "Start-Sleep -Milliseconds 800; " +
+                $"Start-Process -FilePath '{exe.Replace("'", "''")}' -WorkingDirectory '{dir.Replace("'", "''")}'";
+
+            var psi = new System.Diagnostics.ProcessStartInfo("powershell")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script })
+                psi.ArgumentList.Add(a);
+            return System.Diagnostics.Process.Start(psi) is not null;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("control", $"could not schedule a restart: {ex.Message}");
+            return false;
         }
     }
 

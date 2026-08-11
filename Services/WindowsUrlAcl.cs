@@ -44,6 +44,17 @@ public static class WindowsUrlAcl
 
         var commands = new List<string>();
 
+        // Only what is actually missing. The first TLS start has work to do;
+        // every start after it would otherwise raise the same elevation
+        // prompt to redo bindings that are already exactly right, which is
+        // both pointless and the fastest way to train someone to click
+        // through UAC without reading it.
+        if (certificate is not null && TlsSetupComplete(config, certificate))
+        {
+            Log.Debug("tls", "certificate already imported and bound — nothing to elevate for");
+            certificate = null;
+        }
+
         if (certificate is not null)
         {
             // http.sys binds a certificate to an ip:port and finds it by
@@ -208,6 +219,73 @@ public static class WindowsUrlAcl
     }
 
     /// <summary>True when binding http://+:port/ is denied for lack of a URL ACL.</summary>
+    /// <summary>
+    /// Whether TLS is already set up exactly as this run wants it: the
+    /// certificate in the machine store, bound to every port it will serve,
+    /// and an https reservation for each. All three are readable without
+    /// elevation, which is the point — asking is free, prompting is not.
+    /// </summary>
+    private static bool TlsSetupComplete(ServerConfig config, TlsCertificate.Loaded certificate)
+    {
+        var thumb = certificate.Certificate.Thumbprint;
+        if (!CertInMachineStore(thumb)) return false;
+
+        var reservations = ShowUrlAcls();
+        foreach (var port in PortsServed(config))
+        {
+            if (!SslCertBound(port, thumb)) return false;
+            if (!reservations.Contains($"https://+:{port}/", StringComparison.OrdinalIgnoreCase)) return false;
+            // a leftover from before TLS would hold the port
+            if (reservations.Contains($"http://+:{port}/", StringComparison.OrdinalIgnoreCase)) return false;
+        }
+        return true;
+    }
+
+    private static IEnumerable<int> PortsServed(ServerConfig config)
+    {
+        if (config.Control.Enabled) yield return config.Control.Port;
+        if (config.Hls.Enabled) yield return config.Hls.Port;
+    }
+
+    private static bool CertInMachineStore(string thumbprint)
+    {
+        try
+        {
+            using var store = new System.Security.Cryptography.X509Certificates.X509Store(
+                System.Security.Cryptography.X509Certificates.StoreName.My,
+                System.Security.Cryptography.X509Certificates.StoreLocation.LocalMachine);
+            store.Open(System.Security.Cryptography.X509Certificates.OpenFlags.ReadOnly);
+            foreach (var c in store.Certificates)
+                if (string.Equals(c.Thumbprint, thumbprint, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string ShowUrlAcls()
+    {
+        try
+        {
+            using var p = Process.Start(new ProcessStartInfo("netsh", "http show urlacl")
+            {
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
+            if (p is null) return "";
+            var output = p.StandardOutput.ReadToEnd();
+            p.WaitForExit(10_000);
+            return output;
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
     /// <summary>Whether http.sys has this certificate bound to the port.</summary>
     private static bool SslCertBound(int port, string thumbprint)
     {
