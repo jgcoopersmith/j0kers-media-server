@@ -1,0 +1,50 @@
+#!/bin/sh
+# Publishes the desktop executable after every commit.
+#
+# Why this is a hook and not a habit: the pre-commit hook bumps <Version>
+# *during* the commit, so anything published beforehand is stamped with the
+# previous version and never rebuilt. Publishing by hand after the commit
+# works right up until the once it is forgotten, and then the desktop icon
+# quietly launches an old build — which is exactly what happened, and is
+# hard to spot because the server runs perfectly well, just not the code you
+# think it is running.
+#
+# So: commit, and the binary behind the desktop shortcut is the commit.
+#
+# The running server holds its own exe open on Windows, so it is stopped
+# first and started again afterwards — but only if it was running when this
+# began. Committing with the server down leaves it down.
+#
+# Set J0KERS_NO_PUBLISH=1 to skip (a rebase, a docs-only commit, a machine
+# without the SDK).
+[ -n "$J0KERS_NO_PUBLISH" ] && exit 0
+
+cd "$(git rev-parse --show-toplevel)" || exit 0
+command -v dotnet >/dev/null 2>&1 || exit 0
+
+exe="publish/j0kers-media-server.exe"
+was_running=0
+if command -v powershell >/dev/null 2>&1; then
+    if powershell -NoProfile -Command \
+        "if (Get-Process j0kers-media-server -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" 2>/dev/null; then
+        was_running=1
+        echo "post-commit: stopping the running server so its exe can be replaced"
+        powershell -NoProfile -Command \
+            "Get-Process j0kers-media-server -ErrorAction SilentlyContinue | Stop-Process -Force" 2>/dev/null
+        sleep 2
+    fi
+fi
+
+echo "post-commit: publishing $(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' J0kersMediaServer.csproj)"
+if dotnet publish J0kersMediaServer.csproj -c Release -r win-x64 --self-contained false \
+        -p:PublishSingleFile=true -o publish --nologo -v q >/dev/null 2>&1; then
+    echo "post-commit: published $exe"
+else
+    echo "post-commit: PUBLISH FAILED — the desktop shortcut still points at the previous build" >&2
+fi
+
+if [ "$was_running" = "1" ]; then
+    powershell -NoProfile -Command \
+        "Start-Process -FilePath '$(pwd -W 2>/dev/null || pwd)/publish/j0kers-media-server.exe' -WorkingDirectory '$(pwd -W 2>/dev/null || pwd)'" 2>/dev/null
+    echo "post-commit: server restarted"
+fi
