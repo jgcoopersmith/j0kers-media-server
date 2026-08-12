@@ -1082,7 +1082,7 @@ public sealed class FfmpegManager : IDisposable
             {
                 try { if (p.HasExited) continue; } catch { continue; }
                 if (_liveStarted.TryGetValue(stream, out var started)
-                    && DateTime.UtcNow - started < TimeSpan.FromSeconds(90))
+                    && DateTime.UtcNow - started < TimeSpan.FromSeconds(60))
                     continue;                                    // still coming up
 
                 var dir = Path.Combine(_mediaRoot, stream);
@@ -1094,14 +1094,17 @@ public sealed class FfmpegManager : IDisposable
                 }
                 catch { continue; }
 
-                if (DateTime.UtcNow - newest > TimeSpan.FromSeconds(90))
+                // 45s, not longer: the live window buffers ~24s of video, so
+                // a gap the viewer can ride out is one the watchdog must
+                // close before the buffer runs dry plus a little grace
+                if (DateTime.UtcNow - newest > TimeSpan.FromSeconds(45))
                     stale.Add((stream, _channels.FirstOrDefault(c => ChannelStream(c.Name) == stream)?.Name ?? stream));
             }
         }
 
         foreach (var (stream, name) in stale)
         {
-            Log.Warn("ffmpeg", $"channel {name}: running but wrote nothing for 90s — killing the wedged job");
+            Log.Warn("ffmpeg", $"channel {name}: running but wrote nothing for 45s — killing the wedged job");
             Process? p;
             lock (_lock) _liveJobs.TryGetValue(stream, out p);
             // Kill only — the Exited handler restarts it. The entry stays in

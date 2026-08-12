@@ -348,7 +348,7 @@ try
         {
             try { ffmpeg.CheckLiveJobs(); }
             catch (Exception ex) { Log.Warn("ffmpeg", $"watchdog: {ex.Message}"); }
-        }, null, dueTime: 30_000, period: 30_000);
+        }, null, dueTime: 15_000, period: 15_000);
 
         // Announce on the network. Started after the control API is listening,
         // since everything advertised points at it — a client that found us
