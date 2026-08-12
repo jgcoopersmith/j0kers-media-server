@@ -3090,17 +3090,87 @@ public sealed partial class ControlApi : IDisposable
               const msg = document.getElementById("msg"), hint = document.getElementById("hint");
               const done = () => { msg.style.display = "none"; };
 
+              // A live channel, where falling behind is fatal and going back
+              // to where you were is the wrong answer. Guessed from the URL
+              // so it is known before the first playlist arrives, then
+              // corrected from the playlist itself, which actually knows.
+              let live = /\/ch-[^/]*\//.test(src) || src.indexOf("/api/tv/") === 0;
+
               // hls.js first. Chromium answers "maybe" to the native HLS
               // question and then cannot play it — asking politely gets a
               // black screen and a MEDIA_ELEMENT_ERROR. Native is the
               // fallback, which is where Safari lands.
               if (window.Hls && Hls.isSupported()) {
-                const hls = new Hls({ enableWorker: true });
+                const hls = new Hls({
+                  enableWorker: true,
+                  // a channel left on all evening keeps every played-out
+                  // second otherwise; half an hour is a generous DVR
+                  backBufferLength: 1800,
+                });
                 hls.loadSource(src);
                 hls.attachMedia(v);
-                hls.on(Hls.Events.ERROR, (_, d) => {
-                  if (d.fatal) msg.textContent = "playback failed: " + (d.details || d.type);
+
+                hls.on(Hls.Events.LEVEL_LOADED, (_, d) => {
+                  if (d && d.details) live = !!d.details.live;
                 });
+
+                /* Recover, rather than announce the death.
+                   A fatal hls.js error is usually a moment — one segment that
+                   timed out, one playlist reload that missed — and the fix is
+                   the same one the dashboard's own player has always used.
+                   Without it a single hiccup ends playback for good, which on
+                   a live channel with a 25-second window happens within the
+                   first minute almost every time. */
+                let recoveries = 0, healthy = 0;
+                v.addEventListener("playing", () => {
+                  // a spell of real playback means the last trouble is over,
+                  // so a channel watched for hours is not slowly spending a
+                  // fixed allowance of retries
+                  clearTimeout(healthy);
+                  healthy = setTimeout(() => { recoveries = 0; }, 60000);
+                });
+
+                hls.on(Hls.Events.ERROR, (_, d) => {
+                  if (!d || !d.fatal) return;            // non-fatal: hls.js copes
+                  if (++recoveries > 6) {
+                    msg.style.display = "";
+                    msg.textContent = "playback failed: " + (d.details || d.type);
+                    return;
+                  }
+                  const was = v.currentTime;
+                  msg.style.display = "";
+                  msg.textContent = "reconnecting…";
+                  try {
+                    if (d.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
+                    else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+                    else { msg.textContent = "playback failed: " + (d.details || d.type); return; }
+                  } catch { return; }
+                  // A recording resumes where it was. A channel does not:
+                  // the position it stopped at has already fallen out of the
+                  // playlist, and asking for it again is how it stops twice.
+                  if (!live && was > 1) {
+                    v.addEventListener("canplay", function restore() {
+                      v.removeEventListener("canplay", restore);
+                      if (Math.abs(v.currentTime - was) > 2) { try { v.currentTime = was; } catch {} }
+                    });
+                  }
+                });
+
+                /* Falling off the back of the window.
+                   Pluto's playlists hold about five segments — twenty-five
+                   seconds of live — so a stall of any length leaves the
+                   player asking for segments the playlist no longer lists,
+                   and it stops with no error worth the name. Every few
+                   seconds, if we are live and further behind than the window
+                   is long, skip to the edge: a jump forward is what watching
+                   live means, and the alternative is a frozen picture. */
+                setInterval(() => {
+                  if (!live || v.paused || v.seekable.length === 0) return;
+                  const edge = v.seekable.end(v.seekable.length - 1);
+                  if (edge - v.currentTime > 30) {
+                    try { v.currentTime = edge - 6; } catch {}
+                  }
+                }, 5000);
               } else {
                 v.src = src;
               }
