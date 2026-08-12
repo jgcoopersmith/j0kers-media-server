@@ -37,6 +37,8 @@ public sealed class FfmpegManager : IDisposable
     private readonly FfmpegConfig _config;
     private readonly string _mediaRoot;
     private readonly string _channelsFile;
+    /// <summary>Pids of children this run started, so a hard kill can be cleaned up next start.</summary>
+    private readonly string _pidFile;
     private readonly object _lock = new();
     private readonly Dictionary<string, Process> _vodJobs = new(StringComparer.OrdinalIgnoreCase);
 
@@ -76,6 +78,7 @@ public sealed class FfmpegManager : IDisposable
         _config = config;
         _mediaRoot = mediaRoot;
         _channelsFile = Path.Combine(baseDirectory, "channels.json");
+        _pidFile = Path.Combine(baseDirectory, "ffmpeg-pids.txt");
         FfmpegPath = config.Path;
         Directory.CreateDirectory(_mediaRoot);
         Detect();
@@ -87,6 +90,9 @@ public sealed class FfmpegManager : IDisposable
             Log.Info("ffmpeg", $"transcode codecs: video={VideoEncoder} audio={AudioEncoder} " +
                                $"({_videoEncoders.Count} video / {_audioEncoders.Count} audio encoders available)");
         }
+        // before anything of ours starts, so a leftover writer is gone
+        // rather than sharing a channel directory with its replacement
+        KillOrphanedJobs();
         LoadChannels();
     }
 
@@ -1196,6 +1202,11 @@ public sealed class FfmpegManager : IDisposable
             catch (Exception ex) { Log.Warn("ffmpeg", $"{label}: exit handler failed: {ex.Message}"); }
         };
         p.Start();
+        // Immediately, before it can do any work: a child that outlives a
+        // hard kill of this server becomes a second writer in the same
+        // channel directory the next time the server starts. See ProcessJob.
+        Services.ProcessJob.Adopt(p);
+        RememberPid(p);
         p.BeginErrorReadLine();
         if (onProgressLine is not null) p.BeginOutputReadLine();
         Log.Info("ffmpeg", $"started: {label}");
@@ -1217,6 +1228,72 @@ public sealed class FfmpegManager : IDisposable
         try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
         try { p.WaitForExit(2000); } catch { }
         try { p.Dispose(); } catch { }
+    }
+
+    /// <summary>
+    /// Kills ffmpeg processes left behind by a previous run of this server.
+    ///
+    /// The job object stops new orphans being created, but it cannot help
+    /// with the ones already out there — from a build without it, or from a
+    /// kill that beat this process to the punch. They are found by what they
+    /// were told to write: any ffmpeg whose command line names this server's
+    /// own media root belongs to a server that is no longer running, because
+    /// this one has not started anything yet.
+    ///
+    /// Left alone, such a process shares a channel directory with the one
+    /// about to start. Both number segments from seg_00000 and both delete
+    /// what falls out of their window, so they erase each other's output and
+    /// the channel stutters, repeats, or stops — worsening with every
+    /// restart that adds another.
+    /// </summary>
+    private void KillOrphanedJobs()
+    {
+        var killed = 0;
+        var ours = DateTime.MinValue;
+        try { ours = Process.GetCurrentProcess().StartTime; } catch { }
+
+        foreach (var line in ReadPidFile())
+        {
+            if (!int.TryParse(line, out var pid)) continue;
+            try
+            {
+                using var p = Process.GetProcessById(pid);
+                // A pid is reused the moment its owner exits, so identity is
+                // checked twice before anything is killed: it must still be
+                // an ffmpeg, and it must predate this server. Killing a
+                // stranger that inherited the number would be far worse than
+                // leaving an orphan behind.
+                if (!p.ProcessName.Equals("ffmpeg", StringComparison.OrdinalIgnoreCase)) continue;
+                if (ours != DateTime.MinValue && p.StartTime > ours) continue;
+                p.Kill(entireProcessTree: true);
+                killed++;
+            }
+            catch { /* already gone, or not ours to kill */ }
+        }
+
+        try { File.Delete(_pidFile); } catch { }
+
+        if (killed > 0)
+            Log.Warn("ffmpeg", $"killed {killed} ffmpeg process(es) left over from a previous run — " +
+                               "two writers in one channel directory is what makes a channel stutter");
+    }
+
+    private IEnumerable<string> ReadPidFile()
+    {
+        try { return File.Exists(_pidFile) ? File.ReadAllLines(_pidFile) : Array.Empty<string>(); }
+        catch { return Array.Empty<string>(); }
+    }
+
+    /// <summary>
+    /// Records a child's pid so the next run can clean it up if this one is
+    /// killed outright. The job object should make this unnecessary on
+    /// Windows; it is the belt to that pair of braces, and the only
+    /// mechanism at all everywhere else.
+    /// </summary>
+    private void RememberPid(Process p)
+    {
+        try { File.AppendAllText(_pidFile, p.Id + Environment.NewLine); }
+        catch (Exception ex) { Log.Debug("ffmpeg", $"could not record pid: {ex.Message}"); }
     }
 
     private void LoadChannels()

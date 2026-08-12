@@ -9,6 +9,12 @@ using J0kersMediaServer.Rtsp;
 // Log card is where the server's output goes.
 J0kersMediaServer.Services.ConsoleWindow.AttachToParent();
 
+// Before any child process can be started: everything this server spawns
+// joins a job that the kernel tears down when this process dies, however it
+// dies. Without it, killing the server leaves its ffmpeg children running,
+// and the next start puts a second writer in every channel directory.
+J0kersMediaServer.Services.ProcessJob.Init();
+
 // ---- command line ----
 // j0kers-media-server [config.json] [-h host] [-r rtspPort] [-H hlsPort] [-c controlPort]
 // Flags override the config file, settings.json, and env vars.
