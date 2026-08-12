@@ -2664,6 +2664,22 @@ function playerPageUrl(src, title) {
   return "/player?src=" + encodeURIComponent(src) + (title ? "&title=" + encodeURIComponent(title) : "");
 }
 
+/* The same page as an absolute link, for pasting into another tab or
+   sending to another device.
+
+   This exists because the two URLs a channel has are not interchangeable
+   and look alike. The playlist (…:8080/ch-x/index.m3u8) is what VLC and
+   ffmpeg want; paste it into desktop Chrome and nothing plays, because a
+   browser has no HLS engine of its own. The watch page is the one that
+   carries hls.js, and it is what a browser tab needs. Handing out only the
+   first and calling it "the stream URL" is how someone ends up with three
+   tabs of a file the browser cannot play. */
+function watchPageUrl(src, title) {
+  const host = shareHost();
+  const port = location.port || (location.protocol === "https:" ? "443" : "80");
+  return location.protocol + "//" + host + ":" + port + playerPageUrl(src, title);
+}
+
 /* Opens a blank tab now, to be pointed at the player once the URL is known.
    Returns null if the browser refused, and the caller carries on inline. */
 function openPlayerTab() {
@@ -4109,13 +4125,22 @@ async function refreshChannels(force) {
       // has no playlist on disk yet, which is why it offers Start rather than
       // Play; the URL is still its permanent address, so the button stays and
       // says plainly that it answers once the channel is running.
+      // Two copies, because a channel has two URLs and they are not
+      // interchangeable. "Tab" is the watch page — the one that plays in a
+      // browser, and the one to paste into another Chrome tab. "VLC" is the
+      // bare playlist, which a browser cannot play and a real player wants.
+      // They were one button labelled "Copy", handing out the playlist, and
+      // pasting that into a browser plays nothing.
+      + '<button data-act="copy" data-arg="' + esc(watchPageUrl(copyUrl, c.name))
+      + '" title="' + esc("Copy a link that plays in a browser tab — paste it into Chrome"
+                          + (idle ? ". It plays once the channel is started" : "")) + '">⧉ Tab</button>'
       + '<button data-act="copy" data-arg="' + esc(copyUrl) + '" title="'
       // shareHostNote() already opens with an em dash, so the idle half says
       // its piece as a sentence rather than putting two dashes in one line
-      + esc("Copy the stream URL for VLC and other players"
+      + esc("Copy the raw stream URL for VLC and other players — a browser cannot play this one"
             + (idle ? ". It answers once the channel is started" : "")
             + shareHostNote())
-      + '">Copy</button>'
+      + '">⧉ VLC</button>'
       + '<button class="danger" title="Remove channel" data-act="ch-remove" data-arg="' + esc(c.name) + '">✕</button>'
       + '</div>';
   }
@@ -4573,9 +4598,14 @@ async function copyToClipboard(text) {
 async function copyText(btn, text) {
   const ok = await copyToClipboard(text);
   if (!ok) { window.prompt("Copy the URL:", text); return; }
+  // restore whatever the button said, not the word "Copy" — some of them
+  // name which of a stream's two URLs they carry, and a row that ends up
+  // with two buttons both reading "Copy" is worse than no label at all
+  const was = btn.dataset.label || btn.textContent;
+  btn.dataset.label = was;
   btn.classList.add("copied");
   btn.textContent = "Copied";
-  setTimeout(() => { btn.classList.remove("copied"); btn.textContent = "Copy"; }, 1200);
+  setTimeout(() => { btn.classList.remove("copied"); btn.textContent = was; }, 1200);
 }
 
 /* Delegated clicks for all rendered rows. Arguments travel as data-arg
