@@ -992,6 +992,19 @@ public sealed class FfmpegManager : IDisposable
                 : new[] { "-c:a", AudioEncoder, "-b:a", "160k", "-ac", "2" });
         }
 
+        // Video and audio only — no subtitles, no data streams.
+        //
+        // Every wedge on a Pluto channel traced back to the same limb:
+        // their webvtt subtitle endpoint, which 500s and hangs as a matter
+        // of routine (the Tubi channel, whose stream carries no subtitle
+        // rendition, never wedged once). The muxer interleaves its streams,
+        // so a stalled subtitle track stalls the video that was arriving
+        // fine beside it. Dropping the track also makes ffmpeg's demuxer
+        // stop fetching those playlists at all — unmapped streams are
+        // discarded, and discarded renditions are not downloaded. The
+        // dashboard never surfaced live-channel subtitles anyway.
+        args.AddRange(new[] { "-sn", "-dn" });
+
         // remuxed live sources (tuners, IPTV) are MPEG-TS friendly; only a
         // real transcode to a modern codec needs fMP4
         var fmp4 = !remuxAll && NeedsFmp4(null);
