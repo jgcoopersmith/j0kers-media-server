@@ -1054,11 +1054,44 @@ public sealed class FfmpegManager : IDisposable
     /// a flapping channel settles into one quiet retry a minute rather than
     /// a tight loop of boot calls against the provider.
     /// </summary>
+    /// <summary>
+    /// Restarts due, and the single thread that performs them.
+    ///
+    /// This exists because the first version deadlocked the server. Exited
+    /// fires on a thread-pool thread, and taking _lock there blocks that
+    /// thread — while _lock is itself held across process kills, WaitForExit
+    /// and spawns. Remove four channels at once, as one click each does, and
+    /// every kill fires a handler that blocks; the pool answers by injecting
+    /// more threads, which block too. Measured on the live server: 137
+    /// threads, 127 of them waiting, 16ms of CPU in five seconds. HTTP
+    /// requests are dispatched with Task.Run, so they never got a thread
+    /// either — the ports still listened, because the kernel accepts
+    /// connections whether or not anyone is left to answer them, and a
+    /// browser sat on "connecting…" forever.
+    ///
+    /// So the exit path now blocks nothing: it drops a due time on a queue
+    /// and returns. One worker drains it, and one worker is the most that
+    /// can ever be waiting on the lock.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentQueue<(string stream, DateTime dueUtc)> _restarts = new();
+    private readonly SemaphoreSlim _restartSignal = new(0);
+    private Task? _restartWorker;
+
     private void OnLiveJobExited(string name, string url, Process p)
     {
         var stream = ChannelStream(name);
         int delay;
-        lock (_lock)
+
+        // Never block here — this is a thread-pool thread and the lock is
+        // held elsewhere across waits. TryEnter with no timeout: if the lock
+        // is busy the restart is queued anyway and the worker sorts it out.
+        if (!Monitor.TryEnter(_lock, TimeSpan.FromMilliseconds(250)))
+        {
+            _restarts.Enqueue((stream, DateTime.UtcNow.AddSeconds(3)));
+            _restartSignal.Release();
+            return;
+        }
+        try
         {
             if (_disposed) return;
             if (!_liveJobs.TryGetValue(stream, out var current) || !ReferenceEquals(current, p))
@@ -1070,24 +1103,54 @@ public sealed class FfmpegManager : IDisposable
             _liveCrashes[stream] = crashes + 1;
             delay = Math.Min(60, 3 << Math.Min(crashes, 4));   // 3, 6, 12, 24, 48, 60…
         }
+        finally { Monitor.Exit(_lock); }
 
         Log.Warn("ffmpeg", $"channel {name}: died — restarting in {delay}s");
-        _ = Task.Run(async () =>
+        _restarts.Enqueue((stream, DateTime.UtcNow.AddSeconds(delay)));
+        _restartSignal.Release();
+        EnsureRestartWorker();
+    }
+
+    private void EnsureRestartWorker()
+    {
+        if (_restartWorker is not null) return;
+        lock (_restarts)
+        {
+            _restartWorker ??= Task.Run(RestartWorkerAsync);
+        }
+    }
+
+    /// <summary>
+    /// Drains the restart queue, one channel at a time, forever. The only
+    /// thread in the process allowed to wait on <c>_lock</c> for a restart.
+    /// </summary>
+    private async Task RestartWorkerAsync()
+    {
+        while (!_disposed)
         {
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(delay));
+                await _restartSignal.WaitAsync(TimeSpan.FromSeconds(5));
+                if (_disposed) return;
+                if (!_restarts.TryDequeue(out var due)) continue;
+
+                var wait = due.dueUtc - DateTime.UtcNow;
+                if (wait > TimeSpan.Zero) await Task.Delay(wait);
+                if (_disposed) return;
+
+                string? name = null, url = null;
                 lock (_lock)
                 {
                     if (_disposed) return;
-                    var def = _channels.FirstOrDefault(c => ChannelStream(c.Name) == stream);
-                    if (def is null || !def.Started) return;     // removed or stopped while waiting
-                    if (_liveJobs.ContainsKey(stream)) return;   // someone already started it
-                    StartLiveJob(def.Name, def.Url);
+                    var def = _channels.FirstOrDefault(c => ChannelStream(c.Name) == due.stream);
+                    if (def is null || !def.Started) continue;      // removed or stopped while waiting
+                    if (_liveJobs.ContainsKey(due.stream)) continue; // already running again
+                    name = def.Name; url = def.Url;
+                    StartLiveJob(name, url);
                 }
             }
-            catch (Exception ex) { Log.Warn("ffmpeg", $"channel {name}: restart failed: {ex.Message}"); }
-        });
+            catch (Exception ex) { Log.Warn("ffmpeg", $"restart worker: {ex.Message}"); }
+        }
     }
 
     /// <summary>
@@ -1213,15 +1276,30 @@ public sealed class FfmpegManager : IDisposable
         return p;
     }
 
+    /// <summary>
+    /// Takes the job out of the table and kills it — but does the waiting on
+    /// a thread of its own.
+    ///
+    /// Every caller holds <c>_lock</c>, and the two seconds this used to
+    /// spend inside <see cref="KillAndRelease"/> were two seconds during
+    /// which no request touching ffmpeg could be served and every Exited
+    /// handler piled up behind it. Removing four channels in a row was
+    /// enough to bury the thread pool. Removing the entry is the part that
+    /// must be atomic with the caller's other bookkeeping; the kill is not.
+    /// </summary>
     private static void StopJob(Dictionary<string, Process> jobs, string key)
     {
         if (!jobs.Remove(key, out var p)) return;
-        KillAndRelease(p);
+        // Kill promptly so nothing else writes to the directory, but hand the
+        // waiting and disposing to the pool — the caller's lock is held.
+        try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
+        _ = Task.Run(() => KillAndRelease(p));
     }
 
     /// <summary>
     /// Kills a job and releases it. Disposing immediately after Kill() races
-    /// the Exited callback, so give it a moment to be raised first.
+    /// the Exited callback, so give it a moment to be raised first. Never
+    /// call this while holding <c>_lock</c> — see <see cref="StopJob"/>.
     /// </summary>
     private static void KillAndRelease(Process p)
     {
