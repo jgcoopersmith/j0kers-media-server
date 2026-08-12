@@ -265,6 +265,7 @@ if (config.Mounts.Count == 0)
 
 J0kersMediaServer.Services.ServiceController? services = null;
 ControlApi? control = null;
+Timer? channelWatchdog = null;
 J0kersMediaServer.Discovery.DiscoveryService? discovery = null;
 J0kersMediaServer.Media.FfmpegManager? ffmpeg = null;
 J0kersMediaServer.Services.TrayIcon? tray = null;
@@ -336,12 +337,17 @@ try
 
         // The channel watchdog: a live job that is running but has written
         // nothing for 90 seconds is wedged, and killing it is what revives
-        // it (the exit handler restarts crashed channels). Held in a local
-        // so it lives exactly as long as the server loop below.
-        using var channelWatchdog = new Timer(_ =>
+        // it (the exit handler restarts crashed channels).
+        //
+        // Assigned to a variable declared OUTSIDE this block. The first
+        // version was a `using var` right here — inside a block that closes
+        // a few lines down — so the timer was disposed milliseconds after
+        // it was created and the watchdog never ran once. Its silence read
+        // as health. It is disposed at shutdown with everything else.
+        channelWatchdog = new Timer(_ =>
         {
             try { ffmpeg.CheckLiveJobs(); }
-            catch (Exception ex) { Log.Debug("ffmpeg", $"watchdog: {ex.Message}"); }
+            catch (Exception ex) { Log.Warn("ffmpeg", $"watchdog: {ex.Message}"); }
         }, null, dueTime: 30_000, period: 30_000);
 
         // Announce on the network. Started after the control API is listening,
@@ -530,6 +536,7 @@ using var watchdog = new Timer(_ =>
 discovery?.Dispose();
 services?.Dispose();
 control?.Dispose();
+channelWatchdog?.Dispose();   // before ffmpeg, so no kill fires mid-teardown
 ffmpeg?.Dispose();
 // the idle timestamps have been sliding forward all session; write them out
 // so a browser left open isn't signed out by a restart over a stale one

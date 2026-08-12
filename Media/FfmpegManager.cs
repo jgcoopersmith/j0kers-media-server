@@ -938,14 +938,24 @@ public sealed class FfmpegManager : IDisposable
             // transient 503s the stitcher serves — into a retry instead of
             // an exit. The HLS demuxer hands these down to every child
             // playlist and segment request.
+            // 5xx only, never 4xx: a 5xx is the stitcher having a moment and
+            // worth waiting out, while a 4xx is a deterministic answer — and
+            // ad-stitched HLS serves plenty of them, because segments rotate
+            // out of existence mid-programme. Retrying a permanent 404 just
+            // parks the stream on a dead URL; failing fast hands it to the
+            // demuxer, which skips the segment and moves on. Retries are
+            // capped so even a real outage errors out within seconds — the
+            // exit handler's restart, with its backoff, is the long-haul
+            // recovery, and it comes back with a fresh session.
             args.AddRange(new[]
             {
                 "-rw_timeout", "15000000",              // µs — 15s
                 "-reconnect", "1",
                 "-reconnect_streamed", "1",
                 "-reconnect_on_network_error", "1",
-                "-reconnect_on_http_error", "4xx,5xx",
-                "-reconnect_delay_max", "30",
+                "-reconnect_on_http_error", "5xx",
+                "-reconnect_delay_max", "8",
+                "-reconnect_max_retries", "3",
             });
         }
         args.AddRange(new[] { "-i", OwnSchemeFor(url) });
