@@ -956,6 +956,15 @@ public sealed class FfmpegManager : IDisposable
                 "-reconnect_on_http_error", "5xx",
                 "-reconnect_delay_max", "8",
                 "-reconnect_max_retries", "3",
+                // The relayed ingest rewrites every segment to
+                // /api/tv/r?u=… — no media extension on the path — and the
+                // HLS demuxer's allowlist rejects exactly that (exit -22,
+                // "not in allowed_segment_extensions"). The check guards a
+                // player against a playlist smuggling file:// or .exe
+                // references; this input is our own server handing back
+                // media over loopback, so the guard has nothing to guard.
+                "-allowed_extensions", "ALL",
+                "-extension_picky", "0",
             });
         }
         args.AddRange(new[] { "-i", OwnSchemeFor(url) });
