@@ -93,6 +93,29 @@
     background: linear-gradient(180deg, #070b14 0%, #080b12 55%, #14070a 100%) fixed;
   }
 
+  /* Royal — same blue, gold and red, and the same heraldic tile. */
+  :root[data-theme="royal"] {
+    color-scheme: dark;
+    --page:      #0a1240;
+    --surface:   #131d55;
+    --surface-2: #1b2769;
+    --ink:       #fbf6e8;
+    --ink-2:     #ddd3b4;
+    --muted:     #a89e84;
+    --grid:      #24306e;
+    --border:    rgba(251,246,232,0.14);
+    --series-1:  #5aa2ff;
+    --good:      #3fa86a;
+    --warning:   #f0a020;
+    --critical:  #f65c5c;
+  }
+  :root[data-theme="royal"] body {
+    background-color: #0a1240;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='80' viewBox='0 0 80 80'%3E%3Cpath d='M0 40 L40 0 L80 40 L40 80 Z' fill='none' stroke='%23f0c040' stroke-opacity='0.20' stroke-width='1.2'/%3E%3Cg fill='%23f0c040' fill-opacity='0.22' transform='translate(40 40) scale(0.5) translate(-32 -34)'%3E%3Cpath d='M32 4c-5 9-9 14-9 20 0 5 3 9 9 13 6-4 9-8 9-13 0-6-4-11-9-20z'/%3E%3Cpath d='M23 28c-7-4-14 1-14 9 0 7 6 11 13 11 3 0 6-1 8-2-5-5-8-11-7-18z'/%3E%3Cpath d='M41 28c7-4 14 1 14 9 0 7-6 11-13 11-3 0-6-1-8-2 5-5 8-11 7-18z'/%3E%3Crect x='20' y='46' width='24' height='5' rx='2'/%3E%3Cpath d='M28 53h8v8c0 3-2 5-4 6-2-1-4-3-4-6z'/%3E%3C/g%3E%3Cg fill='%23f0c040' fill-opacity='0.16'%3E%3Ccircle cx='0' cy='0' r='2.5'/%3E%3Ccircle cx='80' cy='0' r='2.5'/%3E%3Ccircle cx='0' cy='80' r='2.5'/%3E%3Ccircle cx='80' cy='80' r='2.5'/%3E%3C/g%3E%3C/svg%3E");
+    background-size: 80px 80px;
+    background-attachment: fixed;
+  }
+
   /* Donut sprinkles — same palette and the same scatter as the dashboard. */
   :root[data-theme="donut"] {
     color-scheme: light;
@@ -221,7 +244,7 @@
   (function () {
     try {
       var t = localStorage.getItem("j0kers-theme");
-      if (["light", "dark", "cloud", "forest", "donut", "assassin"].indexOf(t) >= 0) document.documentElement.setAttribute("data-theme", t);
+      if (["light", "dark", "cloud", "forest", "donut", "assassin", "royal"].indexOf(t) >= 0) document.documentElement.setAttribute("data-theme", t);
     } catch (e) { /* storage blocked — fall back to the system preference */ }
   })();
 </script>
