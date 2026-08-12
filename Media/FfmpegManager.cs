@@ -925,7 +925,29 @@ public sealed class FfmpegManager : IDisposable
         // counted twice, once coming in here and again going out over HLS.
         // Only for http(s): ffmpeg warns about the option on other inputs.
         if (url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+        {
             args.AddRange(new[] { "-user_agent", RestreamUserAgent });
+            // What was measured before these existed: the CDN drops a
+            // connection mid-read, and ffmpeg — whose HTTP reads have no
+            // timeout at all — blocks on the dead socket forever. Process
+            // alive, zero CPU, newest segment minutes old, while the
+            // upstream playlist (checked directly) is advancing fine.
+            //
+            // rw_timeout turns that eternal block into an error after 15s,
+            // and the reconnect family turns errors — including the
+            // transient 503s the stitcher serves — into a retry instead of
+            // an exit. The HLS demuxer hands these down to every child
+            // playlist and segment request.
+            args.AddRange(new[]
+            {
+                "-rw_timeout", "15000000",              // µs — 15s
+                "-reconnect", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_on_network_error", "1",
+                "-reconnect_on_http_error", "4xx,5xx",
+                "-reconnect_delay_max", "30",
+            });
+        }
         args.AddRange(new[] { "-i", OwnSchemeFor(url) });
 
         var remuxAll = _config.LiveVideoMode.Equals("copy", StringComparison.OrdinalIgnoreCase);
@@ -962,7 +984,120 @@ public sealed class FfmpegManager : IDisposable
         args.AddRange(new[] { "-hls_segment_filename", Path.Combine(dir, $"seg_%05d.{liveSegExt}"),
                               Path.Combine(dir, "index.m3u8") });
 
-        _liveJobs[stream] = Spawn(args, $"channel {name}", dir);
+        var proc = Spawn(args, $"channel {name}", dir, onExited: p => OnLiveJobExited(name, url, p));
+        _liveJobs[stream] = proc;
+        _liveStarted[stream] = DateTime.UtcNow;
+    }
+
+    /// <summary>When each live job's process began — the watchdog's grace period, and the backoff reset.</summary>
+    private readonly Dictionary<string, DateTime> _liveStarted = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Consecutive quick deaths per stream, for the restart backoff.</summary>
+    private readonly Dictionary<string, int> _liveCrashes = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Brings a crashed channel back, because a live channel is a promise.
+    ///
+    /// A recording that fails is a job that failed; a channel that dies
+    /// stays dead until somebody notices the picture is gone and finds the
+    /// Start button, which on a channel left playing on a TV can be hours
+    /// later. The network errors that kill these jobs are transient by
+    /// nature — a dropped CDN connection, a stitcher 503 — so coming back is
+    /// almost always the right thing.
+    ///
+    /// Deliberate stops must not come back, and they are told apart by the
+    /// bookkeeping order StopJob already has: it removes the job from the
+    /// table before killing it, so by the time Exited fires for a stop, the
+    /// table no longer names this process. A crash leaves the entry in
+    /// place, and that entry is the licence to restart.
+    ///
+    /// The backoff is for the channel whose URL has genuinely gone bad:
+    /// doubling from 3s to a minute, reset by five minutes of survival, so
+    /// a flapping channel settles into one quiet retry a minute rather than
+    /// a tight loop of boot calls against the provider.
+    /// </summary>
+    private void OnLiveJobExited(string name, string url, Process p)
+    {
+        var stream = ChannelStream(name);
+        int delay;
+        lock (_lock)
+        {
+            if (_disposed) return;
+            if (!_liveJobs.TryGetValue(stream, out var current) || !ReferenceEquals(current, p))
+                return;                                   // stopped on purpose, or already replaced
+            _liveJobs.Remove(stream);
+
+            var lived = DateTime.UtcNow - (_liveStarted.TryGetValue(stream, out var t) ? t : DateTime.UtcNow);
+            var crashes = lived > TimeSpan.FromMinutes(5) ? 0 : _liveCrashes.GetValueOrDefault(stream);
+            _liveCrashes[stream] = crashes + 1;
+            delay = Math.Min(60, 3 << Math.Min(crashes, 4));   // 3, 6, 12, 24, 48, 60…
+        }
+
+        Log.Warn("ffmpeg", $"channel {name}: died — restarting in {delay}s");
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(delay));
+                lock (_lock)
+                {
+                    if (_disposed) return;
+                    var def = _channels.FirstOrDefault(c => ChannelStream(c.Name) == stream);
+                    if (def is null || !def.Started) return;     // removed or stopped while waiting
+                    if (_liveJobs.ContainsKey(stream)) return;   // someone already started it
+                    StartLiveJob(def.Name, def.Url);
+                }
+            }
+            catch (Exception ex) { Log.Warn("ffmpeg", $"channel {name}: restart failed: {ex.Message}"); }
+        });
+    }
+
+    /// <summary>
+    /// Catches the failure mode the exit handler cannot: a job that is still
+    /// running and producing nothing.
+    ///
+    /// rw_timeout should make a dead read error out, but "should" is not a
+    /// property to build on — this was added the day three channels sat
+    /// wedged with live processes, blocked reads and seven-minute-old
+    /// segments. A live channel writes a segment every few seconds; one that
+    /// has written nothing for 90 seconds is not slow, it is gone, and
+    /// killing it hands it to the exit handler above, which brings it back.
+    /// </summary>
+    public void CheckLiveJobs()
+    {
+        List<(string stream, string name)> stale = new();
+        lock (_lock)
+        {
+            foreach (var (stream, p) in _liveJobs)
+            {
+                try { if (p.HasExited) continue; } catch { continue; }
+                if (_liveStarted.TryGetValue(stream, out var started)
+                    && DateTime.UtcNow - started < TimeSpan.FromSeconds(90))
+                    continue;                                    // still coming up
+
+                var dir = Path.Combine(_mediaRoot, stream);
+                DateTime newest;
+                try
+                {
+                    newest = new DirectoryInfo(dir).EnumerateFiles("seg_*")
+                        .Select(f => f.LastWriteTimeUtc).DefaultIfEmpty(DateTime.MinValue).Max();
+                }
+                catch { continue; }
+
+                if (DateTime.UtcNow - newest > TimeSpan.FromSeconds(90))
+                    stale.Add((stream, _channels.FirstOrDefault(c => ChannelStream(c.Name) == stream)?.Name ?? stream));
+            }
+        }
+
+        foreach (var (stream, name) in stale)
+        {
+            Log.Warn("ffmpeg", $"channel {name}: running but wrote nothing for 90s — killing the wedged job");
+            Process? p;
+            lock (_lock) _liveJobs.TryGetValue(stream, out p);
+            // Kill only — the Exited handler restarts it. The entry stays in
+            // the table so the handler recognises the death as a crash.
+            try { if (p is not null && !p.HasExited) p.Kill(entireProcessTree: true); } catch { }
+        }
     }
 
     // ---- plumbing -------------------------------------------------------

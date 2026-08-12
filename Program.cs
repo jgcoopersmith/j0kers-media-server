@@ -334,6 +334,16 @@ try
         // through our own proxy, so it needs the control API to exist.
         ffmpeg.RestoreRunningChannels();
 
+        // The channel watchdog: a live job that is running but has written
+        // nothing for 90 seconds is wedged, and killing it is what revives
+        // it (the exit handler restarts crashed channels). Held in a local
+        // so it lives exactly as long as the server loop below.
+        using var channelWatchdog = new Timer(_ =>
+        {
+            try { ffmpeg.CheckLiveJobs(); }
+            catch (Exception ex) { Log.Debug("ffmpeg", $"watchdog: {ex.Message}"); }
+        }, null, dueTime: 30_000, period: 30_000);
+
         // Announce on the network. Started after the control API is listening,
         // since everything advertised points at it — a client that found us
         // first and knocked immediately would otherwise get nothing.
