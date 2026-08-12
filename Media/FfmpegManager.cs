@@ -869,6 +869,15 @@ public sealed class FfmpegManager : IDisposable
     };
 
     /// <summary>
+    /// How a channel restream announces itself when it pulls through this
+    /// server's own free-TV proxy, so the proxy can tell its own ingest from
+    /// somebody actually watching. It is a label, not a credential: the
+    /// proxy also requires the request to come from loopback, and nothing is
+    /// granted on the strength of it either way.
+    /// </summary>
+    public const string RestreamUserAgent = "j0kers-restream/1.0";
+
+    /// <summary>
     /// Corrects the scheme of a channel that points back at this server.
     ///
     /// Pinning a free-TV channel stores an absolute URL through our own
@@ -909,6 +918,14 @@ public sealed class FfmpegManager : IDisposable
         if (url.StartsWith("rtsp://", StringComparison.OrdinalIgnoreCase))
             args.AddRange(new[] { "-rtsp_transport", "tcp" });
         args.AddRange(RemoteProtocolWhitelist);
+        // A pinned free-TV channel is pulled through this server's own proxy,
+        // so the proxy sees the restream as just another client. Left
+        // unnamed it would sit in the sessions list forever as somebody
+        // watching, whether or not anyone is — and its bytes would be
+        // counted twice, once coming in here and again going out over HLS.
+        // Only for http(s): ffmpeg warns about the option on other inputs.
+        if (url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+            args.AddRange(new[] { "-user_agent", RestreamUserAgent });
         args.AddRange(new[] { "-i", OwnSchemeFor(url) });
 
         var remuxAll = _config.LiveVideoMode.Equals("copy", StringComparison.OrdinalIgnoreCase);

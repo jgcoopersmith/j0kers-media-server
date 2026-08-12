@@ -644,7 +644,7 @@ public sealed partial class ControlApi : IDisposable
             // it names exactly one channel or one upstream URL.
             if (method == "GET" && path is "/api/tv/watch" or "/api/tv/r" && IsSignedTvRequest(ctx, path))
             {
-                await TvProxy(ctx, entry: path == "/api/tv/watch");
+                await TvProxy(ctx, entry: path == "/api/tv/watch", auth);
                 return;
             }
 
@@ -835,10 +835,13 @@ public sealed partial class ControlApi : IDisposable
                             // the folder above it is the useful part to show
                             mount = v.File is not null ? Path.GetFileName(v.File) : v.Stream,
                             // "vod-skyfall-2012-1080p-brrip-df019bf7" tells
-                            // you nothing at a glance; "Skyfall (2012)" does
+                            // you nothing at a glance; "Skyfall (2012)" does,
+                            // and a free-TV channel is named by its lineup
                             title = v.File is not null
                                 ? Media.StreamTitle.PrettifyFile(Path.GetFileName(v.File))
-                                : Media.StreamTitle.Prettify(v.Stream),
+                                : v.Protocol == "tv"
+                                    ? _tvNames.TryGetValue(v.Stream, out var chName) ? chName : v.Stream
+                                    : Media.StreamTitle.Prettify(v.Stream),
                             state = v.State,
                             client = v.Client,
                             player = v.Player,
@@ -1198,7 +1201,7 @@ public sealed partial class ControlApi : IDisposable
 
             if (method == "GET" && (path == "/api/tv/watch" || path == "/api/tv/r"))
             {
-                await TvProxy(ctx, entry: path == "/api/tv/watch");
+                await TvProxy(ctx, entry: path == "/api/tv/watch", auth);
                 return;
             }
 
@@ -2245,12 +2248,38 @@ public sealed partial class ControlApi : IDisposable
     /// signed, so this cannot be pointed at anything the server did not
     /// itself hand out.
     /// </summary>
-    private async Task TvProxy(HttpListenerContext ctx, bool entry)
+    /// <summary>
+    /// Readable names for the free-TV channels being watched, by tag.
+    ///
+    /// Only the entry request names the channel; every request after it is a
+    /// player refetching a playlist it was handed. The name is remembered
+    /// here at entry so the sessions table can say "Flicks of Fury" rather
+    /// than "pluto/5e1a…" without a lineup lookup on the media path.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _tvNames = new();
+
+    /// <summary>
+    /// This server's own channel restream, rather than somebody watching.
+    ///
+    /// A pinned channel is pulled by ffmpeg through this same proxy, so
+    /// without this it would sit in the sessions list permanently as a
+    /// viewer and its bytes would be counted twice — once arriving here and
+    /// again leaving over HLS to whoever is actually watching. The user
+    /// agent is a label ffmpeg was told to send, so loopback is required
+    /// too; neither grants anything, they only decide whether this request
+    /// is counted as a person.
+    /// </summary>
+    private static bool IsOwnRestream(HttpListenerContext ctx) =>
+        string.Equals(ctx.Request.UserAgent, Media.FfmpegManager.RestreamUserAgent, StringComparison.Ordinal)
+        && (ctx.Request.RemoteEndPoint?.Address is { } a && System.Net.IPAddress.IsLoopback(a));
+
+    private async Task TvProxy(HttpListenerContext ctx, bool entry, AuthResult auth)
     {
         var res = ctx.Response;
         string url;
         bool relay;
         string providerId;
+        string channelTag;
 
         if (entry)
         {
@@ -2280,6 +2309,8 @@ public sealed partial class ControlApi : IDisposable
             url = resolved;
             providerId = provider.Id;
             relay = _relayProviders.Contains(provider.Id);
+            channelTag = $"{provider.Id}/{channel}";
+            await RememberChannelName(provider, channel, channelTag);
         }
         else
         {
@@ -2287,6 +2318,9 @@ public sealed partial class ControlApi : IDisposable
             providerId = ctx.Request.QueryString["p"] ?? "";
             var sig = ctx.Request.QueryString["s"];
             relay = ctx.Request.QueryString["relay"] == "1";
+            // put there by the rewrite; falls back to the provider so a link
+            // minted before this existed still groups into one viewing
+            channelTag = ctx.Request.QueryString["c"] is { Length: > 0 } tag ? tag : providerId;
             if (!_mediaLinks.VerifyUrl(url, sig))
             {
                 // an unsigned target is either tampering or a stale link from
@@ -2311,19 +2345,69 @@ public sealed partial class ControlApi : IDisposable
             var owner = _providers.Get(providerId);
             if (owner is not null) url = await owner.RefreshAsync(url, _cts.Token);
 
-            var result = await _tvProxy.FetchAsync(url, providerId, "/api/tv/r", relay, _cts.Token);
+            var result = await _tvProxy.FetchAsync(url, providerId, "/api/tv/r", relay, _cts.Token, channelTag);
             res.StatusCode = result.Status;
             res.ContentType = result.ContentType;
             // live playlists change every few seconds; nothing here may be held
             res.Headers["Cache-Control"] = "no-store";
             res.ContentLength64 = result.Body.Length;
             await res.OutputStream.WriteAsync(result.Body, _cts.Token);
+
+            if (result.Status == 200) NoteTvViewing(ctx, entry, channelTag, result.Body.Length, auth);
         }
         catch (Exception ex)
         {
             Log.Warn("tv", $"proxy failed: {ex.Message}");
             try { WriteJson(res, 502, new { error = ex.Message }); } catch { }
         }
+    }
+
+    /// <summary>
+    /// Files the channel's name under its tag, from the provider's cached
+    /// lineup. Best effort: a name is a label on a row, and failing to find
+    /// one must not stop the channel playing.
+    /// </summary>
+    private async Task RememberChannelName(Media.Providers.IChannelProvider provider, string channelId, string tag)
+    {
+        if (_tvNames.ContainsKey(tag)) return;
+        try
+        {
+            var lineup = await provider.LineupAsync(_cts.Token);
+            var found = lineup.FirstOrDefault(c => c.Id == channelId);
+            if (found is null) return;
+            // a lineup is hundreds of channels and only the watched ones land
+            // here, but a long-running server should still not grow forever
+            if (_tvNames.Count > 200) _tvNames.Clear();
+            _tvNames[tag] = found.Name;
+        }
+        catch (Exception ex) { Log.Debug("tv", $"could not name {tag}: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Counts a free-TV request as watching.
+    ///
+    /// Which requests count is the whole question here. A proxied channel is
+    /// unlike the rest of the server: for most providers the segments go
+    /// straight from the CDN to the player and never pass through this
+    /// process at all, so waiting for media to arrive — the rule that keeps
+    /// an HLS playlist fetch from inventing a viewer — would mean never
+    /// counting anyone.
+    ///
+    /// What separates looking from watching here is which playlist. The
+    /// entry request is the master, fetched once by anything that merely
+    /// opens a channel; the requests after it are a player refetching its
+    /// variant playlist every few seconds, which nothing does unless it is
+    /// playing. So the entry keeps an existing viewing alive and the ones
+    /// that follow begin one.
+    /// </summary>
+    private void NoteTvViewing(HttpListenerContext ctx, bool entry, string tag, long bytes, AuthResult auth)
+    {
+        if (IsOwnRestream(ctx)) return;
+        _services.Served.Add(bytes);
+        // signature-authorized requests carry no account; an empty name is
+        // what the viewer list turns into "share link"
+        var user = auth.Level == AccessLevel.None ? "" : auth.Name;
+        _services.Viewers.Note(ctx, tag, user, bytes, create: !entry, protocol: "tv");
     }
 
     private sealed record TvPinRequest(string? provider, string? id, string? name);

@@ -50,8 +50,16 @@ public sealed class HlsProxy
     /// Fetches <paramref name="url"/>. A playlist comes back rewritten so its
     /// children point here; anything else is passed through untouched.
     /// </summary>
+    /// <param name="channelTag">
+    /// Which channel this playlist belongs to, carried down into every URL
+    /// the rewrite produces. A player fetching a variant playlist or a
+    /// relayed segment sends no hint of what it is watching — only the entry
+    /// request names the channel — so without this the sessions table could
+    /// say somebody is watching, but not what. It is a label only: nothing
+    /// is authorized by it, and the upstream URL is still signature-checked.
+    /// </param>
     public async Task<Result> FetchAsync(string url, string providerId, string proxyBase, bool relaySegments,
-        CancellationToken ct)
+        CancellationToken ct, string? channelTag = null)
     {
         // Where this URL came from is a third party's playlist, and the
         // server is about to fetch it from inside the network and hand the
@@ -86,7 +94,7 @@ public sealed class HlsProxy
             return new Result(200, contentType, bytes);
 
         var text = Encoding.UTF8.GetString(bytes);
-        var rewritten = Rewrite(text, new Uri(url), providerId, proxyBase, relaySegments);
+        var rewritten = Rewrite(text, new Uri(url), providerId, proxyBase, relaySegments, channelTag);
         return new Result(200, "application/vnd.apple.mpegurl", Encoding.UTF8.GetBytes(rewritten));
     }
 
@@ -109,7 +117,8 @@ public sealed class HlsProxy
     /// segments are made absolute and left to the player unless the caller
     /// asked for a full relay.
     /// </summary>
-    private string Rewrite(string playlist, Uri baseUri, string providerId, string proxyBase, bool relaySegments)
+    private string Rewrite(string playlist, Uri baseUri, string providerId, string proxyBase, bool relaySegments,
+        string? channelTag)
     {
         var sb = new StringBuilder(playlist.Length + 512);
 
@@ -121,13 +130,13 @@ public sealed class HlsProxy
 
             if (line[0] == '#')
             {
-                sb.Append(RewriteTagUris(line, baseUri, providerId, proxyBase, relaySegments)).Append('\n');
+                sb.Append(RewriteTagUris(line, baseUri, providerId, proxyBase, relaySegments, channelTag)).Append('\n');
                 continue;
             }
 
             var abs = Resolve(baseUri, line);
             var viaProxy = relaySegments || IsPlaylist(abs);
-            sb.Append(viaProxy ? Proxied(abs, providerId, proxyBase, relaySegments) : abs).Append('\n');
+            sb.Append(viaProxy ? Proxied(abs, providerId, proxyBase, relaySegments, channelTag) : abs).Append('\n');
         }
 
         return sb.ToString();
@@ -138,7 +147,8 @@ public sealed class HlsProxy
     /// EXT-X-MEDIA (alternate audio/subtitle playlists) and EXT-X-MAP
     /// (initialisation segment).
     /// </summary>
-    private string RewriteTagUris(string line, Uri baseUri, string providerId, string proxyBase, bool relaySegments)
+    private string RewriteTagUris(string line, Uri baseUri, string providerId, string proxyBase, bool relaySegments,
+        string? channelTag)
     {
         const string marker = "URI=\"";
         var start = line.IndexOf(marker, StringComparison.Ordinal);
@@ -155,7 +165,7 @@ public sealed class HlsProxy
         var isKey = line.StartsWith("#EXT-X-KEY", StringComparison.OrdinalIgnoreCase)
                     || line.StartsWith("#EXT-X-SESSION-KEY", StringComparison.OrdinalIgnoreCase);
         var viaProxy = relaySegments || isKey || IsPlaylist(abs);
-        var replacement = viaProxy ? Proxied(abs, providerId, proxyBase, relaySegments) : abs;
+        var replacement = viaProxy ? Proxied(abs, providerId, proxyBase, relaySegments, channelTag) : abs;
 
         return string.Concat(line.AsSpan(0, open), replacement, line.AsSpan(close));
     }
@@ -215,12 +225,15 @@ public sealed class HlsProxy
     /// A signed link back to this proxy for one upstream URL. The provider
     /// travels with it so the token inside can be renewed on the way out.
     /// </summary>
-    private string Proxied(string absolute, string providerId, string proxyBase, bool relaySegments)
+    private string Proxied(string absolute, string providerId, string proxyBase, bool relaySegments,
+        string? channelTag)
     {
         var q = $"{proxyBase}?u={Uri.EscapeDataString(absolute)}" +
                 $"&p={Uri.EscapeDataString(providerId)}" +
                 $"&s={Uri.EscapeDataString(_links.SignUrl(absolute))}";
-        return relaySegments ? q + "&relay=1" : q;
+        if (relaySegments) q += "&relay=1";
+        if (!string.IsNullOrEmpty(channelTag)) q += $"&c={Uri.EscapeDataString(channelTag)}";
+        return q;
     }
 
     private static string Trim(string url) => url.Length <= 120 ? url : url[..120] + "…";
