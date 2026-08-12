@@ -38,11 +38,49 @@ public sealed class PlutoTvProvider : IChannelProvider, IDisposable
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
     private readonly HttpClient _http;
-    private readonly SemaphoreSlim _gate = new(1, 1);
 
-    private sealed record Session(string Token, string StitcherHost, string Params, DateTime ExpiresUtc);
+    private sealed record Session(string Token, string StitcherHost, string Params, DateTime ExpiresUtc,
+                                  string DeviceId);
 
-    private Session? _session;
+    /// <summary>
+    /// One session per channel, not one per server.
+    ///
+    /// Pluto's boot call hands back a <c>sid</c>, a <c>sessionID</c> and a
+    /// <c>deviceId</c>, and every stream URL carries them. Sharing one set
+    /// across several channels tells the stitcher that a single device is
+    /// watching all of them at once, and it stitches for a session, not for
+    /// a request: the ad breaks and the playback position are session state.
+    /// Three players pulling on one session move that state under each
+    /// other, which is why a second and third channel stutter while the
+    /// first is fine, and why content restarts instead of running through.
+    ///
+    /// Keyed by channel, so each channel that is actually being watched
+    /// presents as its own device. Nothing is minted for channels nobody
+    /// opened, and the guide fetch has a key of its own — it is not a
+    /// stream.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Session> _sessions =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> _gates =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The device identity each key keeps across renewals. Pluto keys a
+    /// session to the client id it was booted with, so re-minting one with a
+    /// fresh id every few hours would look like a new device appearing
+    /// mid-programme; holding it steady per channel is what makes each
+    /// channel one consistent viewer rather than a stream of strangers.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _deviceIds =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>deviceId → session key, so a URL can find the session that minted it.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _byDevice =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The key used for calls that are not a stream — the guide and the categories.</summary>
+    private const string GuideKey = "(guide)";
     private IReadOnlyList<ProviderChannel> _lineup = Array.Empty<ProviderChannel>();
     private Dictionary<string, string> _paths = new(StringComparer.OrdinalIgnoreCase);
     private DateTime _lineupFetchedUtc = DateTime.MinValue;
@@ -57,23 +95,18 @@ public sealed class PlutoTvProvider : IChannelProvider, IDisposable
 
     // ---- session ---------------------------------------------------------
 
-    /// <summary>
-    /// A per-install client id. Pluto keys the session to it; reusing one
-    /// value keeps us looking like a single device rather than a new one on
-    /// every request.
-    /// </summary>
-    private readonly string _clientId = Guid.NewGuid().ToString();
-
-    private async Task<Session> SessionAsync(CancellationToken ct)
+    private async Task<Session> SessionAsync(string key, CancellationToken ct)
     {
-        var current = _session;
-        if (current is not null && DateTime.UtcNow < current.ExpiresUtc) return current;
+        if (_sessions.TryGetValue(key, out var current) && DateTime.UtcNow < current.ExpiresUtc) return current;
 
-        await _gate.WaitAsync(ct);
+        var gate = _gates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
         try
         {
-            current = _session;
-            if (current is not null && DateTime.UtcNow < current.ExpiresUtc) return current;
+            if (_sessions.TryGetValue(key, out current) && DateTime.UtcNow < current.ExpiresUtc) return current;
+
+            // stable across renewals for this key — see _deviceIds
+            var clientId = _deviceIds.GetOrAdd(key, _ => Guid.NewGuid().ToString());
 
             var q = new Dictionary<string, string>
             {
@@ -83,7 +116,7 @@ public sealed class PlutoTvProvider : IChannelProvider, IDisposable
                 ["deviceModel"] = "web",
                 ["deviceMake"] = "chrome",
                 ["deviceType"] = "web",
-                ["clientID"] = _clientId,
+                ["clientID"] = clientId,
                 ["clientModelNumber"] = "1.0.0",
                 ["serverSideAds"] = "false",
             };
@@ -108,13 +141,14 @@ public sealed class PlutoTvProvider : IChannelProvider, IDisposable
             // renew early so a resolve never races the expiry.
             var life = boot.RefreshInSec > 60 ? boot.RefreshInSec : 3600;
             var session = new Session(boot.SessionToken, stitcher, boot.StitcherParams ?? "",
-                DateTime.UtcNow.AddSeconds(life * 0.8));
+                DateTime.UtcNow.AddSeconds(life * 0.8), clientId);
 
-            _session = session;
-            Log.Info("pluto", $"session established (valid ~{(int)(life * 0.8 / 60)} min)");
+            _sessions[key] = session;
+            _byDevice[clientId] = key;
+            Log.Info("pluto", $"session established for {key} (valid ~{(int)(life * 0.8 / 60)} min)");
             return session;
         }
-        finally { _gate.Release(); }
+        finally { gate.Release(); }
     }
 
     // ---- lineup ----------------------------------------------------------
@@ -142,7 +176,7 @@ public sealed class PlutoTvProvider : IChannelProvider, IDisposable
 
     private async Task<IReadOnlyList<ProviderChannel>> FetchLineupAsync(CancellationToken ct)
     {
-        var session = await SessionAsync(ct);
+        var session = await SessionAsync(GuideKey, ct);
         var url = "https://service-channels.clusters.pluto.tv/v2/guide/channels" +
                   "?limit=1000&offset=0&sort=number%3Aasc";
 
@@ -233,7 +267,8 @@ public sealed class PlutoTvProvider : IChannelProvider, IDisposable
         if (_paths.Count == 0) await LineupAsync(ct);
         if (!_paths.TryGetValue(channelId, out var path)) return null;
 
-        var session = await SessionAsync(ct);
+        // this channel's own session — see _sessions
+        var session = await SessionAsync(channelId, ct);
 
         // the guide gives "/stitch/hls/channel/{id}/master.m3u8" but the v4
         // stitcher host serves it under /v2
@@ -259,22 +294,34 @@ public sealed class PlutoTvProvider : IChannelProvider, IDisposable
         if (!Uri.TryCreate(url, UriKind.Absolute, out var u)) return url;
         if (!u.Query.Contains("jwt=", StringComparison.Ordinal)) return url;
 
+        var query = u.Query.TrimStart('?').Split('&');
+
+        // The URL names the device it was minted for, so it can be given back
+        // that session's token and no one else's. Handing a channel the token
+        // from another channel's session is precisely the mixing this class
+        // now exists to avoid — and the URL knowing its own device is what
+        // makes the lookup possible without threading state through the proxy.
+        var deviceId = query.FirstOrDefault(kv => kv.StartsWith("deviceId=", StringComparison.Ordinal))
+                            ?["deviceId=".Length..];
+        var key = deviceId is not null && _byDevice.TryGetValue(deviceId, out var k) ? k : null;
+        if (key is null) return url;   // not one of ours, or minted before a restart
+
         Session session;
-        try { session = await SessionAsync(ct); }
+        try { session = await SessionAsync(key, ct); }
         catch (Exception ex)
         {
-            Log.Warn("pluto", $"could not refresh session: {ex.Message}");
+            Log.Warn("pluto", $"could not refresh session for {key}: {ex.Message}");
             return url;
         }
 
-        var rebuilt = string.Join("&", u.Query.TrimStart('?').Split('&').Select(kv =>
+        var rebuilt = string.Join("&", query.Select(kv =>
             kv.StartsWith("jwt=", StringComparison.Ordinal) ? "jwt=" + session.Token : kv));
         return u.GetLeftPart(UriPartial.Path) + "?" + rebuilt;
     }
 
     public void Dispose()
     {
-        _gate.Dispose();
+        foreach (var gate in _gates.Values) gate.Dispose();
         _lineupGate.Dispose();
     }
 
