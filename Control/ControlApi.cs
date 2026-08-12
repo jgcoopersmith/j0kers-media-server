@@ -2308,17 +2308,15 @@ public sealed partial class ControlApi : IDisposable
             }
             url = resolved;
             providerId = provider.Id;
-            // Relay segments for the server's own restream even when the
-            // provider doesn't need it for browsers. Measured with five
-            // channels running: every Pluto restream wedged on a ~90s cycle
-            // with "Error reading HTTP response: End of file" — the segment
-            // CDN keeps discarding connections mid-read, and ffmpeg's HTTP
-            // client never rides it out, timeouts and reconnect flags
-            // notwithstanding. The proxy's pooled HttpClient handles the
-            // same host without incident (it serves every playlist), so the
-            // ingest's segments come through it too. Browsers still fetch
-            // segments straight from the CDN — their stacks cope.
-            relay = _relayProviders.Contains(provider.Id) || IsOwnRestream(ctx);
+            // Tried and reverted: relaying the restream's segments through
+            // this proxy. The theory was sound — ffmpeg's HTTP client
+            // handles the segment CDN's dropped connections badly, and this
+            // process talks to that host all day without trouble — but
+            // measured, wedges got more frequent, not less. Every segment
+            // then crossed loopback TLS and was buffered whole in this
+            // process, and the ingest paid for it. If it is ever revisited
+            // it needs streamed relaying, not this.
+            relay = _relayProviders.Contains(provider.Id);
             channelTag = $"{provider.Id}/{channel}";
             await RememberChannelName(provider, channel, channelTag);
         }
