@@ -98,13 +98,34 @@ public sealed class HlsProxy
         return new Result(200, "application/vnd.apple.mpegurl", Encoding.UTF8.GetBytes(rewritten));
     }
 
+    /// <summary>
+    /// Whether this response is a playlist, decided by what it contains
+    /// rather than by what it is labelled.
+    ///
+    /// RFC 8216 §4 requires a playlist to begin with <c>#EXTM3U</c>, so the
+    /// tag is the whole test — and it has to be, because the labels lie in a
+    /// way that corrupts data. Pluto serves the AES-128 key for its ts_aes
+    /// channels with <c>Content-Type: application/vnd.apple.mpegurl</c>.
+    /// Trusting that sent a 16-byte binary key through the URL rewriter,
+    /// which read those bytes as a relative URI and resolved them into an
+    /// absolute one: 153 bytes of text where a key should be. ffmpeg then
+    /// decrypts every segment with rubbish and gives up with "Invalid data
+    /// found when processing input", which looks like a broken channel and
+    /// is a broken proxy.
+    ///
+    /// Content type and extension are now only hints, used to decide how
+    /// hard to look for the tag — never on their own.
+    /// </summary>
     private static bool LooksLikePlaylist(string url, string contentType, byte[] body)
     {
-        if (contentType.Contains("mpegurl", StringComparison.OrdinalIgnoreCase)) return true;
-        var path = Uri.TryCreate(url, UriKind.Absolute, out var u) ? u.AbsolutePath : url;
-        if (path.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase)) return true;
-        // some edges serve playlists as text/plain
-        return body.Length > 7 && Encoding.ASCII.GetString(body, 0, 7) == "#EXTM3U";
+        // A UTF-8 BOM before #EXTM3U is legal and does appear in the wild.
+        var start = body.Length >= 3 && body[0] == 0xEF && body[1] == 0xBB && body[2] == 0xBF ? 3 : 0;
+        // leading whitespace is not legal, but tolerating it costs nothing
+        while (start < body.Length && (body[start] == (byte)'\n' || body[start] == (byte)'\r'
+               || body[start] == (byte)' ' || body[start] == (byte)'\t')) start++;
+
+        return body.Length - start >= 7
+               && Encoding.ASCII.GetString(body, start, 7) == "#EXTM3U";
     }
 
     // ---- rewriting -------------------------------------------------------
