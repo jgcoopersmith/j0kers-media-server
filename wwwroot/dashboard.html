@@ -4085,6 +4085,11 @@ async function refreshChannels(force) {
   let h = "";
   for (const c of data.channels) {
     const url = mediaUrl("/" + c.stream + "/index.m3u8");
+    // Play is for this page, so it may say localhost; Copy is for somewhere
+    // else — VLC, a phone, another PC — and a localhost URL pasted there
+    // points at that device instead. shareUrl picks an address the server
+    // actually answers on. Same reasoning, same helper, as HLS Streams.
+    const copyUrl = shareUrl("/" + c.stream + "/index.m3u8");
     const live = c.status === "running";
     // idle = saved but never started (a fresh pin). It has no playlist on
     // disk yet, so offering Play would just fail — offer Start instead.
@@ -4099,6 +4104,18 @@ async function refreshChannels(force) {
           : '<button data-act="hls-play" data-arg="' + esc(url) + '">▶ Play</button>'
             + '<button title="Stop restreaming (keeps the channel)" data-act="ch-stop" data-arg="' + esc(c.name) + '">■ Stop</button>'
             + '<button title="Restart channel" data-act="ch-restart" data-arg="' + esc(c.name) + '">↻</button>')
+      // Same place in the row as on an HLS stream — Play, Stop, Copy, ✕ — so
+      // the button is where it already is on the card above. An idle channel
+      // has no playlist on disk yet, which is why it offers Start rather than
+      // Play; the URL is still its permanent address, so the button stays and
+      // says plainly that it answers once the channel is running.
+      + '<button data-act="copy" data-arg="' + esc(copyUrl) + '" title="'
+      // shareHostNote() already opens with an em dash, so the idle half says
+      // its piece as a sentence rather than putting two dashes in one line
+      + esc("Copy the stream URL for VLC and other players"
+            + (idle ? ". It answers once the channel is started" : "")
+            + shareHostNote())
+      + '">Copy</button>'
       + '<button class="danger" title="Remove channel" data-act="ch-remove" data-arg="' + esc(c.name) + '">✕</button>'
       + '</div>';
   }
