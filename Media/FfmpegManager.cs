@@ -953,15 +953,31 @@ public sealed class FfmpegManager : IDisposable
             // capped so even a real outage errors out within seconds — the
             // exit handler's restart, with its backoff, is the long-haul
             // recovery, and it comes back with a fresh session.
+            // The retry budget has to finish inside the watchdog's window,
+            // or the watchdog kills a job that was busy recovering.
+            //
+            // It did not: 15s per read × 3 retries, backing off up to 8s, is
+            // ~70s worst case against a 90s watchdog — near enough that a
+            // reconnect in progress could be shot. And it was the dominant
+            // failure: 22 of Voyager's 30 deaths were watchdog kills, each
+            // one a restart, and until append_list every restart was a
+            // visible rewind.
+            //
+            // So: shorter attempts, more of them. 6s reads, backoff capped at
+            // 2s, eight tries, total capped at 45s — about 61s worst case,
+            // comfortably inside 90. Reconnecting in place keeps the same
+            // ffmpeg, the same Pluto session and the same playlist, which is
+            // the only recovery that costs the viewer nothing.
             args.AddRange(new[]
             {
-                "-rw_timeout", "15000000",              // µs — 15s
+                "-rw_timeout", "6000000",               // µs — 6s
                 "-reconnect", "1",
                 "-reconnect_streamed", "1",
                 "-reconnect_on_network_error", "1",
                 "-reconnect_on_http_error", "5xx",
-                "-reconnect_delay_max", "8",
-                "-reconnect_max_retries", "3",
+                "-reconnect_delay_max", "2",
+                "-reconnect_max_retries", "8",
+                "-reconnect_delay_total_max", "45",
                 // The relayed ingest rewrites every segment to
                 // /api/tv/r?u=… — no media extension on the path — and the
                 // HLS demuxer's allowlist rejects exactly that (exit -22,
