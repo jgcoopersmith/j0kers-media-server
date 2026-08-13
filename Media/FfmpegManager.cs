@@ -1012,6 +1012,28 @@ public sealed class FfmpegManager : IDisposable
             args.AddRange(AudioEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase)
                 ? new[] { "-c:a", "copy" }
                 : new[] { "-c:a", AudioEncoder, "-b:a", "160k", "-ac", "2" });
+
+            // Give the output a clock of its own, because the input's clock
+            // goes backwards.
+            //
+            // Measured on a stitched Pluto channel, consecutive segments:
+            // start=9.588, start=13.888, then start=1.400. Their stitcher
+            // restarts its timestamps at every commercial-to-content splice,
+            // and passing that through means the output timeline jumps back
+            // twelve seconds. A player following it replays what it just
+            // showed — the channel appears to loop, and to jump between the
+            // advert and the programme.
+            //
+            // cfr makes the video encoder emit a continuous, monotonic
+            // timeline regardless of what arrives; aresample=async=1
+            // stretches or pads audio to stay with it rather than drifting
+            // apart at each splice. Only for transcodes: a stream copy has
+            // no encoder to re-time with, and there the discontinuity tag is
+            // the correct answer.
+            if (!VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase))
+                args.AddRange(new[] { "-fps_mode", "cfr" });
+            if (!AudioEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase))
+                args.AddRange(new[] { "-af", "aresample=async=1" });
         }
 
         // Video and audio only — no subtitles, no data streams.
