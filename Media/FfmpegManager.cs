@@ -920,7 +920,13 @@ public sealed class FfmpegManager : IDisposable
         var dir = Path.Combine(_mediaRoot, stream);
         Directory.CreateDirectory(dir);
 
-        var args = new List<string> { "-hide_banner", "-loglevel", "error", "-y" };
+        // At "error" a stalled job is silent by definition — it is not
+        // failing, it is waiting — so tracing raises the level to verbose and
+        // adds -stats. That is what makes a wedge readable: the last thing
+        // it opened, and the moment its frame counter stopped moving.
+        var tracing = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("J0KERS_FFMPEG_TRACE"));
+        var args = new List<string> { "-hide_banner", "-loglevel", tracing ? "verbose" : "error", "-y" };
+        if (tracing) args.Add("-stats");
         if (url.StartsWith("rtsp://", StringComparison.OrdinalIgnoreCase))
             args.AddRange(new[] { "-rtsp_transport", "tcp" });
         args.AddRange(RemoteProtocolWhitelist);
@@ -1300,6 +1306,13 @@ public sealed class FfmpegManager : IDisposable
         if (onProgressLine is not null)
             p.OutputDataReceived += (_, e) => { if (e.Data is not null) onProgressLine(e.Data); };
         var errTail = new Queue<string>(8);
+        // Optional per-job stderr file. The eight-line tail is enough to say
+        // why a job exited, and useless for why one stalled — a job that is
+        // wedged but alive has said nothing recent, and whatever it did say
+        // has long since fallen out of an eight-line window. Diagnostics
+        // config turns this on and every line goes to disk with a timestamp,
+        // so the ninety seconds before a watchdog kill can be read back.
+        var trace = TraceWriterFor(label);
         p.ErrorDataReceived += (_, e) =>
         {
             if (string.IsNullOrWhiteSpace(e.Data)) return;
@@ -1308,7 +1321,17 @@ public sealed class FfmpegManager : IDisposable
                 if (errTail.Count >= 8) errTail.Dequeue();
                 errTail.Enqueue(e.Data);
             }
+            if (trace is not null)
+            {
+                try
+                {
+                    lock (trace) trace.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {e.Data}");
+                }
+                catch { /* a diagnostic must never disturb the job it watches */ }
+            }
         };
+        if (trace is not null)
+            p.Exited += (_, _) => { try { lock (trace) trace.Dispose(); } catch { } };
         p.Exited += (_, _) =>
         {
             // This runs on a thread-pool thread: an escaping exception would
@@ -1435,6 +1458,35 @@ public sealed class FfmpegManager : IDisposable
     /// Windows; it is the belt to that pair of braces, and the only
     /// mechanism at all everywhere else.
     /// </summary>
+    /// <summary>
+    /// A stderr trace file for one job, when <c>J0KERS_FFMPEG_TRACE</c> names
+    /// a directory. Off unless asked for: at ffmpeg's default log level this
+    /// is a handful of lines a minute, but the whole point is to be able to
+    /// raise that level while hunting something, and nobody wants a server
+    /// quietly filling a disk for a fault that was fixed last week.
+    ///
+    /// Written with AutoFlush, because the interesting case is a process that
+    /// has stopped talking — a buffered line still sitting in memory when the
+    /// watchdog kills it is exactly the line worth reading.
+    /// </summary>
+    private static StreamWriter? TraceWriterFor(string label)
+    {
+        var dir = Environment.GetEnvironmentVariable("J0KERS_FFMPEG_TRACE");
+        if (string.IsNullOrWhiteSpace(dir)) return null;
+        try
+        {
+            Directory.CreateDirectory(dir);
+            var safe = string.Concat(label.Select(c => char.IsLetterOrDigit(c) ? c : '-'));
+            var path = Path.Combine(dir, $"{safe}-{DateTime.Now:HHmmss}.log");
+            return new StreamWriter(path, append: true) { AutoFlush = true };
+        }
+        catch (Exception ex)
+        {
+            Log.Debug("ffmpeg", $"could not open a trace file: {ex.Message}");
+            return null;
+        }
+    }
+
     private void RememberPid(Process p)
     {
         try { File.AppendAllText(_pidFile, p.Id + Environment.NewLine); }
