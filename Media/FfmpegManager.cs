@@ -1182,8 +1182,15 @@ public sealed class FfmpegManager : IDisposable
         // is busy the restart is queued anyway and the worker sorts it out.
         if (!Monitor.TryEnter(_lock, TimeSpan.FromMilliseconds(250)))
         {
+            // The entry stays in _liveJobs, naming a process that is already
+            // dead. Whoever picks this up has to notice that and clear it —
+            // both the worker and the watchdog do. EnsureRestartWorker
+            // belongs here too: if the very first death of the run takes this
+            // path, nothing else would ever start the worker and every queued
+            // restart would sit in the queue forever.
             _restarts.Enqueue((stream, DateTime.UtcNow.AddSeconds(3)));
             _restartSignal.Release();
+            EnsureRestartWorker();
             return;
         }
         try
@@ -1229,7 +1236,19 @@ public sealed class FfmpegManager : IDisposable
                 if (_disposed) return;
                 if (!_restarts.TryDequeue(out var due)) continue;
 
+                // Not due yet: put it back rather than sleeping on it. One
+                // worker drains this queue, so waiting here for a channel on
+                // a 48-second backoff would hold every other channel's
+                // restart behind it — and the queue is arrival-ordered, not
+                // due-ordered, so the one behind may be due immediately.
                 var wait = due.dueUtc - DateTime.UtcNow;
+                if (wait > TimeSpan.FromSeconds(2))
+                {
+                    _restarts.Enqueue(due);
+                    _restartSignal.Release();
+                    await Task.Delay(500);
+                    continue;
+                }
                 if (wait > TimeSpan.Zero) await Task.Delay(wait);
                 if (_disposed) return;
 
@@ -1239,7 +1258,19 @@ public sealed class FfmpegManager : IDisposable
                     if (_disposed) return;
                     var def = _channels.FirstOrDefault(c => ChannelStream(c.Name) == due.stream);
                     if (def is null || !def.Started) continue;      // removed or stopped while waiting
-                    if (_liveJobs.ContainsKey(due.stream)) continue; // already running again
+                    if (_liveJobs.TryGetValue(due.stream, out var existing))
+                    {
+                        bool alive;
+                        try { alive = !existing.HasExited; } catch { alive = false; }
+                        if (alive) continue;                       // genuinely running again
+                        // A dead process still listed: the exit handler could
+                        // not take the lock in time to remove it. Left alone
+                        // this entry blocks the restart forever, and the
+                        // watchdog skips it too because the process has
+                        // exited — a channel that never comes back and never
+                        // says why.
+                        _liveJobs.Remove(due.stream);
+                    }
                     name = def.Name; url = def.Url;
                     StartLiveJob(name, url);
                 }
@@ -1266,7 +1297,20 @@ public sealed class FfmpegManager : IDisposable
         {
             foreach (var (stream, p) in _liveJobs)
             {
-                try { if (p.HasExited) continue; } catch { continue; }
+                // A listed process that has already exited is not "not stale",
+                // it is a channel nobody is going to restart: the exit handler
+                // failed to clear it, the restart worker refuses to act while
+                // the entry exists, and skipping it here completes the circle.
+                // Queue it instead — the worker clears the entry and restarts.
+                bool gone;
+                try { gone = p.HasExited; } catch { gone = true; }
+                if (gone)
+                {
+                    _restarts.Enqueue((stream, DateTime.UtcNow));
+                    _restartSignal.Release();
+                    EnsureRestartWorker();
+                    continue;
+                }
                 if (_liveStarted.TryGetValue(stream, out var started)
                     && DateTime.UtcNow - started < TimeSpan.FromSeconds(90))
                     continue;                                    // still coming up
