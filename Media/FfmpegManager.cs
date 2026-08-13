@@ -1015,9 +1015,24 @@ public sealed class FfmpegManager : IDisposable
         // real transcode to a modern codec needs fMP4
         var fmp4 = !remuxAll && NeedsFmp4(null);
         var liveSegExt = fmp4 ? "m4s" : "ts";
+        // append_list and omit_endlist are what stop a restart looking like a
+        // rewind to whoever is watching.
+        //
+        // Without append_list a restarting channel begins again at
+        // seg_00000 and rewrites the playlist with MEDIA-SEQUENCE:0. A
+        // player mid-stream sees the sequence jump backwards and the segment
+        // names it just played reappear carrying different video, so it
+        // replays — the channel appears to loop. Voyager restarted 47 times
+        // in one day, which is 47 rewinds. append_list continues the
+        // numbering from the existing playlist instead.
+        //
+        // omit_endlist covers the other half: ffmpeg writes EXT-X-ENDLIST
+        // when it exits, which turns a live channel into a finished VOD for
+        // the seconds before its replacement starts, and a player that
+        // reloads in that window stops for good rather than waiting.
         args.AddRange(new[] { "-f", "hls", "-hls_time", Inv(_config.LiveSegmentSeconds),
                               "-hls_list_size", Inv(_config.LiveWindowSegments),
-                              "-hls_flags", "delete_segments+independent_segments" });
+                              "-hls_flags", "delete_segments+independent_segments+append_list+omit_endlist" });
         if (fmp4) args.AddRange(new[] { "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4" });
         args.AddRange(new[] { "-hls_segment_filename", Path.Combine(dir, $"seg_%05d.{liveSegExt}"),
                               Path.Combine(dir, "index.m3u8") });
