@@ -46,3 +46,4 @@ publish/
 # HMAC secret for signed media links — anyone holding it can mint them
 /config/signing.key
 /signing.key
+config/ffmpeg-pids.txt
