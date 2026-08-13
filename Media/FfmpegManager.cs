@@ -1102,7 +1102,17 @@ public sealed class FfmpegManager : IDisposable
         // reloads in that window stops for good rather than waiting.
         args.AddRange(new[] { "-f", "hls", "-hls_time", Inv(_config.LiveSegmentSeconds),
                               "-hls_list_size", Inv(_config.LiveWindowSegments),
-                              "-hls_flags", "delete_segments+independent_segments+append_list+omit_endlist" });
+                              // discont_start marks the first segment of each
+                              // run as discontinuous, which is the honest
+                              // description of a restart: append_list keeps
+                              // the numbering, but the content on either side
+                              // of the join is unrelated — the old run's
+                              // programme, then wherever the new run rejoined,
+                              // often mid-advert. Unmarked, a player decodes
+                              // straight across and shows part of an advert,
+                              // part of the programme, and back. Marked, it
+                              // resets its decoder at the seam.
+                              "-hls_flags", "delete_segments+independent_segments+append_list+omit_endlist+discont_start" });
         if (fmp4) args.AddRange(new[] { "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4" });
         args.AddRange(new[] { "-hls_segment_filename", Path.Combine(dir, $"seg_%05d.{liveSegExt}"),
                               Path.Combine(dir, "index.m3u8") });
