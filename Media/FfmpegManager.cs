@@ -1053,6 +1053,21 @@ public sealed class FfmpegManager : IDisposable
             // the format designed it to do.
         }
 
+        // Bind to the first video and first audio stream, explicitly.
+        //
+        // Without a map, ffmpeg chooses its output streams once, from
+        // whatever the programme happened to present. Pluto's adverts are
+        // encoded separately and arrive with a different stream layout, so
+        // after the first EXT-X-DISCONTINUITY the indices no longer mean
+        // what they did. Caught in a trace: output froze at frame 249 while
+        // segments kept downloading perfectly for another minute, with
+        // "Packet corrupt (stream = 8)" as the advert's streams arrived
+        // against a mapping built for the programme's.
+        //
+        // The trailing ? makes each optional, so a segment that genuinely
+        // lacks one is skipped rather than fatal.
+        args.AddRange(new[] { "-map", "0:v:0?", "-map", "0:a:0?", "-ignore_unknown" });
+
         // Video and audio only — no subtitles, no data streams.
         //
         // Every wedge on a Pluto channel traced back to the same limb:
