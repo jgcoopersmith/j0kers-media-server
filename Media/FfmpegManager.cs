@@ -1033,27 +1033,24 @@ public sealed class FfmpegManager : IDisposable
                 ? new[] { "-c:a", "copy" }
                 : new[] { "-c:a", AudioEncoder, "-b:a", "160k", "-ac", "2" });
 
-            // Give the output a clock of its own, because the input's clock
-            // goes backwards.
+            // Tried and reverted: -fps_mode cfr, to force a monotonic output
+            // timeline over an input whose timestamps restart at every ad
+            // splice. It stopped the channel dead instead. Caught in a
+            // stderr trace:
             //
-            // Measured on a stitched Pluto channel, consecutive segments:
-            // start=9.588, start=13.888, then start=1.400. Their stitcher
-            // restarts its timestamps at every commercial-to-content splice,
-            // and passing that through means the output timeline jumps back
-            // twelve seconds. A player following it replays what it just
-            // showed — the channel appears to loop, and to jump between the
-            // advert and the programme.
+            //   19:59:28  frame=7183  speed=1.05x     healthy for 4 minutes
+            //   20:00:01  Skip ('#EXT-X-DISCONTINUITY')
+            //   20:00:07  frame=7406  ...             frozen, and stays frozen
             //
-            // cfr makes the video encoder emit a continuous, monotonic
-            // timeline regardless of what arrives; aresample=async=1
-            // stretches or pads audio to stay with it rather than drifting
-            // apart at each splice. Only for transcodes: a stream copy has
-            // no encoder to re-time with, and there the discontinuity tag is
-            // the correct answer.
-            if (!VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase))
-                args.AddRange(new[] { "-fps_mode", "cfr" });
-            if (!AudioEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase))
-                args.AddRange(new[] { "-af", "aresample=async=1" });
+            // CFR has to emit a continuous timeline, so when the input jumps
+            // backwards it waits for input time to climb past what it has
+            // already written. The stitcher's resets repeat, so it never
+            // catches up. The cure for the looping was the disease behind
+            // the stalls.
+            //
+            // The discontinuity is what HLS has EXT-X-DISCONTINUITY for, and
+            // our output playlist already carries it. Let the player do what
+            // the format designed it to do.
         }
 
         // Video and audio only — no subtitles, no data streams.
