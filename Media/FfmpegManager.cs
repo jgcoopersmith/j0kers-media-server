@@ -978,6 +978,20 @@ public sealed class FfmpegManager : IDisposable
                 "-reconnect_delay_max", "2",
                 "-reconnect_max_retries", "8",
                 "-reconnect_delay_total_max", "45",
+                // A fresh connection per segment, rather than one kept open.
+                //
+                // "Error reading HTTP response: End of file" is what the log
+                // says every time a channel wedges, and it is what a stale
+                // keep-alive socket looks like from the reading end: the HLS
+                // demuxer holds one connection open between segments, the CDN
+                // closes it quietly during the gap, and the next read finds
+                // nothing there. Reconnect flags do not help, because as far
+                // as ffmpeg is concerned the response simply ended.
+                //
+                // Turning persistence off costs a handshake per segment —
+                // once every few seconds, against a CDN built for exactly
+                // that — and removes the idle socket that keeps going away.
+                "-http_persistent", "0",
                 // The relayed ingest rewrites every segment to
                 // /api/tv/r?u=… — no media extension on the path — and the
                 // HLS demuxer's allowlist rejects exactly that (exit -22,
