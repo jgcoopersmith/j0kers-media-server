@@ -743,6 +743,8 @@
 
   <div class="card">
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">HLS streams</span>
+      <button id="hls-clear" class="danger edit-only" onclick="removeAllHlsStreams()"
+              title="Delete every HLS stream — playlists and segment files — from disk">✕ Delete all</button>
       <select id="hls-view" onchange="setCardView('hls', this.value, renderHls)" class="am-in" style="width:auto"
               title="How much to show for each stream">
         <option value="condensed">Condensed</option>
@@ -869,7 +871,9 @@
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Live channels</span>
       <button onclick="toggleImportTuner()" id="tuner-toggle" class="edit-only"
               title="Read the channel list off an HDHomeRun tuner">📡 Import from tuner</button>
-      <button onclick="toggleAddChannel()" id="ch-toggle" class="edit-only">+ Add channel</button></h2>
+      <button onclick="toggleAddChannel()" id="ch-toggle" class="edit-only">+ Add channel</button>
+      <button id="ch-clear" class="danger edit-only" onclick="removeAllChannels()"
+              title="Remove every channel — stops each restream and deletes its files">✕ Delete all</button></h2>
     <div id="importtuner" class="edit-only" style="display:none;border:1px solid var(--grid);border-radius:10px;padding:12px;margin-bottom:10px">
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <input id="tuner-host" class="am-in" placeholder="tuner address — 192.168.1.50, or hdhomerun.local"
@@ -4171,6 +4175,38 @@ async function removeChannel(name) {
   refreshChannels(true);
 }
 
+/* Remove every channel. Worth more warning than the HLS equivalent: a
+   stream is a converted copy that can be made again from the file it came
+   from, while a channel is the URL itself — delete a pinned free-TV channel
+   and it has to be found in the lineup and pinned again. Same one-at-a-time
+   reasoning: each removal stops a restream and deletes a directory. */
+async function removeAllChannels() {
+  let names = [];
+  try {
+    const data = await api("/api/channels");
+    names = (data.channels || []).map(c => c.name);
+  } catch { alert("Could not read the channel list."); return; }
+  if (!names.length) { alert("There are no channels to delete."); return; }
+
+  const shown = names.slice(0, 12).join("\n  ");
+  const more = names.length > 12 ? "\n  …and " + (names.length - 12) + " more" : "";
+  if (!confirm("Remove ALL " + names.length + " channel" + (names.length > 1 ? "s" : "") + "?\n\n  "
+      + shown + more
+      + "\n\nEach restream stops and its files are deleted. Pinned free-TV channels"
+      + "\nhave to be found in the lineup and pinned again. This cannot be undone.")) return;
+
+  const failed = [];
+  for (const name of names) {
+    try {
+      const r = await fetch("/api/channels?name=" + encodeURIComponent(name), { method: "DELETE", headers: headers() });
+      if (!r.ok) failed.push(name);
+    } catch { failed.push(name); }
+  }
+  refreshChannels(true);
+  if (failed.length) alert("Removed " + (names.length - failed.length) + " of " + names.length
+    + ".\n\nThese could not be removed:\n  " + failed.join("\n  "));
+}
+
 /* ---- free TV (Pluto TV and playlist providers) ----
    The lineup is a few hundred channels, so it is fetched once per provider
    and filtered in the page: typing in the search box shouldn't cost a round
@@ -4448,6 +4484,34 @@ async function removeHlsStream(name) {
     alert(data.error || "delete failed");
   }
   refreshHls();
+}
+
+/* Delete every stream.
+   The confirmation names the count and lists what is about to go, because
+   "delete all" on a card you have scrolled past is otherwise a decision
+   made blind — and this one reaches the disk. Deletions run one at a time
+   rather than in parallel: the server is removing directories, and a
+   failure part-way should leave a comprehensible half rather than a race. */
+async function removeAllHlsStreams() {
+  const streams = (lastHls && lastHls.streams) ? lastHls.streams.map(s => s.name) : [];
+  if (!streams.length) { alert("There are no HLS streams to delete."); return; }
+
+  const shown = streams.slice(0, 12).join("\n  ");
+  const more = streams.length > 12 ? "\n  …and " + (streams.length - 12) + " more" : "";
+  if (!confirm("Delete ALL " + streams.length + " HLS stream" + (streams.length > 1 ? "s" : "") + "?\n\n  "
+      + shown + more
+      + "\n\nEvery playlist and segment file is removed from disk. This cannot be undone.")) return;
+
+  const failed = [];
+  for (const name of streams) {
+    try {
+      const r = await fetch("/api/hls?stream=" + encodeURIComponent(name), { method: "DELETE", headers: headers() });
+      if (!r.ok) failed.push(name);
+    } catch { failed.push(name); }
+  }
+  refreshHls();
+  if (failed.length) alert("Deleted " + (streams.length - failed.length) + " of " + streams.length
+    + ".\n\nThese could not be removed:\n  " + failed.join("\n  "));
 }
 
 /* ==== pickPath(): reusable drive / folder / file picker =================
