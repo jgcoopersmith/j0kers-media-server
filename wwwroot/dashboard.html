@@ -4195,12 +4195,16 @@ async function removeAllChannels() {
       + "\n\nEach restream stops and its files are deleted. Pinned free-TV channels"
       + "\nhave to be found in the lineup and pinned again. This cannot be undone.")) return;
 
+  // same reasoning as the HLS card: report what the server actually said
   const failed = [];
   for (const name of names) {
     try {
       const r = await fetch("/api/channels?name=" + encodeURIComponent(name), { method: "DELETE", headers: headers() });
-      if (!r.ok) failed.push(name);
-    } catch { failed.push(name); }
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        failed.push(name + " — " + (d.error || ("HTTP " + r.status)));
+      }
+    } catch (e) { failed.push(name + " — " + e.message); }
   }
   refreshChannels(true);
   if (failed.length) alert("Removed " + (names.length - failed.length) + " of " + names.length
@@ -4496,21 +4500,55 @@ async function removeAllHlsStreams() {
   const streams = (lastHls && lastHls.streams) ? lastHls.streams.map(s => s.name) : [];
   if (!streams.length) { alert("There are no HLS streams to delete."); return; }
 
-  const shown = streams.slice(0, 12).join("\n  ");
-  const more = streams.length > 12 ? "\n  …and " + (streams.length - 12) + " more" : "";
-  if (!confirm("Delete ALL " + streams.length + " HLS stream" + (streams.length > 1 ? "s" : "") + "?\n\n  "
-      + shown + more
+  // A live channel's directory is an HLS stream and is listed as one, but it
+  // belongs to the Live channels card: this endpoint refuses it, and deleting
+  // the files under a running restream would achieve nothing anyway — ffmpeg
+  // writes them straight back. Asking which streams are channels beats
+  // guessing from a "ch-" prefix, and beats firing requests that are all
+  // going to be rejected.
+  let owned = new Set();
+  try {
+    const data = await api("/api/channels");
+    owned = new Set((data.channels || []).map(c => c.stream));
+  } catch { /* no list: fall through and let the server speak for itself */ }
+
+  const deletable = streams.filter(n => !owned.has(n));
+  const skipped = streams.filter(n => owned.has(n));
+
+  if (!deletable.length) {
+    alert("Nothing to delete here.\n\nAll " + streams.length
+      + (streams.length > 1 ? " streams are live channels" : " stream is a live channel")
+      + ", which this card cannot remove"
+      + "\n— deleting the files would only make the restream write them again."
+      + "\n\nUse ✕ Delete all on the Live channels card instead.");
+    return;
+  }
+
+  const shown = deletable.slice(0, 12).join("\n  ");
+  const more = deletable.length > 12 ? "\n  …and " + (deletable.length - 12) + " more" : "";
+  const note = skipped.length
+    ? "\n\n" + skipped.length + " live channel" + (skipped.length > 1 ? "s are" : " is")
+      + " left alone — remove those from Live channels."
+    : "";
+  if (!confirm("Delete " + deletable.length + " HLS stream" + (deletable.length > 1 ? "s" : "") + "?\n\n  "
+      + shown + more + note
       + "\n\nEvery playlist and segment file is removed from disk. This cannot be undone.")) return;
 
+  // Keep the server's own words. The first version discarded the response
+  // body and reported a bare "0 of 8", when the server had said exactly why
+  // each one was refused.
   const failed = [];
-  for (const name of streams) {
+  for (const name of deletable) {
     try {
       const r = await fetch("/api/hls?stream=" + encodeURIComponent(name), { method: "DELETE", headers: headers() });
-      if (!r.ok) failed.push(name);
-    } catch { failed.push(name); }
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        failed.push(name + " — " + (d.error || ("HTTP " + r.status)));
+      }
+    } catch (e) { failed.push(name + " — " + e.message); }
   }
   refreshHls();
-  if (failed.length) alert("Deleted " + (streams.length - failed.length) + " of " + streams.length
+  if (failed.length) alert("Deleted " + (deletable.length - failed.length) + " of " + deletable.length
     + ".\n\nThese could not be removed:\n  " + failed.join("\n  "));
 }
 
