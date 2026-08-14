@@ -472,10 +472,25 @@ public sealed class HlsServer : IDisposable
 
     private string ListStreamsJson()
     {
+        // A live channel writes its segments into this same root, so listing
+        // every directory listed the channels too — each one appearing on the
+        // dashboard twice, on the card that owns it and again here, with two
+        // delete buttons meaning different things. This list is the streams
+        // the user prepared; Live channels owns the channels, start to finish.
+        //
+        // Asked of the channel list rather than matched against the "ch-"
+        // prefix ChannelStream() produces: a stream a user named "ch-foo"
+        // themselves is theirs, and should stay here.
+        var channelDirs = new HashSet<string>(
+            (Ffmpeg?.Channels ?? Array.Empty<(Media.FfmpegManager.ChannelDef, string, string)>())
+                .Select(c => c.Item2),
+            StringComparer.OrdinalIgnoreCase);
+
         // dot-directories are internal (.thumbs thumbnail cache), not streams
         var dirs = Directory.Exists(_mediaRoot)
             ? Directory.GetDirectories(_mediaRoot)
                 .Where(d => !Path.GetFileName(d).StartsWith('.'))
+                .Where(d => !channelDirs.Contains(Path.GetFileName(d)))
             : Enumerable.Empty<string>();
         return System.Text.Json.JsonSerializer.Serialize(new
         {

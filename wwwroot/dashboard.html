@@ -2220,8 +2220,6 @@ function renderHls() {
 
   for (const s of hlsInChosenOrder(lastHls.streams)) {
     const url = mediaUrl(s.playlist);
-    // null unless a live channel owns this directory; see channelByStream
-    const chanName = channelByStream.get(s.name) || null;
     // the watch page plays in any browser (phones included); the raw
     // m3u8 is linked from that page for VLC users
     const watchUrl = mediaUrl("/watch/" + encodeURIComponent(s.name));
@@ -2271,10 +2269,7 @@ function renderHls() {
       + '<a href="' + esc(watchUrl) + '" target="_blank" rel="noopener" title="Open the watch page">'
       + esc(s.title || s.name) + '</a>'
       + '<div class="mono" style="color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
-      + esc(s.name)
-      // say what it is, so removing it is not a surprise
-      + (chanName ? ' <span class="badge">live channel</span>' : "")
-      + '</div>'
+      + esc(s.name) + '</div>'
       + convNote
       + (view === "info"
           ? '<div class="mono" style="color:var(--muted);font-size:11px;margin-top:2px;word-break:break-all">'
@@ -2291,16 +2286,7 @@ function renderHls() {
       // page button per address. shareUrl keeps localhost out of it.
       + '<button data-act="copy" data-arg="' + esc(shareUrl(s.playlist))
       + '" title="' + esc("Copy the stream URL for VLC and other players — for a browser page, click the stream's name" + shareHostNote()) + '">Copy</button>'
-      // A row backed by a live channel removes the channel, because that is
-      // the only thing removing it can mean: delete the files alone and the
-      // restream writes them straight back. Refusing the click and pointing
-      // at another card was the wrong answer — a row you can see is a row
-      // whose ✕ should work.
-      + (chanName
-          ? '<button class="danger" title="' + esc('Remove the live channel "' + chanName
-              + '" — stops the restream and deletes its files')
-            + '" data-act="ch-remove" data-arg="' + esc(chanName) + '">✕</button></div>'
-          : '<button class="danger" title="Delete this stream\'s playlist and segments" data-act="hls-remove" data-arg="' + esc(s.name) + '">✕</button></div>');
+      + '<button class="danger" title="Delete this stream\'s playlist and segments" data-act="hls-remove" data-arg="' + esc(s.name) + '">✕</button></div>';
   }
 
   box.className = view === "condensed" ? "tv-grid" : "";
@@ -4102,12 +4088,6 @@ async function submitAddChannel() {
   }
 }
 
-/* stream directory -> live channel name, for every channel that has one.
-   The HLS card lists these directories too — they are HLS streams, and
-   playing them there is perfectly reasonable — so it needs to know which
-   ones are owned by a channel to remove the right thing. */
-let channelByStream = new Map();
-
 let channelsLoaded = 0;
 async function refreshChannels(force) {
   if (!force && Date.now() - channelsLoaded < 10000) return;
@@ -4118,13 +4098,8 @@ async function refreshChannels(force) {
   channelsLoaded = Date.now();
   ffmpegOk = data.ffmpegAvailable;
   $("ffmpeg-warn").style.display = ffmpegOk ? "none" : "block";
-  // Shared with the HLS card, which lists these same directories: knowing
-  // which stream belongs to which channel is what lets its ✕ remove the
-  // right thing instead of refusing.
-  channelByStream = new Map((data.channels || []).map(c => [c.stream, c.name]));
   if (!data.channels.length) {
     $("channels").innerHTML = '<div class="empty">No channels. Add an HDHomeRun tuner URL, IPTV stream, or camera to restream it as HLS.</div>';
-    renderHls();          // rows may have stopped being channels
     return;
   }
   let h = "";
@@ -4506,25 +4481,11 @@ async function removeMount(path) {
 }
 
 async function removeHlsStream(name) {
-  // A channel-backed row routes straight to removing the channel, but the
-  // map can be a poll behind — a channel pinned seconds ago is not in it
-  // yet. Rather than hand back the server's refusal and leave the click
-  // having achieved nothing, do what the click plainly meant.
-  const known = channelByStream.get(name);
-  if (known) { removeChannel(known); return; }
-
   if (!confirm("Delete HLS stream '" + name + "'? Its playlist and segment files are removed from disk.")) return;
   const r = await fetch("/api/hls?stream=" + encodeURIComponent(name), { method: "DELETE", headers: headers() });
   if (!r.ok) {
     const data = await r.json().catch(() => ({}));
-    const err = data.error || "delete failed";
-    // the one refusal that has an obvious next step: take it, don't report it
-    if (/live channel/i.test(err)) {
-      await refreshChannels(true);
-      const chan = channelByStream.get(name);
-      if (chan) { removeChannel(chan); return; }
-    }
-    alert(err);
+    alert(data.error || "delete failed");
   }
   refreshHls();
 }
@@ -4539,53 +4500,26 @@ async function removeAllHlsStreams() {
   const streams = (lastHls && lastHls.streams) ? lastHls.streams.map(s => s.name) : [];
   if (!streams.length) { alert("There are no HLS streams to delete."); return; }
 
-  // A live channel's directory is an HLS stream and is listed as one, but it
-  // belongs to the Live channels card: this endpoint refuses it, and deleting
-  // the files under a running restream would achieve nothing anyway — ffmpeg
-  // writes them straight back. Asking which streams are channels beats
-  // guessing from a "ch-" prefix, and beats firing requests that are all
-  // going to be rejected.
-  let owned = new Map(channelByStream);
-  try {
-    const data = await api("/api/channels");
-    owned = new Map((data.channels || []).map(c => [c.stream, c.name]));
-  } catch { /* keep the cached map: better a slightly stale one than none */ }
-
-  // Delete all means all. A channel-backed row is removed by removing its
-  // channel — the only thing removal can mean for one — so the button clears
-  // the list rather than clearing part of it and explaining the remainder.
-  const plan = streams.map(n => ({ name: n, channel: owned.get(n) || null }));
-  const chans = plan.filter(p => p.channel);
-
   const shown = streams.slice(0, 12).join("\n  ");
   const more = streams.length > 12 ? "\n  …and " + (streams.length - 12) + " more" : "";
-  const note = chans.length
-    ? "\n\n" + chans.length + " of these " + (chans.length > 1 ? "are live channels" : "is a live channel")
-      + " and will be removed from Live channels too,"
-      + "\nstopping " + (chans.length > 1 ? "those restreams" : "that restream") + "."
-    : "";
   if (!confirm("Delete ALL " + streams.length + " HLS stream" + (streams.length > 1 ? "s" : "") + "?\n\n  "
-      + shown + more + note
+      + shown + more
       + "\n\nEvery playlist and segment file is removed from disk. This cannot be undone.")) return;
 
   // Keep the server's own words. An earlier version discarded the response
   // body and reported a bare "0 of 8", when the server had said exactly why
   // each one was refused.
   const failed = [];
-  for (const p of plan) {
-    const url = p.channel
-      ? "/api/channels?name=" + encodeURIComponent(p.channel)
-      : "/api/hls?stream=" + encodeURIComponent(p.name);
+  for (const name of streams) {
     try {
-      const r = await fetch(url, { method: "DELETE", headers: headers() });
+      const r = await fetch("/api/hls?stream=" + encodeURIComponent(name), { method: "DELETE", headers: headers() });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
-        failed.push(p.name + " — " + (d.error || ("HTTP " + r.status)));
+        failed.push(name + " — " + (d.error || ("HTTP " + r.status)));
       }
-    } catch (e) { failed.push(p.name + " — " + e.message); }
+    } catch (e) { failed.push(name + " — " + e.message); }
   }
   refreshHls();
-  if (chans.length) refreshChannels(true);
   if (failed.length) alert("Deleted " + (streams.length - failed.length) + " of " + streams.length
     + ".\n\nThese could not be removed:\n  " + failed.join("\n  "));
 }
