@@ -89,9 +89,83 @@ public sealed partial class ControlApi : IDisposable
         }
     }
 
-    private Dlna.DlnaService NewDlna() => new(
-        _library, _dlnaShare, () => _serverConfig.ServerName,
-        Discovery?.Uuid ?? _serverConfig.Discovery.HostName);
+    private Dlna.DlnaService NewDlna()
+    {
+        var dlna = new Dlna.DlnaService(
+            _library, _dlnaShare, () => _serverConfig.ServerName,
+            Discovery?.Uuid ?? _serverConfig.Discovery.HostName);
+        if (_serverConfig.Discovery.DlnaUseTranscode) dlna.FindTranscode = FullResTranscodeFor;
+        return dlna;
+    }
+
+    /// <summary>
+    /// A finished, full-resolution conversion of a library file, or null.
+    ///
+    /// Full resolution only, and that is the whole point of the check. The
+    /// quality picker produces downscaled conversions —
+    /// <c>vod-dune-720p-…</c> beside a full-size <c>vod-dune-…</c> — and
+    /// handing a 720p copy to a 4K television because it happened to be in
+    /// the cache would quietly cost picture nobody asked to lose. The name
+    /// says which is which by construction: StartVod appends -{height}p only
+    /// when it scaled, and forces height to 0 when the video is copied
+    /// rather than encoded, so no suffix means no scaling.
+    ///
+    /// Unfinished conversions are skipped too: a playlist without
+    /// EXT-X-ENDLIST is still being written, and serving it would hand over
+    /// a film that stops partway with no explanation.
+    /// </summary>
+    private Dlna.DlnaService.Transcode? FullResTranscodeFor(string sourceFile)
+    {
+        try
+        {
+            var mediaRoot = Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
+                ? _serverConfig.Hls.MediaRoot
+                : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
+            if (!Directory.Exists(mediaRoot)) return null;
+
+            foreach (var dir in Directory.EnumerateDirectories(mediaRoot, "vod-*"))
+            {
+                // "vod-dune-720p-a1b2c3d4" was scaled; "vod-dune-a1b2c3d4" was not
+                if (System.Text.RegularExpressions.Regex.IsMatch(
+                        Path.GetFileName(dir), @"-\d+p-[0-9a-f]{8}$")) continue;
+
+                string src;
+                try { src = File.ReadAllText(Path.Combine(dir, "source.txt")).Trim(); }
+                catch { continue; }
+                if (!src.Equals(sourceFile, StringComparison.OrdinalIgnoreCase)) continue;
+
+                var playlist = Path.Combine(dir, "index.m3u8");
+                string text;
+                try { text = File.ReadAllText(playlist); }
+                catch { continue; }
+                if (!text.Contains("#EXT-X-ENDLIST", StringComparison.Ordinal)) continue;  // still converting
+
+                var parts = new List<(string, long)>();
+                long total = 0;
+                // the fMP4 initialisation segment belongs first, or the
+                // fragments after it are not a playable stream
+                var init = Path.Combine(dir, "init.mp4");
+                if (File.Exists(init)) { var l = new FileInfo(init).Length; parts.Add((init, l)); total += l; }
+
+                foreach (var line in text.Split('\n'))
+                {
+                    var name = line.Trim();
+                    if (name.Length == 0 || name[0] == '#') continue;
+                    var seg = Path.Combine(dir, name.Split('?')[0]);
+                    if (!File.Exists(seg)) return null;      // a gap would be a corrupt stream
+                    var len = new FileInfo(seg).Length;
+                    parts.Add((seg, len));
+                    total += len;
+                }
+                if (parts.Count == 0 || total == 0) continue;
+
+                var mp4 = parts[^1].Item1.EndsWith(".m4s", StringComparison.OrdinalIgnoreCase) || File.Exists(init);
+                return new Dlna.DlnaService.Transcode(parts, total, mp4 ? "video/mp4" : "video/mp2t");
+            }
+        }
+        catch (Exception ex) { Log.Debug("dlna", $"could not look for a conversion: {ex.Message}"); }
+        return null;
+    }
 
     /// <summary>Turns DLNA on or off while the server runs; returns what it now is.</summary>
     public bool SetDlna(bool on)
@@ -2524,10 +2598,21 @@ public sealed partial class ControlApi : IDisposable
                     res.Close();
                     return;
                 }
+                // A finished full-resolution conversion, if there is one: the
+                // point of it is a television that cannot decode the original
+                // — an HEVC file, an unfamiliar container — being handed
+                // H.264/AAC instead, at the same picture size.
+                var transcode = dlna.FindTranscode?.Invoke(file);
+
                 // A HEAD is the TV asking how big the file is and whether it
                 // may seek — the same reasoning as an HLS playlist fetch, and
                 // not yet anybody watching. The GET that follows is.
-                if (method == "HEAD") { dlna.ServeFile(ctx, file); return; }
+                if (method == "HEAD")
+                {
+                    if (transcode is not null) dlna.ServeTranscode(ctx, transcode);
+                    else dlna.ServeFile(ctx, file);
+                    return;
+                }
 
                 // The viewing is opened before a byte goes out, so a two-hour
                 // film shows up as a session while it plays rather than when
@@ -2535,7 +2620,7 @@ public sealed partial class ControlApi : IDisposable
                 // somebody presses play, as every other protocol does.
                 var viewing = _services.Viewers.Note(
                     ctx, file, user: null, bytes: 0, create: true, protocol: "dlna", file: file);
-                dlna.ServeFile(ctx, file, sent =>
+                void Sent(long sent)
                 {
                     _services.Served.Add(sent);
                     // the sweep can retire a viewing the TV left paused past
@@ -2543,7 +2628,15 @@ public sealed partial class ControlApi : IDisposable
                     if (!_services.Viewers.Progress(viewing, sent))
                         viewing = _services.Viewers.Note(
                             ctx, file, user: null, bytes: sent, create: true, protocol: "dlna", file: file);
-                });
+                }
+
+                if (transcode is not null)
+                {
+                    Log.Debug("dlna", $"serving the conversion of {Path.GetFileName(file)} " +
+                                      $"({transcode.TotalBytes / (1024 * 1024)} MB, full resolution)");
+                    dlna.ServeTranscode(ctx, transcode, Sent);
+                }
+                else dlna.ServeFile(ctx, file, Sent);
                 return;
             }
 

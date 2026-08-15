@@ -624,4 +624,22 @@ public sealed class DiscoveryConfig
     /// HTTP (no extra port at all), and the control port + 1 once TLS is on.
     /// </summary>
     [JsonPropertyName("dlnaPort")] public int DlnaPort { get; set; }
+
+    /// <summary>
+    /// Hand a television the converted copy of a file when one already
+    /// exists, instead of the original.
+    ///
+    /// The point is a device that cannot decode what is on disk — HEVC, an
+    /// unfamiliar container — being given H.264/AAC instead of failing.
+    /// Only conversions that were never downscaled are used, so the picture
+    /// size is whatever the file had; a 720p copy made for a phone is never
+    /// substituted for the original. Nothing is converted on demand: if
+    /// there is no finished full-resolution copy, the original is served
+    /// exactly as before.
+    ///
+    /// Turn it off to always serve originals — the right answer when every
+    /// device on the network can decode them, since a conversion is still a
+    /// re-encode and re-encoding is never free of quality.
+    /// </summary>
+    [JsonPropertyName("dlnaUseTranscode")] public bool DlnaUseTranscode { get; set; } = true;
 }

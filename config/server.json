@@ -143,6 +143,16 @@
     // cannot do TLS, and DLNA has no sign-in for TLS to protect. Only
     // /dlna/* and the UPnP description are served there; the dashboard, the
     // API and the signed media links stay on the encrypted port.
-    "dlnaPort": 0
+    "dlnaPort": 0,
+
+    // Hand a TV the converted copy of a file when one already exists,
+    // instead of the original. The point is a device that cannot decode
+    // what is on disk — HEVC, an unfamiliar container — being given
+    // H.264/AAC rather than failing. Only conversions that were never
+    // downscaled are used, so the picture size is whatever the file had;
+    // a 720p copy made for a phone is never substituted. Nothing is
+    // converted on demand: with no finished full-size copy, the original
+    // is served exactly as before. Set false to always serve originals.
+    "dlnaUseTranscode": true
   }
 }

@@ -37,6 +37,27 @@ public sealed class DlnaService
     }
 
     /// <summary>
+    /// A finished conversion of one library file, presented as a single
+    /// continuous stream.
+    ///
+    /// The cache is HLS — a playlist and a few hundred segments — and a
+    /// television asking over DLNA wants one file. Nothing needs re-encoding
+    /// to give it one: MPEG-TS was designed to be concatenated, and an fMP4
+    /// initialisation segment followed by its fragments is itself a valid
+    /// fMP4 stream. So the parts are handed over back to back, and the sizes
+    /// are known in advance, which is what keeps byte-range seeking working.
+    /// </summary>
+    public sealed record Transcode(IReadOnlyList<(string Path, long Length)> Parts, long TotalBytes, string ContentType);
+
+    /// <summary>
+    /// Finds a finished conversion for a library file, or null. Set by
+    /// ControlApi, which owns the media root and the conversion cache;
+    /// leaving it null serves originals, which is what happened before this
+    /// existed and remains the behaviour when the option is off.
+    /// </summary>
+    public Func<string, Transcode?>? FindTranscode { get; set; }
+
+    /// <summary>
     /// The folders DLNA may show — the library, narrowed by what has been
     /// shared. Everything here goes through this rather than the library
     /// directly, so a folder that isn't shared is not merely hidden from the
@@ -262,11 +283,19 @@ public sealed class DlnaService
     private static string Container(string id, string parent, string title, int children) =>
         $"""<container id="{id}" parentID="{parent}" restricted="1" childCount="{children}"><dc:title>{title}</dc:title><upnp:class>object.container.storageFolder</upnp:class></container>""";
 
-    private static string Item(string path, string parentId, string baseUrl)
+    private string Item(string path, string parentId, string baseUrl)
     {
         long size;
         try { size = new FileInfo(path).Length; } catch { size = 0; }
         var mime = MimeFor(path);
+
+        // If a conversion of this file is going to be served instead, the
+        // television has to be told that one's size and type: it allocates
+        // its buffer and computes seek offsets from what is advertised here,
+        // so advertising the original's numbers and then sending different
+        // bytes is how a scrubber ends up pointing at the wrong place.
+        var tr = FindTranscode?.Invoke(path);
+        if (tr is not null) { size = tr.TotalBytes; mime = tr.ContentType; }
         var url = $"{baseUrl}/dlna/file?id={Encode(path)}";
         // DLNA.ORG_OP=01 advertises byte-range seeking, which is what lets a
         // TV scrub through a film instead of only playing it from the start
@@ -467,6 +496,94 @@ public sealed class DlnaService
     /// the whole film — often hours long — so nothing reported until it
     /// finishes would mean nothing reported at all while it matters.
     /// </param>
+    /// <summary>
+    /// Streams a conversion's segments as one continuous file, honouring
+    /// byte ranges across the seam between them.
+    ///
+    /// The sizes are all known before a byte is sent, so a range maps onto
+    /// "skip whole segments, then an offset into the one the range starts
+    /// in" — which is what lets a television scrub through a conversion it
+    /// is being handed as a single file.
+    /// </summary>
+    public void ServeTranscode(HttpListenerContext ctx, Transcode tr, Action<long>? onBytes = null)
+    {
+        var res = ctx.Response;
+        var total = tr.TotalBytes;
+        long from = 0, to = total - 1;
+        var partial = false;
+
+        var range = ctx.Request.Headers["Range"];
+        if (!string.IsNullOrEmpty(range) && range.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase))
+        {
+            var span = range["bytes=".Length..].Split(',')[0].Split('-');
+            if (span.Length == 2)
+            {
+                var hasFrom = long.TryParse(span[0], out var f);
+                var hasTo = long.TryParse(span[1], out var t);
+                if (hasFrom) { from = f; if (hasTo) to = t; }
+                else if (hasTo) { from = Math.Max(0, total - t); }
+                partial = hasFrom || hasTo;
+            }
+            if (from >= total || from < 0 || to < from)
+            {
+                res.StatusCode = 416;
+                res.Headers["Content-Range"] = $"bytes */{total}";
+                res.Close();
+                return;
+            }
+            if (to > total - 1) to = total - 1;
+        }
+
+        var count = to - from + 1;
+        res.StatusCode = partial ? 206 : 200;
+        res.ContentType = tr.ContentType;
+        res.ContentLength64 = count;
+        res.Headers["Accept-Ranges"] = "bytes";
+        res.Headers["transferMode.dlna.org"] = "Streaming";
+        res.Headers["contentFeatures.dlna.org"] = "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
+        if (partial) res.Headers["Content-Range"] = $"bytes {from}-{to}/{total}";
+        if (ctx.Request.HttpMethod == "HEAD") { res.Close(); return; }
+
+        long pending = 0;
+        try
+        {
+            var buffer = new byte[64 * 1024];
+            long cursor = 0;                       // where this part begins in the whole
+            foreach (var (path, length) in tr.Parts)
+            {
+                if (count <= 0) break;
+                var partEnd = cursor + length;
+                if (partEnd <= from) { cursor = partEnd; continue; }   // entirely before the range
+
+                var skip = Math.Max(0, from - cursor);                 // offset into this part
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 64 * 1024);
+                if (skip > 0) fs.Seek(skip, SeekOrigin.Begin);
+                var remainingHere = length - skip;
+
+                while (remainingHere > 0 && count > 0)
+                {
+                    var want = (int)Math.Min(buffer.Length, Math.Min(remainingHere, count));
+                    var read = fs.Read(buffer, 0, want);
+                    if (read <= 0) break;
+                    res.OutputStream.Write(buffer, 0, read);
+                    remainingHere -= read;
+                    count -= read;
+                    pending += read;
+                    if (onBytes is not null && pending >= 1024 * 1024) { onBytes(pending); pending = 0; }
+                }
+                cursor = partEnd;
+            }
+        }
+        catch (HttpListenerException) { /* the TV stopped or seeked away */ }
+        catch (IOException) { }
+        catch (Exception ex) { Log.Debug("dlna", $"serving a conversion failed: {ex.Message}"); }
+        finally
+        {
+            if (onBytes is not null && pending > 0) { try { onBytes(pending); } catch { } }
+            try { res.Close(); } catch { }
+        }
+    }
+
     public void ServeFile(HttpListenerContext ctx, string path, Action<long>? onBytes = null)
     {
         var res = ctx.Response;
