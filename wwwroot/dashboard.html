@@ -563,15 +563,17 @@
     border-color: color-mix(in srgb, var(--critical) 45%, transparent);
   }
 
-  /* the channels card reorders the same way; one set of rules for both */
-  .ch-item.dragging { opacity: .45; }
-  .ch-item.drop-above { box-shadow: 0 -3px 0 -1px var(--series-1); }
-  .ch-item.drop-below { box-shadow: 0 3px 0 -1px var(--series-1); }
-  .ch-grip, .hls-grip {
+  /* channels and mounts reorder the same way; one set of rules for all */
+  .ch-item.dragging, .mnt-item.dragging { opacity: .45; }
+  .ch-item.drop-above, .mnt-item.drop-above { box-shadow: 0 -3px 0 -1px var(--series-1); }
+  .ch-item.drop-below, .mnt-item.drop-below { box-shadow: 0 3px 0 -1px var(--series-1); }
+  .tv-grid .mnt-item.drop-above { box-shadow: -3px 0 0 -1px var(--series-1); }
+  .tv-grid .mnt-item.drop-below { box-shadow: 3px 0 0 -1px var(--series-1); }
+  .mnt-grip, .ch-grip, .hls-grip {
     cursor: grab; color: var(--muted); user-select: none; font-size: 13px;
     padding: 0 2px; flex: 0 0 auto; align-self: center;
   }
-  .ch-grip:active, .hls-grip:active { cursor: grabbing; }
+  .mnt-grip:active, .ch-grip:active, .hls-grip:active { cursor: grabbing; }
   .hls-item.dragging { opacity: .45; }
   .hls-item.drop-above { box-shadow: 0 -3px 0 -1px var(--series-1); }
   .hls-item.drop-below { box-shadow: 0 3px 0 -1px var(--series-1); }
@@ -1997,15 +1999,18 @@ let lastMounts = null;
 /* Kept apart from the fetch so switching view doesn't re-hit the API. */
 function renderMounts() {
   if (!lastMounts) return;
+  // a poll landing mid-drag would rebuild the rows and drop what is in the
+  // air; the drag's end spends this and redraws once it is safe
+  if (draggingHls) { hlsRenderDeferred = true; return; }
   const view = cardView("mounts");
   const uriOf = m => "rtsp://" + location.hostname + ":" + rtspPort + m.path;
   let h = "";
 
-  for (const m of lastMounts.mounts) {
+  for (const m of inChosenOrder(REORDER.mnt, lastMounts.mounts, m => m.path)) {
     const uri = uriOf(m);
     if (view === "condensed") {
       // the path is the mount's identity; the full URI is a click away on Copy
-      h += '<div class="tv-tile">'
+      h += '<div class="tv-tile mnt-item" draggable="true" data-mnt-name="' + esc(m.path) + '">'
         + '<span class="mono" style="flex:1;min-width:0;color:var(--ink);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
         + esc(m.path) + '</span>'
         + '<button data-preview="' + esc(m.path) + '" data-act="preview" title="Play">▶</button>'
@@ -2021,8 +2026,10 @@ function renderMounts() {
       : '<div style="color:var(--muted);font-size:12px">' + esc(m.source)
         + (m.description ? " · " + esc(m.description) : "") + (m.dynamic ? " · added via dashboard" : "") + '</div>';
 
-    h += '<div style="display:flex;align-items:' + (view === "info" ? "flex-start" : "center")
+    h += '<div class="mnt-item" data-mnt-name="' + esc(m.path) + '" style="display:flex;align-items:'
+      + (view === "info" ? "flex-start" : "center")
       + ';gap:8px;padding:' + (view === "info" ? "10px" : "7px") + ' 0;border-bottom:1px solid var(--grid)">'
+      + '<span class="mnt-grip" title="Drag to reorder">⠿</span>'
       + '<div style="flex:1;min-width:0"><div class="mono" style="color:var(--ink)">' + esc(uri) + '</div>'
       + detail + '</div>'
       + '<button data-preview="' + esc(m.path) + '" data-act="preview">▶ Play</button>'
@@ -2035,6 +2042,7 @@ function renderMounts() {
   const box = $("mounts");
   box.className = view === "condensed" ? "tv-grid" : "";
   box.innerHTML = h || '<div class="empty">No mounts configured.</div>';
+  wireHlsDrag(box, REORDER.mnt);
 
   // outside the grid, so it doesn't become a tile
   if (lastMounts.announcementService && view !== "condensed") {
@@ -2340,9 +2348,11 @@ function renderHls() {
    keeps its own remembered order; a drag in one is not a drag in the other. */
 const REORDER = {
   hls: { key: "j0kers-hls-order", item: ".hls-item", grip: ".hls-grip",
-         attr: "hlsName", redraw: () => renderHls() },
+         attr: "hlsName", nameSel: "[data-hls-name]", redraw: () => renderHls() },
   ch:  { key: "j0kers-channel-order", item: ".ch-item", grip: ".ch-grip",
-         attr: "chName", redraw: () => refreshChannels(true) },
+         attr: "chName", nameSel: "[data-ch-name]", redraw: () => refreshChannels(true) },
+  mnt: { key: "j0kers-mount-order", item: ".mnt-item", grip: ".mnt-grip",
+         attr: "mntName", nameSel: "[data-mnt-name]", redraw: () => renderMounts() },
 };
 
 const HLS_ORDER_KEY = REORDER.hls.key;
@@ -2370,8 +2380,7 @@ function hlsInChosenOrder(streams) {
 }
 
 function saveOrder(cfg, box) {
-  const names = [...box.querySelectorAll("[data-" + (cfg.attr === "hlsName" ? "hls-name" : "ch-name") + "]")]
-    .map(e => e.dataset[cfg.attr]);
+  const names = [...box.querySelectorAll(cfg.nameSel)].map(e => e.dataset[cfg.attr]);
   try { localStorage.setItem(cfg.key, JSON.stringify(names)); } catch {}
 }
 
