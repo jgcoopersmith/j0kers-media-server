@@ -541,11 +541,15 @@
   .card.drop-below { box-shadow: 0 3px 0 -1px var(--series-1); }
 
   /* ---- putting the HLS streams in your own order ---- */
-  .hls-grip {
+  /* the channels card reorders the same way; one set of rules for both */
+  .ch-item.dragging { opacity: .45; }
+  .ch-item.drop-above { box-shadow: 0 -3px 0 -1px var(--series-1); }
+  .ch-item.drop-below { box-shadow: 0 3px 0 -1px var(--series-1); }
+  .ch-grip, .hls-grip {
     cursor: grab; color: var(--muted); user-select: none; font-size: 13px;
     padding: 0 2px; flex: 0 0 auto; align-self: center;
   }
-  .hls-grip:active { cursor: grabbing; }
+  .ch-grip:active, .hls-grip:active { cursor: grabbing; }
   .hls-item.dragging { opacity: .45; }
   .hls-item.drop-above { box-shadow: 0 -3px 0 -1px var(--series-1); }
   .hls-item.drop-below { box-shadow: 0 3px 0 -1px var(--series-1); }
@@ -2303,38 +2307,55 @@ function renderHls() {
    The stored list is names, not positions, so a stream that appears or
    disappears doesn't shuffle everything else. Anything not in it — a new
    stream — sorts after what is, in the server's order. */
-const HLS_ORDER_KEY = "j0kers-hls-order";
+/* Two cards reorder this way now — HLS streams and Live channels — so the
+   machinery is described once and told which card it is working on. Each
+   keeps its own remembered order; a drag in one is not a drag in the other. */
+const REORDER = {
+  hls: { key: "j0kers-hls-order", item: ".hls-item", grip: ".hls-grip",
+         attr: "hlsName", redraw: () => renderHls() },
+  ch:  { key: "j0kers-channel-order", item: ".ch-item", grip: ".ch-grip",
+         attr: "chName", redraw: () => refreshChannels(true) },
+};
 
-function hlsOrder() {
-  try { return JSON.parse(localStorage.getItem(HLS_ORDER_KEY) || "[]"); } catch { return []; }
+const HLS_ORDER_KEY = REORDER.hls.key;
+
+function savedOrder(cfg) {
+  try { return JSON.parse(localStorage.getItem(cfg.key) || "[]"); } catch { return []; }
 }
 
-function hlsInChosenOrder(streams) {
-  const order = hlsOrder();
-  if (!order.length) return streams;
-  const rank = new Map(order.map((n, i) => [n.toLowerCase(), i]));
-  // a stable sort, so unknown streams keep the order the server gave them
-  return streams.map((s, i) => ({ s, i }))
-    .sort((a, b) => {
-      const ra = rank.has(a.s.name.toLowerCase()) ? rank.get(a.s.name.toLowerCase()) : Infinity;
-      const rb = rank.has(b.s.name.toLowerCase()) ? rank.get(b.s.name.toLowerCase()) : Infinity;
-      return ra === rb ? a.i - b.i : ra - rb;
-    })
+/* Sorts by the remembered order. The stored list is names, not positions, so
+   an item appearing or disappearing doesn't shuffle everything else, and a
+   stable sort leaves anything unknown — something new — in the order the
+   server gave it, after what is known. */
+function inChosenOrder(cfg, items, nameOf) {
+  const order = savedOrder(cfg);
+  if (!order.length) return items;
+  const rank = new Map(order.map((n, i) => [String(n).toLowerCase(), i]));
+  const at = x => rank.has(nameOf(x).toLowerCase()) ? rank.get(nameOf(x).toLowerCase()) : Infinity;
+  return items.map((s, i) => ({ s, i }))
+    .sort((a, b) => { const ra = at(a.s), rb = at(b.s); return ra === rb ? a.i - b.i : ra - rb; })
     .map(x => x.s);
 }
 
-function saveHlsOrder(box) {
-  const names = [...box.querySelectorAll("[data-hls-name]")].map(e => e.dataset.hlsName);
-  try { localStorage.setItem(HLS_ORDER_KEY, JSON.stringify(names)); } catch {}
+function hlsInChosenOrder(streams) {
+  return inChosenOrder(REORDER.hls, streams, s => s.name);
 }
 
+function saveOrder(cfg, box) {
+  const names = [...box.querySelectorAll("[data-" + (cfg.attr === "hlsName" ? "hls-name" : "ch-name") + "]")]
+    .map(e => e.dataset[cfg.attr]);
+  try { localStorage.setItem(cfg.key, JSON.stringify(names)); } catch {}
+}
+
+// only one drag is ever in the air, so one variable serves both cards
 let draggingHls = null;
 // set when a poll wanted to redraw during a drag; spent when the drag ends
 let hlsRenderDeferred = false;
 
-function wireHlsDrag(box) {
-  for (const item of box.querySelectorAll(".hls-item")) {
-    const grip = item.querySelector(".hls-grip");
+function wireHlsDrag(box, cfg) {
+  cfg = cfg || REORDER.hls;
+  for (const item of box.querySelectorAll(cfg.item)) {
+    const grip = item.querySelector(cfg.grip);
     // rows are armed by their grip; a tile is its own handle
     if (grip) {
       grip.addEventListener("mousedown", () => { item.draggable = true; });
@@ -2346,7 +2367,7 @@ function wireHlsDrag(box) {
       item.classList.add("dragging");
       if (e.dataTransfer) {
         e.dataTransfer.effectAllowed = "move";
-        try { e.dataTransfer.setData("text/plain", item.dataset.hlsName); } catch {}
+        try { e.dataTransfer.setData("text/plain", item.dataset[cfg.attr]); } catch {}
       }
       e.stopPropagation();   // reordering a stream is not moving the card
     });
@@ -2355,10 +2376,10 @@ function wireHlsDrag(box) {
       item.classList.remove("dragging");
       if (grip) item.draggable = false;
       draggingHls = null;
-      clearHlsMarks(box);
-      saveHlsOrder(box);
+      clearHlsMarks(box, cfg);
+      saveOrder(cfg, box);
       // a poll asked for a redraw while this was in the air
-      if (hlsRenderDeferred) renderHls();
+      if (hlsRenderDeferred) { hlsRenderDeferred = false; cfg.redraw(); }
     });
 
     item.addEventListener("dragover", e => {
@@ -2366,7 +2387,7 @@ function wireHlsDrag(box) {
       e.preventDefault();
       e.stopPropagation();
       if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-      clearHlsMarks(box);
+      clearHlsMarks(box, cfg);
       item.classList.add(beforeHls(item, e) ? "drop-above" : "drop-below");
     });
 
@@ -2377,8 +2398,8 @@ function wireHlsDrag(box) {
       e.preventDefault();
       e.stopPropagation();
       box.insertBefore(draggingHls, beforeHls(item, e) ? item : item.nextSibling);
-      clearHlsMarks(box);
-      saveHlsOrder(box);
+      clearHlsMarks(box, cfg);
+      saveOrder(cfg, box);
     });
   }
 }
@@ -2392,8 +2413,8 @@ function beforeHls(item, e) {
     : e.clientY < box.top + box.height / 2;
 }
 
-function clearHlsMarks(box) {
-  for (const i of box.querySelectorAll(".hls-item"))
+function clearHlsMarks(box, cfg) {
+  for (const i of box.querySelectorAll((cfg || REORDER.hls).item))
     i.classList.remove("drop-above", "drop-below");
 }
 
@@ -4096,6 +4117,9 @@ async function refreshChannels(force) {
   try {
     data = await api("/api/channels");
   } catch { return; }
+  // a poll landing mid-drag would rebuild the rows and drop what is in the
+  // air; the drag's end spends this and redraws once it is safe
+  if (draggingHls) { hlsRenderDeferred = true; return; }
   channelsLoaded = Date.now();
   ffmpegOk = data.ffmpegAvailable;
   $("ffmpeg-warn").style.display = ffmpegOk ? "none" : "block";
@@ -4104,7 +4128,7 @@ async function refreshChannels(force) {
     return;
   }
   let h = "";
-  for (const c of data.channels) {
+  for (const c of inChosenOrder(REORDER.ch, data.channels, c => c.name)) {
     const url = mediaUrl("/" + c.stream + "/index.m3u8");
     // Play is for this page, so it may say localhost; Copy is for somewhere
     // else — VLC, a phone, another PC — and a localhost URL pasted there
@@ -4115,7 +4139,9 @@ async function refreshChannels(force) {
     // idle = saved but never started (a fresh pin). It has no playlist on
     // disk yet, so offering Play would just fail — offer Start instead.
     const idle = c.status === "idle";
-    h += '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
+    h += '<div class="ch-item" data-ch-name="' + esc(c.name) + '" style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
+      // a row is mostly buttons, so the drag needs a handle of its own
+      + '<span class="ch-grip" title="Drag to reorder">⠿</span>'
       + '<span class="state ' + (live ? "playing" : "ready") + '"><span class="dot"></span></span>'
       + '<div style="flex:1;min-width:0"><div style="color:var(--ink)">' + esc(c.name) + '</div>'
       + '<div class="mono" style="color:var(--muted);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(c.url) + ' · ' + esc(c.status) + '</div></div>'
@@ -4150,6 +4176,7 @@ async function refreshChannels(force) {
       + '</div>';
   }
   $("channels").innerHTML = h;
+  wireHlsDrag($("channels"), REORDER.ch);
 }
 
 async function restartChannel(name) {
