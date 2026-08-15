@@ -43,6 +43,11 @@ public sealed partial class ControlApi : IDisposable
 
     private RtspServer? RtspServer => _services.Rtsp;
     private readonly Media.PlaylistStore _playlists;
+    /// <summary>Which conversions are listed; see StreamLinks. Removing a link keeps the files.</summary>
+    private readonly Media.StreamLinks _links;
+
+    /// <summary>The same store, for the HLS server to filter its listing by.</summary>
+    public Media.StreamLinks Listed => _links;
     private readonly Media.LibraryStore _library;
     private readonly Media.FavoritesStore _favorites;
     private readonly Media.WatchHistory _history;
@@ -205,6 +210,7 @@ public sealed partial class ControlApi : IDisposable
         _requestShutdown = requestShutdown;
         _playlists = new Media.PlaylistStore(baseDirectory);
         _library = new Media.LibraryStore(baseDirectory);
+        _links = new Media.StreamLinks(baseDirectory);
         _favorites = new Media.FavoritesStore(baseDirectory);
         _history = new Media.WatchHistory(baseDirectory);
         _dlnaShare = new Dlna.DlnaShare(baseDirectory);
@@ -502,7 +508,7 @@ public sealed partial class ControlApi : IDisposable
         // adding or removing what the server offers; listing it stays Read
         if (method is "POST" or "PUT" or "DELETE"
             && path is "/api/mounts" or "/api/channels" or "/api/library"
-                or "/api/favorites" or "/api/playlists" or "/api/hls")
+                or "/api/favorites" or "/api/playlists" or "/api/hls" or "/api/hls/retranscode")
             return AccessLevel.Edit;
 
         // cutting off somebody else's stream is an operator action
@@ -1430,6 +1436,52 @@ public sealed partial class ControlApi : IDisposable
                 return;
             }
 
+            // Convert this media again from scratch: for a conversion that
+            // came out wrong, or one made before the codec settings changed.
+            // Unlinking keeps a conversion precisely because rebuilding it
+            // would produce the same bytes — this is the case where that is
+            // not true and the old one has to go.
+            if (method == "POST" && path == "/api/hls/retranscode")
+            {
+                var stream = ctx.Request.QueryString["stream"] ?? "";
+                if (stream.Length == 0 || stream.Contains("..") || stream.Contains('/') || stream.Contains('\\'))
+                {
+                    WriteJson(res, 400, new { error = "invalid stream name" });
+                    return;
+                }
+                var root = Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
+                    ? _serverConfig.Hls.MediaRoot
+                    : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
+                var sdir = Path.GetFullPath(Path.Combine(root, stream));
+                if (!sdir.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                    || !Directory.Exists(sdir))
+                {
+                    WriteJson(res, 404, new { error = "unknown stream" });
+                    return;
+                }
+                // the source is only knowable from inside the directory, so
+                // read it before the directory is removed
+                string source;
+                try { source = File.ReadAllText(Path.Combine(sdir, "source.txt")).Trim(); }
+                catch { source = ""; }
+                if (source.Length == 0 || !File.Exists(source))
+                {
+                    WriteJson(res, 400, new
+                    {
+                        error = "this stream has no source file on record, so it cannot be rebuilt — "
+                              + "removing it would lose it for good",
+                    });
+                    return;
+                }
+
+                _ffmpeg?.DiscardVod(stream);
+                var (rebuilt, ready) = _ffmpeg?.StartVod(source) ?? (stream, false);
+                _links.Show(rebuilt);
+                Log.Info("control", $"retranscoding {stream} from {Path.GetFileName(source)}");
+                WriteJson(res, 200, new { stream = rebuilt, ready });
+                return;
+            }
+
             if (method == "DELETE" && path.StartsWith("/api/sessions/", StringComparison.Ordinal))
             {
                 var id = path["/api/sessions/".Length..];
@@ -1808,7 +1860,25 @@ public sealed partial class ControlApi : IDisposable
             return;
         }
 
-        // a still-running conversion holds the files open — stop it first
+        // Unlink, don't delete. The conversion is expensive and the file it
+        // came from has not changed, so throwing it away means running the
+        // identical job again the next time anyone plays that media. The row
+        // goes; the directory stays, and StartVod re-links it. The LRU cap
+        // (ffmpeg.vodCacheMaxGb) reclaims the disk when it needs to, and an
+        // unlinked conversion is the right thing for it to evict first.
+        //
+        // Except when there is nothing to keep: a conversion still running
+        // is a part-finished directory, so that one is cancelled and removed
+        // as it always was.
+        var running = _ffmpeg?.VodInProgress(name) == true;
+        if (!running)
+        {
+            _links.Hide(name);
+            Log.Info("control", $"HLS stream unlinked (conversion kept): {name}");
+            WriteJson(res, 200, new { removed = name, kept = true });
+            return;
+        }
+
         if (_ffmpeg?.CancelVod(name) == true)
             Thread.Sleep(300); // give the killed process a moment to release handles
 
@@ -1817,7 +1887,8 @@ public sealed partial class ControlApi : IDisposable
             try
             {
                 Directory.Delete(dir, recursive: true);
-                Log.Info("control", $"HLS stream removed via dashboard: {name}");
+                _links.Forget(name);
+                Log.Info("control", $"unfinished conversion cancelled and removed: {name}");
                 WriteJson(res, 200, new { removed = name });
                 return;
             }
@@ -2222,6 +2293,10 @@ public sealed partial class ControlApi : IDisposable
             }
             if (DenyUnshared(ctx, auth, file)) return;
             var (stream, ready) = _ffmpeg.StartVod(file, height);
+            // Playing it is what re-links it. An unlinked conversion is still
+            // on disk, so asking for this media again brings the row back
+            // with the work already done — no separate "restore" to find.
+            _links.Show(stream);
             // Deliberately not history: preparing a stream is not watching
             // it, and adding one to the HLS list would otherwise show up as
             // watched before anyone pressed play. The viewing that may follow

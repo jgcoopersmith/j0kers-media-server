@@ -334,6 +334,10 @@ try
         control = new ControlApi(config, services, baseDirectory, auth, mediaLinks, ffmpeg,
             requestShutdown: () => shutdown.TrySetResult());
         services.OnHlsActivity = control.NoteActivity; // streaming keeps the server up
+        // Unlinked conversions stay on disk but leave the listing; the HLS
+        // server does the filtering and the control API owns the store.
+        services.Listed = control.Listed;
+        if (services.Hls is not null) services.Hls.Listed = control.Listed;
         control.Start();
 
         // Now that this server answers, the channels that were running when

@@ -29,6 +29,9 @@ public sealed class ServiceController : IDisposable
 
     /// <summary>Signed-URL verifier and session lookup, handed to each media server it starts.</summary>
     public Auth.MediaLink? Links { get; set; }
+
+    /// <summary>Which conversions the HLS list shows; see Media.StreamLinks.</summary>
+    public Media.StreamLinks? Listed { get; set; }
     public Auth.AuthService? Sessions { get; set; }
 
     /// <summary>
@@ -82,6 +85,7 @@ public sealed class ServiceController : IDisposable
                     Ffmpeg = Ffmpeg,
                     OnActivity = _onHlsActivity,
                     Links = Links,
+                    Listed = Listed,
                     Sessions = Sessions,
                     Viewers = Viewers,
                     Served = Served,

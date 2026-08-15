@@ -2286,7 +2286,8 @@ function renderHls() {
       // page button per address. shareUrl keeps localhost out of it.
       + '<button data-act="copy" data-arg="' + esc(shareUrl(s.playlist))
       + '" title="' + esc("Copy the stream URL for VLC and other players — for a browser page, click the stream's name" + shareHostNote()) + '">Copy</button>'
-      + '<button class="danger" title="Delete this stream\'s playlist and segments" data-act="hls-remove" data-arg="' + esc(s.name) + '">✕</button></div>';
+      + '<button class="edit-only" title="Convert this media again from scratch — for a conversion made before the codec settings changed, or one that came out wrong" data-act="hls-retrans" data-arg="' + esc(s.name) + '">↻</button>'
+      + '<button class="danger" title="Remove this from the list. The conversion stays on disk, so playing this media again brings it straight back." data-act="hls-remove" data-arg="' + esc(s.name) + '">✕</button></div>';
   }
 
   box.className = view === "condensed" ? "tv-grid" : "";
@@ -4481,12 +4482,32 @@ async function removeMount(path) {
 }
 
 async function removeHlsStream(name) {
-  if (!confirm("Delete HLS stream '" + name + "'? Its playlist and segment files are removed from disk.")) return;
+  if (!confirm("Remove '" + name + "' from the list?"
+      + "\n\nThe conversion stays on disk, so playing this media again brings it"
+      + "\nback without converting it a second time.")) return;
   const r = await fetch("/api/hls?stream=" + encodeURIComponent(name), { method: "DELETE", headers: headers() });
   if (!r.ok) {
     const data = await r.json().catch(() => ({}));
     alert(data.error || "delete failed");
   }
+  refreshHls();
+}
+
+/* Convert this media again from scratch.
+   Unlinking keeps a conversion precisely because rebuilding it would
+   produce the same bytes. This is the case where that is not true — the
+   codec settings changed, or the conversion came out wrong — so the old
+   one is thrown away and the job runs again. */
+async function retranscodeStream(name) {
+  if (!confirm("Convert '" + name + "' again from scratch?" +
+      "\n\nThe existing conversion is deleted and rebuilt from the original" +
+      "\nfile. It will be unavailable until the conversion finishes.")) return;
+  try {
+    const r = await fetch("/api/hls/retranscode?stream=" + encodeURIComponent(name),
+                          { method: "POST", headers: headers() });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { alert(d.error || ("retranscode failed: HTTP " + r.status)); return; }
+  } catch (e) { alert("retranscode failed: " + e.message); return; }
   refreshHls();
 }
 
@@ -4504,7 +4525,8 @@ async function removeAllHlsStreams() {
   const more = streams.length > 12 ? "\n  …and " + (streams.length - 12) + " more" : "";
   if (!confirm("Delete ALL " + streams.length + " HLS stream" + (streams.length > 1 ? "s" : "") + "?\n\n  "
       + shown + more
-      + "\n\nEvery playlist and segment file is removed from disk. This cannot be undone.")) return;
+      + "\n\nThe conversions stay on disk — playing any of these again brings it"
+      + "\nstraight back. Space is reclaimed by the cache limit as it is needed.")) return;
 
   // Keep the server's own words. An earlier version discarded the response
   // body and reported a bare "0 of 8", when the server had said exactly why
@@ -4698,6 +4720,7 @@ document.addEventListener("click", e => {
     case "hls-stop":    stopHlsVideo(); break;
     case "session-kill": killSession(arg); break;
     case "hls-remove":  removeHlsStream(arg); break;
+    case "hls-retrans": retranscodeStream(arg); break;
     case "ch-restart":  restartChannel(arg); break;
     case "ch-start":    startChannel(arg); break;
     case "ch-stop":     stopChannel(arg); break;

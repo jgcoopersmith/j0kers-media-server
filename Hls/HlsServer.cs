@@ -491,6 +491,8 @@ public sealed class HlsServer : IDisposable
             ? Directory.GetDirectories(_mediaRoot)
                 .Where(d => !Path.GetFileName(d).StartsWith('.'))
                 .Where(d => !channelDirs.Contains(Path.GetFileName(d)))
+                // unlinked: the conversion is kept, the row is not shown
+                .Where(d => Listed?.IsHidden(Path.GetFileName(d)) != true)
             : Enumerable.Empty<string>();
         return System.Text.Json.JsonSerializer.Serialize(new
         {
@@ -536,6 +538,16 @@ public sealed class HlsServer : IDisposable
 
     /// <summary>Set by Program so streams can render their own poster frame.</summary>
     public Media.FfmpegManager? Ffmpeg { get; set; }
+
+    /// <summary>
+    /// Which converted streams have been unlinked. Their directories stay on
+    /// disk — playing that media again re-links them rather than converting
+    /// it a second time — but they are not listed until then.
+    ///
+    /// Named for what it holds rather than "Links", which on this class is
+    /// already the signer for share URLs and means something else entirely.
+    /// </summary>
+    public Media.StreamLinks? Listed { get; set; }
 
     /// <summary>Raised on every request so a pending shutdown can be cancelled.</summary>
     public Action? OnActivity { get; set; }

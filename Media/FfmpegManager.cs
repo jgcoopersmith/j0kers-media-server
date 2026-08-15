@@ -595,6 +595,49 @@ public sealed class FfmpegManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// Whether a conversion of this stream is running now. The difference
+    /// between a directory worth keeping and a part-finished one: unlinking
+    /// preserves the first, and the second has nothing to preserve.
+    /// </summary>
+    public bool VodInProgress(string stream)
+    {
+        lock (_lock)
+        {
+            if (!_vodJobs.TryGetValue(stream, out var p)) return false;
+            try { return !p.HasExited; } catch { return false; }
+        }
+    }
+
+    /// <summary>
+    /// Throws away a finished conversion so the next play rebuilds it —
+    /// what the dashboard's Retranscode offers. Used when the result is
+    /// wrong rather than merely unwanted: a conversion made with codec
+    /// settings since changed, or one that came out broken.
+    /// </summary>
+    public bool DiscardVod(string stream)
+    {
+        lock (_lock)
+        {
+            if (_vodJobs.TryGetValue(stream, out var p))
+            {
+                try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
+                _vodJobs.Remove(stream);
+            }
+        }
+        var dir = Path.Combine(_mediaRoot, stream);
+        if (!Directory.Exists(dir)) return false;
+        // the source pointer is what lets the caller rebuild, so read it
+        // before the directory it lives in goes
+        for (var attempt = 0; ; attempt++)
+        {
+            try { Directory.Delete(dir, recursive: true); return true; }
+            catch (IOException) when (attempt < 5) { Thread.Sleep(200); }
+            catch (UnauthorizedAccessException) when (attempt < 5) { Thread.Sleep(200); }
+            catch { return false; }
+        }
+    }
+
     /// <summary>Kills a running conversion (e.g. before deleting its stream). True if one was running.</summary>
     public bool CancelVod(string stream)
     {
