@@ -424,6 +424,22 @@ public sealed class FfmpegManager : IDisposable
                 args.AddRange(new[] { "-c:v", VideoEncoder });
                 args.AddRange(VideoQualityArgs());
                 args.AddRange(new[] { "-pix_fmt", "yuv420p" });
+                // A keyframe every segment, so a seek lands where it was aimed.
+                //
+                // Left to itself the encoder puts keyframes where scenes
+                // change, and ffmpeg can only cut a segment at one — asking
+                // for 6-second segments produced 3.4s, 8.7s and 13.8s in the
+                // same film. Seeking snaps to those boundaries, so how far a
+                // skip moves depends on how the film happens to be cut, and
+                // differs from one title to the next. Forcing the interval
+                // makes every segment the length it says and every seek
+                // land within it.
+                //
+                // sc_threshold 0 stops the encoder adding extra keyframes at
+                // scene changes on top of these, which would otherwise put
+                // the segment lengths back where they were.
+                args.AddRange(new[] { "-force_key_frames", $"expr:gte(t,n_forced*{VodSegmentSeconds})",
+                                      "-sc_threshold", "0" });
             }
             args.AddRange(AudioEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase)
                 ? new[] { "-c:a", "copy" }
@@ -431,7 +447,7 @@ public sealed class FfmpegManager : IDisposable
 
             var fmp4 = NeedsFmp4(info.FullName);
             var segExt = fmp4 ? "m4s" : "ts";
-            args.AddRange(new[] { "-f", "hls", "-hls_time", "6", "-hls_list_size", "0",
+            args.AddRange(new[] { "-f", "hls", "-hls_time", Inv(VodSegmentSeconds), "-hls_list_size", "0",
                                   "-hls_playlist_type", "event" });
             // keep the init filename relative so the EXT-X-MAP URI stays fetchable
             if (fmp4) args.AddRange(new[] { "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4" });
@@ -774,6 +790,15 @@ public sealed class FfmpegManager : IDisposable
             }
         }
     }
+
+    /// <summary>
+    /// Segment length for on-demand conversions, and the keyframe interval
+    /// forced to match it. One number, because a segment can only begin at a
+    /// keyframe: if they disagree, ffmpeg cuts at whichever keyframe it can
+    /// find and the segments come out uneven — which is what makes seeking
+    /// jump by different amounts in different films.
+    /// </summary>
+    private const int VodSegmentSeconds = 6;
 
     public static string ChannelStream(string name) =>
         "ch-" + string.Concat(name.ToLowerInvariant().Select(ch => char.IsLetterOrDigit(ch) ? ch : '-')).Trim('-');

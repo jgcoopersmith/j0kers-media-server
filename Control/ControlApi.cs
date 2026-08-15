@@ -3086,12 +3086,41 @@ public sealed partial class ControlApi : IDisposable
                 border-radius: 999px; padding: 6px 14px; font-size: 12.5px; color: #ddd;
                 transition: opacity .4s; pointer-events: none;
               }
+              /* Skip buttons of our own. The browser's controls have none,
+                 and its arrow keys move by an amount it chooses — which is
+                 why skipping felt different from one film to the next. These
+                 are a fixed 30 seconds, the same in every stream. Placed
+                 above the native control bar so they do not cover the
+                 scrubber, and faded until the pointer is near. */
+              #skip {
+                position: fixed; left: 50%; bottom: 76px; transform: translateX(-50%);
+                display: flex; gap: 10px; opacity: .25; transition: opacity .25s;
+              }
+              #skip:hover, body.busy #skip { opacity: 1; }
+              #skip button {
+                background: rgba(0,0,0,.62); color: #eee; cursor: pointer;
+                border: 1px solid rgba(255,255,255,.22); border-radius: 999px;
+                padding: 7px 15px; font-size: 13px; font-family: inherit;
+              }
+              #skip button:hover { background: rgba(0,0,0,.85); border-color: rgba(255,255,255,.45); }
+              /* a moment's confirmation of where a skip landed */
+              #seeknote {
+                position: fixed; left: 50%; top: 12%; transform: translateX(-50%);
+                background: rgba(0,0,0,.7); border-radius: 8px; padding: 8px 16px;
+                color: #fff; font-size: 20px; opacity: 0; transition: opacity .25s;
+                pointer-events: none;
+              }
             </style>
             <script src="/hls.min.js"></script>
             </head>
             <body>
             <video id="v" controls autoplay playsinline></video>
             <div id="msg">loading…</div>
+            <div id="seeknote"></div>
+            <div id="skip">
+              <button id="sk-back" title="Back 30 seconds (← or J)">⏪ 30s</button>
+              <button id="sk-fwd" title="Forward 30 seconds (→ or L)">30s ⏩</button>
+            </div>
             <div id="hint">click for fullscreen</div>
             <script>
               const src = {{srcJs}}, v = document.getElementById("v");
@@ -3193,9 +3222,46 @@ public sealed partial class ControlApi : IDisposable
                 if (!ask || document.fullscreenElement) return;
                 try { const p = ask.call(el); if (p && p.catch) p.catch(() => {}); } catch {}
               }
+              /* Skipping: a fixed 30 seconds, the same in every stream.
+                 The browser's own arrow keys move by an amount of its
+                 choosing, and with HLS a seek lands on a segment boundary —
+                 so on a film whose segments are uneven, "a little forward"
+                 could be minutes. This asks for an exact position, and the
+                 note says where it landed, so a stream that still snaps is
+                 visible rather than mystifying. */
+              const SKIP = 30;
+              const note = document.getElementById("seeknote");
+              let noteTimer = 0;
+              const clock = s => {
+                s = Math.max(0, Math.floor(s));
+                const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+                return (h ? h + ":" + String(m).padStart(2, "0") : String(m))
+                       + ":" + String(x).padStart(2, "0");
+              };
+              function skip(by) {
+                if (!isFinite(v.duration) && by > 0 && live) return;   // no seeking past a live edge
+                const end = isFinite(v.duration) ? v.duration
+                          : (v.seekable.length ? v.seekable.end(v.seekable.length - 1) : 0);
+                const want = Math.min(Math.max(0, v.currentTime + by), Math.max(0, end - 0.5));
+                try { v.currentTime = want; } catch { return; }
+                note.textContent = (by > 0 ? "⏩ +" : "⏪ −") + Math.abs(by) + "s · " + clock(want);
+                note.style.opacity = "1";
+                clearTimeout(noteTimer);
+                noteTimer = setTimeout(() => { note.style.opacity = "0"; }, 1100);
+              }
+              document.getElementById("sk-back").addEventListener("click", e => { e.stopPropagation(); skip(-SKIP); });
+              document.getElementById("sk-fwd").addEventListener("click", e => { e.stopPropagation(); skip(SKIP); });
+
               goFullscreen();
               addEventListener("click", () => { goFullscreen(); hint.style.opacity = "0"; }, { once: true });
-              addEventListener("keydown", e => { if (e.key === "f") goFullscreen(); });
+              addEventListener("keydown", e => {
+                if (e.key === "f") { goFullscreen(); return; }
+                // preventDefault, or the browser adds its own 5-second seek
+                // on top of ours and the skip is neither 30 nor predictable
+                if (e.key === "ArrowLeft"  || e.key === "j" || e.key === "J") { e.preventDefault(); skip(-SKIP); }
+                if (e.key === "ArrowRight" || e.key === "l" || e.key === "L") { e.preventDefault(); skip(SKIP); }
+                if (e.key === " " || e.key === "k" || e.key === "K") { e.preventDefault(); v.paused ? v.play() : v.pause(); }
+              });
               // it stops being useful the moment fullscreen happens
               document.addEventListener("fullscreenchange",
                 () => { if (document.fullscreenElement) hint.style.display = "none"; });
