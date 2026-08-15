@@ -541,6 +541,28 @@
   .card.drop-below { box-shadow: 0 3px 0 -1px var(--series-1); }
 
   /* ---- putting the HLS streams in your own order ---- */
+  /* A confirmation that appears where the click did.
+     The browser's own confirm() is always centred on the window, which on a
+     long card means the question arrives nowhere near the row it is asking
+     about — and after scrolling to find it, you have lost sight of which ✕
+     you pressed. This one is anchored to the button. */
+  .popconfirm {
+    position: fixed; z-index: 60; max-width: 330px;
+    background: var(--surface); color: var(--ink);
+    border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 10px 28px rgba(0,0,0,.35);
+    padding: 12px 13px; font-size: 13px; line-height: 1.4;
+  }
+  .popconfirm .pc-text { white-space: pre-wrap; max-height: 44vh; overflow: auto; }
+  .popconfirm .pc-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 11px; }
+  /* the destructive one is not the default: Cancel takes the focus, so a
+     stray Enter dismisses rather than deletes */
+  .popconfirm button { font-size: 12.5px; padding: 5px 12px; }
+  .popconfirm .pc-go {
+    color: var(--critical);
+    border-color: color-mix(in srgb, var(--critical) 45%, transparent);
+  }
+
   /* the channels card reorders the same way; one set of rules for both */
   .ch-item.dragging { opacity: .45; }
   .ch-item.drop-above { box-shadow: 0 -3px 0 -1px var(--series-1); }
@@ -747,7 +769,7 @@
 
   <div class="card">
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">HLS streams</span>
-      <button id="hls-clear" class="danger edit-only" onclick="removeAllHlsStreams()"
+      <button id="hls-clear" class="danger edit-only" onclick="removeAllHlsStreams(this)"
               title="Delete every HLS stream — playlists and segment files — from disk">✕ Delete all</button>
       <select id="hls-view" onchange="setCardView('hls', this.value, renderHls)" class="am-in" style="width:auto"
               title="How much to show for each stream">
@@ -876,7 +898,7 @@
       <button onclick="toggleImportTuner()" id="tuner-toggle" class="edit-only"
               title="Read the channel list off an HDHomeRun tuner">📡 Import from tuner</button>
       <button onclick="toggleAddChannel()" id="ch-toggle" class="edit-only">+ Add channel</button>
-      <button id="ch-clear" class="danger edit-only" onclick="removeAllChannels()"
+      <button id="ch-clear" class="danger edit-only" onclick="removeAllChannels(this)"
               title="Remove every channel — stops each restream and deletes its files">✕ Delete all</button></h2>
     <div id="importtuner" class="edit-only" style="display:none;border:1px solid var(--grid);border-radius:10px;padding:12px;margin-bottom:10px">
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
@@ -4197,8 +4219,10 @@ async function stopChannel(name) {
   refreshChannels(true);
 }
 
-async function removeChannel(name) {
-  if (!confirm("Remove channel " + name + "?")) return;
+async function removeChannel(name, at) {
+  if (!await confirmAt(at, "Remove channel " + name + "?"
+      + "\n\nIts restream stops and its files are deleted. A pinned free-TV"
+      + "\nchannel has to be found in the lineup and pinned again.", "Remove")) return;
   await fetch("/api/channels?name=" + encodeURIComponent(name), { method: "DELETE", headers: headers() });
   refreshChannels(true);
 }
@@ -4208,7 +4232,7 @@ async function removeChannel(name) {
    from, while a channel is the URL itself — delete a pinned free-TV channel
    and it has to be found in the lineup and pinned again. Same one-at-a-time
    reasoning: each removal stops a restream and deletes a directory. */
-async function removeAllChannels() {
+async function removeAllChannels(at) {
   let names = [];
   try {
     const data = await api("/api/channels");
@@ -4218,10 +4242,10 @@ async function removeAllChannels() {
 
   const shown = names.slice(0, 12).join("\n  ");
   const more = names.length > 12 ? "\n  …and " + (names.length - 12) + " more" : "";
-  if (!confirm("Remove ALL " + names.length + " channel" + (names.length > 1 ? "s" : "") + "?\n\n  "
+  if (!await confirmAt(at, "Remove ALL " + names.length + " channel" + (names.length > 1 ? "s" : "") + "?\n\n  "
       + shown + more
       + "\n\nEach restream stops and its files are deleted. Pinned free-TV channels"
-      + "\nhave to be found in the lineup and pinned again. This cannot be undone.")) return;
+      + "\nhave to be found in the lineup and pinned again. This cannot be undone.", "Remove all")) return;
 
   // same reasoning as the HLS card: report what the server actually said
   const failed = [];
@@ -4508,10 +4532,10 @@ async function removeMount(path) {
   refreshMounts();
 }
 
-async function removeHlsStream(name) {
-  if (!confirm("Remove '" + name + "' from the list?"
+async function removeHlsStream(name, at) {
+  if (!await confirmAt(at, "Remove '" + name + "' from the list?"
       + "\n\nThe conversion stays on disk, so playing this media again brings it"
-      + "\nback without converting it a second time.")) return;
+      + "\nback without converting it a second time.", "Remove")) return;
   const r = await fetch("/api/hls?stream=" + encodeURIComponent(name), { method: "DELETE", headers: headers() });
   if (!r.ok) {
     const data = await r.json().catch(() => ({}));
@@ -4525,10 +4549,10 @@ async function removeHlsStream(name) {
    produce the same bytes. This is the case where that is not true — the
    codec settings changed, or the conversion came out wrong — so the old
    one is thrown away and the job runs again. */
-async function retranscodeStream(name) {
-  if (!confirm("Convert '" + name + "' again from scratch?" +
+async function retranscodeStream(name, at) {
+  if (!await confirmAt(at, "Convert '" + name + "' again from scratch?" +
       "\n\nThe existing conversion is deleted and rebuilt from the original" +
-      "\nfile. It will be unavailable until the conversion finishes.")) return;
+      "\nfile. It will be unavailable until the conversion finishes.", "Rebuild")) return;
   try {
     const r = await fetch("/api/hls/retranscode?stream=" + encodeURIComponent(name),
                           { method: "POST", headers: headers() });
@@ -4544,16 +4568,16 @@ async function retranscodeStream(name) {
    made blind — and this one reaches the disk. Deletions run one at a time
    rather than in parallel: the server is removing directories, and a
    failure part-way should leave a comprehensible half rather than a race. */
-async function removeAllHlsStreams() {
+async function removeAllHlsStreams(at) {
   const streams = (lastHls && lastHls.streams) ? lastHls.streams.map(s => s.name) : [];
   if (!streams.length) { alert("There are no HLS streams to delete."); return; }
 
   const shown = streams.slice(0, 12).join("\n  ");
   const more = streams.length > 12 ? "\n  …and " + (streams.length - 12) + " more" : "";
-  if (!confirm("Delete ALL " + streams.length + " HLS stream" + (streams.length > 1 ? "s" : "") + "?\n\n  "
+  if (!await confirmAt(at, "Delete ALL " + streams.length + " HLS stream" + (streams.length > 1 ? "s" : "") + "?\n\n  "
       + shown + more
       + "\n\nThe conversions stay on disk — playing any of these again brings it"
-      + "\nstraight back. Space is reclaimed by the cache limit as it is needed.")) return;
+      + "\nstraight back. Space is reclaimed by the cache limit as it is needed.", "Remove all")) return;
 
   // Keep the server's own words. An earlier version discarded the response
   // body and reported a bare "0 of 8", when the server had said exactly why
@@ -4699,6 +4723,83 @@ $("picker-overlay").addEventListener("mousedown", e => {
 /* Clipboard that works over plain http too: navigator.clipboard only
    exists on secure contexts (https / localhost), so LAN access at
    http://<ip>:9090 needs the legacy execCommand path. */
+/* Asks the question next to the button that raised it.
+   Resolves true or false, so it drops in where confirm() was. With no
+   anchor — called from somewhere without a button in hand — it falls back
+   to confirm(), which is centred but still asks. */
+let openPopconfirm = null;
+
+function confirmAt(anchor, text, okLabel) {
+  if (!anchor || !anchor.getBoundingClientRect) return Promise.resolve(confirm(text));
+  if (openPopconfirm) openPopconfirm();          // never two at once
+
+  return new Promise(resolve => {
+    const pop = document.createElement("div");
+    pop.className = "popconfirm";
+    const body = document.createElement("div");
+    body.className = "pc-text";
+    body.textContent = text;                      // textContent: a file name is not markup
+    const row = document.createElement("div");
+    row.className = "pc-row";
+    const no = document.createElement("button");
+    no.textContent = "Cancel";
+    const yes = document.createElement("button");
+    yes.className = "pc-go";
+    yes.textContent = okLabel || "Remove";
+    row.append(no, yes);
+    pop.append(body, row);
+    document.body.appendChild(pop);
+
+    // a flag, not an identity check against openPopconfirm: that holds the
+    // cancel wrapper rather than this function, so comparing them was always
+    // unequal and nothing ever closed
+    let settled = false;
+    const close = answer => {
+      if (settled) return;
+      settled = true;
+      if (openPopconfirm === cancel) openPopconfirm = null;
+      removeEventListener("keydown", onKey, true);
+      removeEventListener("mousedown", onOutside, true);
+      removeEventListener("scroll", onScroll, true);
+      removeEventListener("resize", onScroll);
+      pop.remove();
+      resolve(answer);
+    };
+    const cancel = () => close(false);
+    openPopconfirm = cancel;
+
+    // Anchored under the button, pulled back inside the window when it
+    // would hang off an edge, and flipped above when there is no room below.
+    const place = () => {
+      const a = anchor.getBoundingClientRect();
+      const p = pop.getBoundingClientRect();
+      let left = Math.min(a.right - p.width, innerWidth - p.width - 8);
+      left = Math.max(8, left);
+      let top = a.bottom + 6;
+      if (top + p.height > innerHeight - 8) top = Math.max(8, a.top - p.height - 6);
+      pop.style.left = left + "px";
+      pop.style.top = top + "px";
+    };
+    place();
+
+    const onKey = e => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); cancel(); }
+      if (e.key === "Enter" && document.activeElement === yes) { e.preventDefault(); close(true); }
+    };
+    const onOutside = e => { if (!pop.contains(e.target)) cancel(); };
+    // a popover pinned to a button that has scrolled away is worse than none
+    const onScroll = () => cancel();
+
+    no.addEventListener("click", cancel);
+    yes.addEventListener("click", () => close(true));
+    addEventListener("keydown", onKey, true);
+    addEventListener("mousedown", onOutside, true);
+    addEventListener("scroll", onScroll, true);
+    addEventListener("resize", onScroll);
+    no.focus();                                   // Cancel is the safe default
+  });
+}
+
 async function copyToClipboard(text) {
   if (navigator.clipboard && window.isSecureContext) {
     try { await navigator.clipboard.writeText(text); return true; } catch { /* fall through */ }
@@ -4746,12 +4847,12 @@ document.addEventListener("click", e => {
     case "hls-play":    clearQueueState(); playHls(arg); break;
     case "hls-stop":    stopHlsVideo(); break;
     case "session-kill": killSession(arg); break;
-    case "hls-remove":  removeHlsStream(arg); break;
-    case "hls-retrans": retranscodeStream(arg); break;
+    case "hls-remove":  removeHlsStream(arg, el); break;
+    case "hls-retrans": retranscodeStream(arg, el); break;
     case "ch-restart":  restartChannel(arg); break;
     case "ch-start":    startChannel(arg); break;
     case "ch-stop":     stopChannel(arg); break;
-    case "ch-remove":   removeChannel(arg); break;
+    case "ch-remove":   removeChannel(arg, el); break;
     case "tv-play":     clearQueueState(); playHls(arg); break;
     case "tv-pin":      pinTvChannel(arg, el.dataset.name); break;
     case "lib-open":    loadLibrary(arg); break;
