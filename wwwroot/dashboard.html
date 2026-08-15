@@ -820,13 +820,13 @@
 
   <div class="card">
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">RTSP mounts</span>
+      <button onclick="toggleAddMount()" id="am-toggle" class="edit-only">+ Add mount</button>
       <select id="mounts-view" onchange="setCardView('mounts', this.value, renderMounts)" class="am-in" style="width:auto"
               title="How much to show for each mount">
         <option value="condensed">Condensed</option>
         <option value="default" selected>Default</option>
         <option value="info">Info</option>
-      </select>
-      <button onclick="toggleAddMount()" id="am-toggle" class="edit-only">+ Add mount</button></h2>
+      </select></h2>
     <div id="addmount" class="edit-only" style="display:none;border:1px solid var(--grid);border-radius:10px;padding:12px;margin-bottom:10px">
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <input id="am-path" class="am-in" placeholder="/music" style="width:130px">
