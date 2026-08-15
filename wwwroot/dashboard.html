@@ -899,7 +899,13 @@
               title="Read the channel list off an HDHomeRun tuner">📡 Import from tuner</button>
       <button onclick="toggleAddChannel()" id="ch-toggle" class="edit-only">+ Add channel</button>
       <button id="ch-clear" class="danger edit-only" onclick="removeAllChannels(this)"
-              title="Remove every channel — stops each restream and deletes its files">✕ Delete all</button></h2>
+              title="Remove every channel — stops each restream and deletes its files">✕ Delete all</button>
+      <select id="ch-view" onchange="setCardView('ch', this.value, () => refreshChannels(true))" class="am-in" style="width:auto"
+              title="How much to show for each channel">
+        <option value="condensed">Condensed</option>
+        <option value="default" selected>Default</option>
+        <option value="info">Info</option>
+      </select></h2>
     <div id="importtuner" class="edit-only" style="display:none;border:1px solid var(--grid);border-radius:10px;padding:12px;margin-bottom:10px">
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <input id="tuner-host" class="am-in" placeholder="tuner address — 192.168.1.50, or hdhomerun.local"
@@ -4149,6 +4155,7 @@ async function refreshChannels(force) {
     $("channels").innerHTML = '<div class="empty">No channels. Add an HDHomeRun tuner URL, IPTV stream, or camera to restream it as HLS.</div>';
     return;
   }
+  const view = cardView("ch");
   let h = "";
   for (const c of inChosenOrder(REORDER.ch, data.channels, c => c.name)) {
     const url = mediaUrl("/" + c.stream + "/index.m3u8");
@@ -4161,12 +4168,38 @@ async function refreshChannels(force) {
     // idle = saved but never started (a fresh pin). It has no playlist on
     // disk yet, so offering Play would just fail — offer Start instead.
     const idle = c.status === "idle";
-    h += '<div class="ch-item" data-ch-name="' + esc(c.name) + '" style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
+
+    if (view === "condensed") {
+      // name and state only, packed into the same grid the lineup uses. The
+      // whole tile acts: Play on a running channel, Start on an idle one,
+      // which is the same choice the row's first button makes. It is its own
+      // drag handle too — a tile has no spare room for a grip.
+      h += '<div class="tv-tile ch-item" draggable="true" data-ch-name="' + esc(c.name) + '"'
+        + ' data-act="' + (idle ? "ch-start" : "hls-play") + '" data-arg="' + esc(idle ? c.name : url) + '"'
+        + ' title="' + esc(c.name + " · " + c.status) + '">'
+        + '<span class="state ' + (live ? "playing" : "ready") + '"><span class="dot"></span></span>'
+        + '<span style="flex:1;min-width:0;color:var(--ink);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+        + esc(c.name) + '</span></div>';
+      continue;
+    }
+
+    h += '<div class="ch-item" data-ch-name="' + esc(c.name) + '" style="display:flex;align-items:'
+      + (view === "info" ? "flex-start" : "center") + ';gap:8px;padding:'
+      + (view === "info" ? "10px" : "7px") + ' 0;border-bottom:1px solid var(--grid)">'
       // a row is mostly buttons, so the drag needs a handle of its own
       + '<span class="ch-grip" title="Drag to reorder">⠿</span>'
       + '<span class="state ' + (live ? "playing" : "ready") + '"><span class="dot"></span></span>'
       + '<div style="flex:1;min-width:0"><div style="color:var(--ink)">' + esc(c.name) + '</div>'
-      + '<div class="mono" style="color:var(--muted);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(c.url) + ' · ' + esc(c.status) + '</div></div>'
+      + '<div class="mono" style="color:var(--muted);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(c.url) + ' · ' + esc(c.status) + '</div>'
+      // Info adds what the row has to truncate: the source URL in full, and
+      // the stream directory the restream writes to — the name that appears
+      // in a share link and in the log.
+      + (view === "info"
+          ? '<div class="mono" style="color:var(--muted);font-size:11px;margin-top:3px;word-break:break-all">'
+            + esc(c.url) + '</div>'
+            + '<div class="mono" style="color:var(--muted);font-size:11px">' + esc(c.stream) + '</div>'
+          : "")
+      + '</div>'
       + (idle
           ? '<button title="Start restreaming this channel from this server"'
             + ' data-act="ch-start" data-arg="' + esc(c.name) + '">▶ Start</button>'
@@ -4197,6 +4230,7 @@ async function refreshChannels(force) {
       + '<button class="danger" title="Remove channel" data-act="ch-remove" data-arg="' + esc(c.name) + '">✕</button>'
       + '</div>';
   }
+  $("channels").className = view === "condensed" ? "tv-grid" : "";
   $("channels").innerHTML = h;
   wireHlsDrag($("channels"), REORDER.ch);
 }
@@ -4351,7 +4385,7 @@ function loadCardView(key) {
    the markup happened to list first while the code used something else. This
    runs off nothing but localStorage, so it cannot be missed. */
 function restoreCardViews() {
-  for (const key of ["hls", "mounts", "tv"]) loadCardView(key);
+  for (const key of ["hls", "mounts", "tv", "ch"]) loadCardView(key);
 }
 restoreCardViews();
 
