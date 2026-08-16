@@ -508,6 +508,16 @@ static bool TryOpenBrowser(string url)
     return false;
 }
 
+// Keep what is in memory on disk, whatever ends this process. The timer is
+// the part that matters: most of this server's exits are hard kills — to
+// replace the executable, from Task Manager, or the machine going down — and
+// no exit handler runs for any of them.
+var stateSaver = new J0kersMediaServer.Services.StateSaver(TimeSpan.FromMinutes(1));
+// Sign-in expiry slides forward all session in memory. Left unwritten, a
+// restart signs everybody out against a timestamp from hours ago.
+stateSaver.Register("sessions", auth.FlushSessions);
+if (control is not null) stateSaver.Register("control", control.FlushState);
+
 Console.CancelKeyPress += (_, e) =>
 {
     e.Cancel = true;
@@ -548,9 +558,10 @@ services?.Dispose();
 control?.Dispose();
 channelWatchdog?.Dispose();   // before ffmpeg, so no kill fires mid-teardown
 ffmpeg?.Dispose();
-// the idle timestamps have been sliding forward all session; write them out
-// so a browser left open isn't signed out by a restart over a stale one
-auth.FlushSessions();
+// One last pass over everything held in memory — the idle timestamps that
+// have been sliding forward all session, the codec cache — so a clean exit
+// loses nothing at all rather than up to a minute.
+stateSaver.Dispose();
 // Releasing here also keeps these referenced for the whole run: a collected
 // Mutex closes its handle, which would hand the ports to a second copy while
 // this one is still serving them.

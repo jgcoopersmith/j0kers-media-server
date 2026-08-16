@@ -56,6 +56,7 @@ public sealed class TvCodecs
     private readonly Dictionary<string, string> _cache = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _lock = new();
     private bool _dirty;
+    private int _sinceSave;
 
     public TvCodecs(string baseDirectory, string ffprobePath)
     {
@@ -94,11 +95,21 @@ public sealed class TvCodecs
         }
 
         var probed = Probe(file);
+        bool flush;
         lock (_lock)
         {
             _cache[key] = $"{probed.video}|{probed.audio}";
             _dirty = true;
+            // Write it down every so often rather than only at the end of a
+            // scan. Probing this library is an hour of ffprobe launches, and
+            // the process is usually killed rather than asked to stop — so
+            // "save when finished" means that hour is lost to any restart
+            // that lands mid-scan. 200 files is a few seconds of work to
+            // lose, against a file write of a few hundred KB.
+            flush = ++_sinceSave >= 200;
+            if (flush) _sinceSave = 0;
         }
+        if (flush) Save();
         return probed;
 
         static string? Blank(string? s) => string.IsNullOrEmpty(s) ? null : s;

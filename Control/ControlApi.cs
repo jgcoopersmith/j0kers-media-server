@@ -228,6 +228,18 @@ public sealed partial class ControlApi : IDisposable
     private readonly Media.TvCodecs? _tvCodecs;
     private readonly Media.Shelf? _shelf;
 
+    /// <summary>
+    /// Writes out whatever this API is holding in memory. Called on a timer
+    /// and on the way down — see Services.StateSaver for why both.
+    ///
+    /// Only the codec cache needs it today: the other stores here write on
+    /// every change, because a favourite or a channel is one small edit and
+    /// there is no reason to defer it. Probing is the opposite — thousands
+    /// of results accumulated over an hour — so it is the one that would
+    /// hurt to lose.
+    /// </summary>
+    public void FlushState() => _tvCodecs?.Save();
+
     /// <summary>The HLS media cache, absolute. Conversions live here.</summary>
     private string MediaRootPath() => Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
         ? _serverConfig.Hls.MediaRoot

@@ -53,9 +53,35 @@ if command -v powershell >/dev/null 2>&1; then
         else
             was_running=1
             echo "post-commit: stopping the idle server so its exe can be replaced"
+            # Ask before insisting. A forced kill runs no shutdown path at
+            # all — sign-in expiry, the codec cache and anything else held in
+            # memory are simply lost — and this hook is the single biggest
+            # source of them: 113 starts against 23 goodbyes in the log.
+            # CloseMainWindow is the same thing as closing the window, so the
+            # server saves and exits properly; -Force is the fallback for a
+            # build where it is already wedged.
             powershell -NoProfile -Command \
-                "Get-Process j0kers-media-server -ErrorAction SilentlyContinue | Stop-Process -Force" 2>/dev/null
-            sleep 2
+                "\$asked = \$false
+                 foreach (\$x in @(Get-Process j0kers-media-server -ErrorAction SilentlyContinue)) {
+                     if (\$x.MainWindowHandle -ne 0 -and \$x.CloseMainWindow()) { \$asked = \$true }
+                 }
+                 # Only wait if something actually accepted the request. A
+                 # server minimised to the tray has no window to close, and
+                 # waiting ten seconds to discover that on every commit is a
+                 # tax paid for nothing.
+                 if (\$asked) {
+                     \$deadline = 10
+                     while (\$deadline -gt 0 -and (Get-Process j0kers-media-server -ErrorAction SilentlyContinue)) {
+                         Start-Sleep -Milliseconds 250; \$deadline -= 0.25
+                     }
+                 }
+                 \$left = @(Get-Process j0kers-media-server -ErrorAction SilentlyContinue)
+                 if (\$left) {
+                     if (\$asked) { Write-Host 'post-commit: it did not close in 10s - forcing' }
+                     else { Write-Host 'post-commit: no window to close (tray) - stopping it' }
+                     \$left | Stop-Process -Force
+                 } else { Write-Host 'post-commit: closed cleanly, state saved' }" 2>/dev/null
+            sleep 1
         fi
     fi
 fi
