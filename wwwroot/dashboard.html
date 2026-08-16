@@ -4167,12 +4167,17 @@ async function refreshChannels(force) {
   const view = cardView("ch");
   let h = "";
   for (const c of inChosenOrder(REORDER.ch, data.channels, c => c.name)) {
-    const url = mediaUrl("/" + c.stream + "/index.m3u8");
+    // master.m3u8 when the restream carries subtitles — it names both the
+    // video and the subtitle rendition, and index.m3u8 alone cannot. The
+    // server reports which streams have one; the flag is per channel, so a
+    // source without subtitles is unaffected.
+    const leaf = (c.subtitles ? "/master.m3u8" : "/index.m3u8");
+    const url = mediaUrl("/" + c.stream + leaf);
     // Play is for this page, so it may say localhost; Copy is for somewhere
     // else — VLC, a phone, another PC — and a localhost URL pasted there
     // points at that device instead. shareUrl picks an address the server
     // actually answers on. Same reasoning, same helper, as HLS Streams.
-    const copyUrl = shareUrl("/" + c.stream + "/index.m3u8");
+    const copyUrl = shareUrl("/" + c.stream + leaf);
     const live = c.status === "running";
     // idle = saved but never started (a fresh pin). It has no playlist on
     // disk yet, so offering Play would just fail — offer Start instead.

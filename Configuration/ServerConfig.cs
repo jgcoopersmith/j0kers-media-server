@@ -487,6 +487,16 @@ public sealed class FfmpegConfig
     /// disables eviction.
     /// </summary>
     [JsonPropertyName("vodCacheMaxGb")] public double VodCacheMaxGb { get; set; } = 10;
+
+    /// <summary>
+    /// Carry a channel's subtitles through the restream.
+    ///
+    /// On by default: dropping them was a workaround for a provider whose
+    /// subtitle endpoint stalls, and a workaround that deletes a feature is
+    /// the user's decision, not the server's. Turn it off if a particular
+    /// source's subtitle track is unreliable enough to disturb the video.
+    /// </summary>
+    [JsonPropertyName("liveSubtitles")] public bool LiveSubtitles { get; set; } = true;
 }
 
 public sealed class ServicesConfig

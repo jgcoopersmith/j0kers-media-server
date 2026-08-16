@@ -94,6 +94,24 @@ public sealed partial class ControlApi : IDisposable
         }
     }
 
+    /// <summary>
+    /// Whether a restream is writing subtitles alongside its video. ffmpeg
+    /// names the subtitle playlist after the media one — index.m3u8 gets
+    /// index_vtt.m3u8 — and refers to it from nowhere, so its presence on
+    /// disk is what says the channel has subtitles to offer.
+    /// </summary>
+    private bool HasSubtitleRendition(string stream)
+    {
+        try
+        {
+            var root = Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
+                ? _serverConfig.Hls.MediaRoot
+                : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
+            return File.Exists(Path.Combine(root, stream, "index_vtt.m3u8"));
+        }
+        catch { return false; }
+    }
+
     private Dlna.DlnaService NewDlna()
     {
         var dlna = new Dlna.DlnaService(
@@ -1162,8 +1180,14 @@ public sealed partial class ControlApi : IDisposable
                 {
                     ffmpegAvailable = _ffmpeg?.Available ?? false,
                     channels = (_ffmpeg?.Channels ?? new List<(Media.FfmpegManager.ChannelDef, string, string)>())
+                        // subtitles: whether the restream is writing a
+                        // subtitle rendition, so the dashboard links the
+                        // master playlist that names it rather than the bare
+                        // media one. Channels are not in the HLS listing —
+                        // this card is the only place that can report it.
                         .Select(c => new { name = c.Item1.Name, url = c.Item1.Url, stream = c.Item2,
-                                           status = c.Item3, started = c.Item1.Started }),
+                                           status = c.Item3, started = c.Item1.Started,
+                                           subtitles = HasSubtitleRendition(c.Item2) }),
                 });
                 return;
             }

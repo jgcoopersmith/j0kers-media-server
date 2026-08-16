@@ -1157,7 +1157,20 @@ public sealed class FfmpegManager : IDisposable
         // stop fetching those playlists at all — unmapped streams are
         // discarded, and discarded renditions are not downloaded. The
         // dashboard never surfaced live-channel subtitles anyway.
-        args.AddRange(new[] { "-sn", "-dn" });
+        // Subtitles ride along; only data streams are dropped.
+        //
+        // They were removed wholesale to dodge a provider whose subtitle
+        // endpoint stalls, which deleted a capability to work around a fault
+        // — not a call this should have made on its own. -dn stays because a
+        // timed-metadata stream is not something anyone watches.
+        //
+        // Note the shape of this: no -map. Explicit mapping is what would let
+        // the subtitle stream be named precisely, and it is also what picked
+        // the smallest video variant and restreamed everything at 240p.
+        // ffmpeg's own selection takes the best video, the best audio and one
+        // subtitle track, which is exactly the wanted set.
+        args.Add("-dn");
+        if (!_config.LiveSubtitles) args.Add("-sn");
 
         // remuxed live sources (tuners, IPTV) are MPEG-TS friendly; only a
         // real transcode to a modern codec needs fMP4

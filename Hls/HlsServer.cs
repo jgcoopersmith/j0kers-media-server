@@ -288,6 +288,21 @@ public sealed class HlsServer : IDisposable
             // being watched right now as recently-used, not stale
             try { Directory.SetLastWriteTimeUtc(streamDir, DateTime.UtcNow); } catch { }
 
+            // /<stream>/master.m3u8 — the media playlist and its subtitle
+            // rendition, tied together
+            if (parts[1] == "master.m3u8")
+            {
+                var master = MasterPlaylist(streamDir, token);
+                if (master is null)
+                {
+                    WriteText(res, 404, "text/plain", "no subtitle rendition for this stream");
+                    return;
+                }
+                ApplyCors(ctx);
+                WriteText(res, 200, "application/vnd.apple.mpegurl", master);
+                return;
+            }
+
             // /<stream>/subs.json — the track list for this stream
             if (parts[1] == "subs.json")
             {
@@ -502,7 +517,13 @@ public sealed class HlsServer : IDisposable
                 // readable label for display only — the name above is still
                 // the identity used in every URL
                 title = Media.StreamTitle.Prettify(Path.GetFileName(d)),
-                playlist = $"/{Path.GetFileName(d)}/index.m3u8",
+                // the master when there are subtitles to point at, so every
+                // link the dashboard builds carries them without each caller
+                // having to know; the media playlist otherwise
+                playlist = SubtitlePlaylist(d) is null
+                    ? $"/{Path.GetFileName(d)}/index.m3u8"
+                    : $"/{Path.GetFileName(d)}/master.m3u8",
+                subtitles = SubtitlePlaylist(d) is not null,
                 // the media this stream was made from, so the dashboard can
                 // show its thumbnail (null for hand-made segment folders)
                 source = Media.SubtitleManager.SourceFile(d),
@@ -551,6 +572,43 @@ public sealed class HlsServer : IDisposable
 
     /// <summary>Raised on every request so a pending shutdown can be cancelled.</summary>
     public Action? OnActivity { get; set; }
+
+    /// <summary>
+    /// The subtitle playlist a live restream writes beside its own, if there
+    /// is one. ffmpeg names it after the media playlist — index.m3u8 gets
+    /// index_vtt.m3u8 — and then never refers to it from anywhere, which is
+    /// why subtitles on a restreamed channel existed as files and were
+    /// invisible to every player.
+    /// </summary>
+    private static string? SubtitlePlaylist(string streamDir)
+    {
+        try
+        {
+            var vtt = Path.Combine(streamDir, "index_vtt.m3u8");
+            return File.Exists(vtt) ? "index_vtt.m3u8" : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// A master playlist naming the media playlist and its subtitle
+    /// rendition, so a player can actually find the subtitles. Null when the
+    /// stream has none, in which case index.m3u8 is the whole story and this
+    /// would only add a hop.
+    /// </summary>
+    private string? MasterPlaylist(string streamDir, string token)
+    {
+        var subs = SubtitlePlaylist(streamDir);
+        if (subs is null) return null;
+        return "#EXTM3U\n"
+             + "#EXT-X-VERSION:3\n"
+             + "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"Subtitles\","
+             + "DEFAULT=NO,AUTOSELECT=NO,URI=\"" + subs + token + "\"\n"
+             // no RESOLUTION or CODECS: they would be a guess, and a player
+             // reads them from the media playlist's own segments anyway
+             + "#EXT-X-STREAM-INF:BANDWIDTH=3000000,SUBTITLES=\"subs\"\n"
+             + "index.m3u8" + token + "\n";
+    }
 
     private string SubtitleListJson(string streamDir, string token = "")
     {
