@@ -1894,8 +1894,14 @@ public sealed partial class ControlApi : IDisposable
         // Except when there is nothing to keep: a conversion still running
         // is a part-finished directory, so that one is cancelled and removed
         // as it always was.
+        // ?purge=1 deletes the conversion instead of unlinking it. Keeping
+        // the work is the right default — rebuilding produces the same bytes
+        // — but it means removing things never frees disk, and a cache at
+        // its cap stays at its cap. Reclaiming space has to be possible on
+        // purpose, not only as a side effect of eviction.
+        var purge = ctx.Request.QueryString["purge"] == "1";
         var running = _ffmpeg?.VodInProgress(name) == true;
-        if (!running)
+        if (!running && !purge)
         {
             _links.Hide(name);
             Log.Info("control", $"HLS stream unlinked (conversion kept): {name}");
@@ -1912,7 +1918,9 @@ public sealed partial class ControlApi : IDisposable
             {
                 Directory.Delete(dir, recursive: true);
                 _links.Forget(name);
-                Log.Info("control", $"unfinished conversion cancelled and removed: {name}");
+                Log.Info("control", purge
+                    ? $"conversion deleted from disk: {name}"
+                    : $"unfinished conversion cancelled and removed: {name}");
                 WriteJson(res, 200, new { removed = name });
                 return;
             }

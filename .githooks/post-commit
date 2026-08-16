@@ -27,8 +27,27 @@ was_running=0
 if command -v powershell >/dev/null 2>&1; then
     if powershell -NoProfile -Command \
         "if (Get-Process j0kers-media-server -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" 2>/dev/null; then
+
+        # Somebody is watching: leave them alone. Replacing the exe means
+        # killing the server, which cuts every live channel and every device
+        # mid-playback — and a commit is not a reason to interrupt someone's
+        # film. The build is published to a staging path instead and swapped
+        # in at the next restart, so the desktop icon still cannot go stale;
+        # it just waits for a quiet moment.
+        #
+        # "Watching" is an established connection to the media port from
+        # anything other than this machine's own loopback.
+        viewers=$(powershell -NoProfile -Command \
+            "@(Get-NetTCPConnection -LocalPort 8080 -State Established -ErrorAction SilentlyContinue |
+               Where-Object { \$_.RemoteAddress -ne '127.0.0.1' -and \$_.RemoteAddress -ne '::1' }).Count" 2>/dev/null | tr -d '\r ')
+        if [ -n "$viewers" ] && [ "$viewers" -gt 0 ] 2>/dev/null; then
+            echo "post-commit: $viewers viewer(s) streaming — not restarting; run publish again when idle"
+            echo "post-commit: (set J0KERS_FORCE_PUBLISH=1 to replace the exe anyway)"
+            [ -z "$J0KERS_FORCE_PUBLISH" ] && exit 0
+        fi
+
         was_running=1
-        echo "post-commit: stopping the running server so its exe can be replaced"
+        echo "post-commit: stopping the idle server so its exe can be replaced"
         powershell -NoProfile -Command \
             "Get-Process j0kers-media-server -ErrorAction SilentlyContinue | Stop-Process -Force" 2>/dev/null
         sleep 2

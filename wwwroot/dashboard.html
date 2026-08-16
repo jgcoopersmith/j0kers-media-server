@@ -4586,10 +4586,17 @@ async function removeMount(path) {
 }
 
 async function removeHlsStream(name, at) {
-  if (!await confirmAt(at, "Remove '" + name + "' from the list?"
-      + "\n\nThe conversion stays on disk, so playing this media again brings it"
-      + "\nback without converting it a second time.", "Remove")) return;
-  const r = await fetch("/api/hls?stream=" + encodeURIComponent(name), { method: "DELETE", headers: headers() });
+  // Two outcomes, because they are genuinely different decisions: keeping
+  // the conversion saves rebuilding it, and deleting it is the only thing
+  // that gives the disk back. Keeping is offered first and is the safe one.
+  const choice = await choiceAt(at, "Remove '" + name + "' from the list?"
+      + "\n\nKeeping the conversion means playing this media again brings it back"
+      + "\nwithout converting it a second time. Deleting frees the disk space.",
+      [{ label: "Keep files", value: "keep" },
+       { label: "Delete files", value: "purge", danger: true }]);
+  if (!choice) return;
+  const r = await fetch("/api/hls?stream=" + encodeURIComponent(name)
+      + (choice === "purge" ? "&purge=1" : ""), { method: "DELETE", headers: headers() });
   if (!r.ok) {
     const data = await r.json().catch(() => ({}));
     alert(data.error || "delete failed");
@@ -4627,10 +4634,14 @@ async function removeAllHlsStreams(at) {
 
   const shown = streams.slice(0, 12).join("\n  ");
   const more = streams.length > 12 ? "\n  …and " + (streams.length - 12) + " more" : "";
-  if (!await confirmAt(at, "Delete ALL " + streams.length + " HLS stream" + (streams.length > 1 ? "s" : "") + "?\n\n  "
+  const choice = await choiceAt(at, "Remove ALL " + streams.length + " HLS stream" + (streams.length > 1 ? "s" : "") + " from the list?\n\n  "
       + shown + more
-      + "\n\nThe conversions stay on disk — playing any of these again brings it"
-      + "\nstraight back. Space is reclaimed by the cache limit as it is needed.", "Remove all")) return;
+      + "\n\nKeeping the conversions means playing any of these again brings it"
+      + "\nstraight back. Deleting frees the disk space and cannot be undone.",
+      [{ label: "Keep files", value: "keep" },
+       { label: "Delete files", value: "purge", danger: true }]);
+  if (!choice) return;
+  const qs = choice === "purge" ? "&purge=1" : "";
 
   // Keep the server's own words. An earlier version discarded the response
   // body and reported a bare "0 of 8", when the server had said exactly why
@@ -4638,7 +4649,7 @@ async function removeAllHlsStreams(at) {
   const failed = [];
   for (const name of streams) {
     try {
-      const r = await fetch("/api/hls?stream=" + encodeURIComponent(name), { method: "DELETE", headers: headers() });
+      const r = await fetch("/api/hls?stream=" + encodeURIComponent(name) + qs, { method: "DELETE", headers: headers() });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
         failed.push(name + " — " + (d.error || ("HTTP " + r.status)));
@@ -4646,7 +4657,7 @@ async function removeAllHlsStreams(at) {
     } catch (e) { failed.push(name + " — " + e.message); }
   }
   refreshHls();
-  if (failed.length) alert("Deleted " + (streams.length - failed.length) + " of " + streams.length
+  if (failed.length) alert("Removed " + (streams.length - failed.length) + " of " + streams.length
     + ".\n\nThese could not be removed:\n  " + failed.join("\n  "));
 }
 
@@ -4782,8 +4793,20 @@ $("picker-overlay").addEventListener("mousedown", e => {
    to confirm(), which is centred but still asks. */
 let openPopconfirm = null;
 
-function confirmAt(anchor, text, okLabel) {
-  if (!anchor || !anchor.getBoundingClientRect) return Promise.resolve(confirm(text));
+/* The same popover with more than one way to say yes.
+   Some questions are not yes-or-no: removing a conversion can keep the
+   files or delete them, and those are different decisions rather than a
+   confirmation and an afterthought. Resolves the chosen value, or null. */
+function choiceAt(anchor, text, options) {
+  return confirmAt(anchor, text, null, options);
+}
+
+function confirmAt(anchor, text, okLabel, options) {
+  if (!anchor || !anchor.getBoundingClientRect) {
+    // no anchor: fall back to confirm(), taking the first option as "yes"
+    if (options) return Promise.resolve(confirm(text) ? options[0].value : null);
+    return Promise.resolve(confirm(text));
+  }
   if (openPopconfirm) openPopconfirm();          // never two at once
 
   return new Promise(resolve => {
@@ -4796,10 +4819,21 @@ function confirmAt(anchor, text, okLabel) {
     row.className = "pc-row";
     const no = document.createElement("button");
     no.textContent = "Cancel";
-    const yes = document.createElement("button");
-    yes.className = "pc-go";
-    yes.textContent = okLabel || "Remove";
-    row.append(no, yes);
+    row.append(no);
+
+    // one button per option, or the single yes/no pair. Cancel is always
+    // first and always focused, so the safe answer is the one already
+    // under the finger whichever shape this takes.
+    const answers = options || [{ label: okLabel || "Remove", value: true, danger: true }];
+    const yes = [];
+    for (const opt of answers) {
+      const b = document.createElement("button");
+      b.textContent = opt.label;
+      if (opt.danger) b.className = "pc-go";
+      b.addEventListener("click", () => close(opt.value));
+      row.append(b);
+      yes.push(b);
+    }
     pop.append(body, row);
     document.body.appendChild(pop);
 
@@ -4818,7 +4852,7 @@ function confirmAt(anchor, text, okLabel) {
       pop.remove();
       resolve(answer);
     };
-    const cancel = () => close(false);
+    const cancel = () => close(options ? null : false);
     openPopconfirm = cancel;
 
     // Anchored under the button, pulled back inside the window when it
@@ -4841,14 +4875,13 @@ function confirmAt(anchor, text, okLabel) {
 
     const onKey = e => {
       if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); cancel(); }
-      if (e.key === "Enter" && document.activeElement === yes) { e.preventDefault(); close(true); }
+      if (e.key === "Enter" && yes.includes(document.activeElement)) { e.preventDefault(); document.activeElement.click(); }
     };
     const onOutside = e => { if (!pop.contains(e.target)) cancel(); };
     // a popover pinned to a button that has scrolled away is worse than none
     const onScroll = () => cancel();
 
     no.addEventListener("click", cancel);
-    yes.addEventListener("click", () => close(true));
     addEventListener("keydown", onKey, true);
     addEventListener("mousedown", onOutside, true);
     addEventListener("scroll", onScroll, true);

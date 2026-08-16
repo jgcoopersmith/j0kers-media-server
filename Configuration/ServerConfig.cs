@@ -647,9 +647,12 @@ public sealed class DiscoveryConfig
     /// there is no finished full-resolution copy, the original is served
     /// exactly as before.
     ///
-    /// Turn it off to always serve originals — the right answer when every
-    /// device on the network can decode them, since a conversion is still a
-    /// re-encode and re-encoding is never free of quality.
+    /// Off by default, and the default is the point: a conversion is a
+    /// re-encode, and a re-encode is lossier than the file it came from.
+    /// Substituting one for a television that could have decoded the
+    /// original is a downgrade nobody asked for. Switch it on when a device
+    /// genuinely cannot play what is on disk — an HEVC file, an unfamiliar
+    /// container — and would otherwise get nothing at all.
     /// </summary>
-    [JsonPropertyName("dlnaUseTranscode")] public bool DlnaUseTranscode { get; set; } = true;
+    [JsonPropertyName("dlnaUseTranscode")] public bool DlnaUseTranscode { get; set; }
 }

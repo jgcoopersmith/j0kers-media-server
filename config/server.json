@@ -152,7 +152,12 @@
     // downscaled are used, so the picture size is whatever the file had;
     // a 720p copy made for a phone is never substituted. Nothing is
     // converted on demand: with no finished full-size copy, the original
-    // is served exactly as before. Set false to always serve originals.
-    "dlnaUseTranscode": true
+    // is served exactly as before.
+    //
+    // Off by default. Resolution is preserved either way, but a conversion
+    // is still a re-encode, and a re-encode of a file the TV could have
+    // played directly is a picture that got slightly worse for no reason.
+    // Turn it on if a device refuses to play what is on disk.
+    "dlnaUseTranscode": false
   }
 }
