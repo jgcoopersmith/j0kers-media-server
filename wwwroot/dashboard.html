@@ -4490,9 +4490,14 @@ function renderLineup() {
   box.innerHTML = h;
 }
 
-async function pinTvChannel(id, name) {
-  if (!confirm("Save \"" + name + "\" as a local channel?\n\nIt is added to Live channels without "
-    + "starting anything. Press ▶ Start there when you want it restreaming for phones, TVs and VLC.")) return;
+async function pinTvChannel(id, name, at) {
+  // Anchored to the 📌 that was pressed. The lineup runs to several hundred
+  // channels, so a centred dialog asks about one of them from nowhere near
+  // it — and in the condensed grid, where the tiles are small and alike,
+  // there is nothing left on screen to say which one was aimed at.
+  if (!await confirmAt(at, "Save \"" + name + "\" as a local channel?"
+    + "\n\nIt is added to Live channels without starting anything. Press ▶ Start"
+    + "\nthere when you want it restreaming for phones, TVs and VLC.", "Pin")) return;
   try {
     const r = await fetch("/api/tv/pin", {
       method: "POST",
@@ -4819,7 +4824,11 @@ function confirmAt(anchor, text, okLabel) {
       let left = Math.min(a.right - p.width, innerWidth - p.width - 8);
       left = Math.max(8, left);
       let top = a.bottom + 6;
-      if (top + p.height > innerHeight - 8) top = Math.max(8, a.top - p.height - 6);
+      if (top + p.height > innerHeight - 8) top = a.top - p.height - 6;   // flip above
+      // and clamp regardless: flipping above an anchor that is itself near
+      // the bottom edge can still land off-screen, and a question you cannot
+      // read is worse than one in the wrong place
+      top = Math.min(Math.max(8, top), Math.max(8, innerHeight - p.height - 8));
       pop.style.left = left + "px";
       pop.style.top = top + "px";
     };
@@ -4897,7 +4906,7 @@ document.addEventListener("click", e => {
     case "ch-stop":     stopChannel(arg); break;
     case "ch-remove":   removeChannel(arg, el); break;
     case "tv-play":     clearQueueState(); playHls(arg); break;
-    case "tv-pin":      pinTvChannel(arg, el.dataset.name); break;
+    case "tv-pin":      pinTvChannel(arg, el.dataset.name, el); break;
     case "lib-open":    loadLibrary(arg); break;
     case "lib-img":     viewImage(arg); break;
     case "lib-play":    prepareMedia(arg); break;
