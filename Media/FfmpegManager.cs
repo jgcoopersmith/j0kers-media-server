@@ -365,11 +365,21 @@ public sealed class FfmpegManager : IDisposable
     /// <paramref name="height"/> &gt; 0 scales the video to that height
     /// (each height caches as its own conversion).
     /// </summary>
-    public (string stream, bool ready) StartVod(string file, int height = 0)
+    /// <summary>
+    /// The cache directory name a conversion of this file would use, without
+    /// starting one. Null when the file is gone.
+    ///
+    /// Kept apart from StartVod because the shelf needs to ask "is this one
+    /// already done?" thousands of times, and the only safe way to answer is
+    /// to compute the name the same way the converter will. Two copies of
+    /// this arithmetic would eventually disagree, and the symptom would be a
+    /// shelf that converts the whole library again every run.
+    /// </summary>
+    public string? VodStreamName(string file, int height = 0)
     {
-        if (!Available) throw new InvalidOperationException("ffmpeg is not available");
-        var info = new FileInfo(file);
-        if (!info.Exists) throw new FileNotFoundException("no such file", file);
+        FileInfo info;
+        try { info = new FileInfo(file); if (!info.Exists) return null; }
+        catch { return null; }
 
         // scaling is impossible when the video is remuxed, so a requested
         // height must not fork the cache (it produced N identical copies
@@ -381,7 +391,18 @@ public sealed class FfmpegManager : IDisposable
             $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}|{height}|{VideoEncoder}|{AudioEncoder}")))[..8].ToLowerInvariant();
         // readable link: filename slug + optional quality + short hash for uniqueness
         var slug = Slugify(Path.GetFileNameWithoutExtension(info.Name));
-        var stream = $"vod-{slug}{(height > 0 ? $"-{height}p" : "")}-{key}";
+        return $"vod-{slug}{(height > 0 ? $"-{height}p" : "")}-{key}";
+    }
+
+    public (string stream, bool ready) StartVod(string file, int height = 0)
+    {
+        if (!Available) throw new InvalidOperationException("ffmpeg is not available");
+        var info = new FileInfo(file);
+        if (!info.Exists) throw new FileNotFoundException("no such file", file);
+
+        var stream = VodStreamName(file, height)
+            ?? throw new FileNotFoundException("no such file", file);
+        if (VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase)) height = 0;
         var dir = Path.Combine(_mediaRoot, stream);
         var playlist = Path.Combine(dir, "index.m3u8");
 
@@ -523,6 +544,13 @@ public sealed class FfmpegManager : IDisposable
         {
             entries = new DirectoryInfo(_mediaRoot)
                 .EnumerateDirectories("vod-*")
+                // The shelf is not cache. The cap exists so conversions made
+                // in passing don't accumulate; a conversion made deliberately,
+                // so a television can play a film it otherwise cannot, is the
+                // whole point and outlives any cap. Counting it toward the
+                // budget would also be silently circular — the shelf would
+                // rebuild what the cache had just evicted, indefinitely.
+                .Where(d => !File.Exists(Path.Combine(d.FullName, "shelf.txt")))
                 .Select(d => (d, d.EnumerateFiles().Sum(f => f.Length)))
                 .ToList();
         }
