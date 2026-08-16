@@ -2206,9 +2206,13 @@ async function refreshHls() {
     lastHls = data;
     renderHls();
   } catch {
+    // A poll that didn't come back is not news. It says nothing the user
+    // can act on, it fires on an empty card for reasons that have nothing
+    // to do with reachability, and the next poll is a second away — so
+    // whatever the card is showing stays showing, including the ordinary
+    // "no HLS streams" line. A server that is genuinely down is already
+    // reported by the connection light in the header.
     lastHls = null;
-    $("hls").className = "";
-    $("hls").innerHTML = '<div class="empty">HLS endpoint unreachable.</div>';
   }
 }
 
