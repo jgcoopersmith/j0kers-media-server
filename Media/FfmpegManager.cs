@@ -1093,7 +1093,17 @@ public sealed class FfmpegManager : IDisposable
             {
                 args.AddRange(new[] { "-c:v", VideoEncoder });
                 args.AddRange(VideoQualityArgs());
-                if (VideoEncoder is "libx264" or "libx265") args.AddRange(new[] { "-tune", "zerolatency" });
+                // No -tune zerolatency. It was here from the day this engine
+                // was written and it costs picture: it turns off B-frames and
+                // lookahead, so at the same preset and CRF the encoder has
+                // fewer tools and spends more bits for a worse result.
+                //
+                // What it buys is latency, and a restream has none to save.
+                // Nobody is interacting with a television channel — it is
+                // already seconds behind through segmenting alone, and the
+                // viewer is watching, not steering. The trade only makes
+                // sense for something like a camera being driven live, which
+                // is not what this path serves.
                 args.AddRange(new[] { "-pix_fmt", "yuv420p" });
             }
             args.AddRange(AudioEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase)
