@@ -1121,20 +1121,21 @@ public sealed class FfmpegManager : IDisposable
             // the format designed it to do.
         }
 
-        // Bind to the first video and first audio stream, explicitly.
+        // Deliberately no -map: ffmpeg's own selection picks the best video
+        // and audio stream, and that is what this wants.
         //
-        // Without a map, ffmpeg chooses its output streams once, from
-        // whatever the programme happened to present. Pluto's adverts are
-        // encoded separately and arrive with a different stream layout, so
-        // after the first EXT-X-DISCONTINUITY the indices no longer mean
-        // what they did. Caught in a trace: output froze at frame 249 while
-        // segments kept downloading perfectly for another minute, with
-        // "Packet corrupt (stream = 8)" as the advert's streams arrived
-        // against a mapping built for the programme's.
+        // "-map 0:v:0" was tried and it quietly wrecked the picture. A master
+        // playlist offers several variants and 0:v:0 is the *first* of them,
+        // usually the smallest: channels named 720p and 1080p were being
+        // restreamed at 426x240, while one whose master happens to list the
+        // largest first stayed at 1080p — which is why the damage looked
+        // arbitrary instead of systematic.
         //
-        // The trailing ? makes each optional, so a segment that genuinely
-        // lacks one is skipped rather than fatal.
-        args.AddRange(new[] { "-map", "0:v:0?", "-map", "0:a:0?", "-ignore_unknown" });
+        // It was added to stop an advert's differing stream layout unmapping
+        // the output mid-stream. That theory was measured straight afterwards
+        // and made no difference whatever — 13 deaths in 15 minutes against
+        // 13 before it — so there is nothing to weigh against the resolution
+        // it cost.
 
         // Video and audio only — no subtitles, no data streams.
         //
