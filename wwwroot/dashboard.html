@@ -444,9 +444,12 @@
   .pick-row:hover { background: var(--surface-2); }
   .pick-row.selected { background: color-mix(in srgb, var(--series-1) 18%, transparent); color: var(--ink); }
   .pick-row .icon { width: 20px; text-align: center; flex: none; }
-  /* the "up" row's arrow, larger than the icons around it — line-height is
-     pinned so the taller glyph doesn't stretch the row it sits in */
-  .pick-row .up-icon { font-size: 20px; line-height: 1; display: inline-block; }
+  /* The "up" row's arrow: larger than the file and folder icons beside it,
+     because it is the one row that navigates rather than opens. Sized to
+     match .hls-thumb-fallback — the icon on a conversion row — so the two
+     places the eye moves between are drawn at one size. Line-height is
+     pinned so the taller glyph doesn't stretch the row it sits in. */
+  .pick-row .up-icon { font-size: 16px; line-height: 1; display: inline-block; }
   .pick-row .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pick-row .det { color: var(--muted); font-size: 11.5px; flex: none; }
   .pick-row.dim { opacity: 0.45; cursor: default; }
