@@ -28,12 +28,18 @@ if command -v powershell >/dev/null 2>&1; then
     if powershell -NoProfile -Command \
         "if (Get-Process j0kers-media-server -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" 2>/dev/null; then
 
-        # Somebody is watching: leave them alone. Replacing the exe means
-        # killing the server, which cuts every live channel and every device
-        # mid-playback — and a commit is not a reason to interrupt someone's
-        # film. The build is published to a staging path instead and swapped
-        # in at the next restart, so the desktop icon still cannot go stale;
-        # it just waits for a quiet moment.
+        # Somebody is watching: leave them alone. Killing the server to
+        # replace its exe cuts every live channel and every device
+        # mid-playback, and a commit is not a reason to interrupt someone's
+        # film.
+        #
+        # But the desktop shortcut must not go stale either, and those two
+        # rules only look like they conflict. Windows refuses to delete a
+        # running exe; it is perfectly happy to rename one. So the running
+        # binary is moved aside to .inuse — the live server keeps executing
+        # from it, none the wiser — and the new build is published into the
+        # name the shortcut points at. The next launch is the new version,
+        # nothing was interrupted, and the leftover is swept up next time.
         #
         # "Watching" is an established connection to the media port from
         # anything other than this machine's own loopback.
@@ -41,18 +47,22 @@ if command -v powershell >/dev/null 2>&1; then
             "@(Get-NetTCPConnection -LocalPort 8080 -State Established -ErrorAction SilentlyContinue |
                Where-Object { \$_.RemoteAddress -ne '127.0.0.1' -and \$_.RemoteAddress -ne '::1' }).Count" 2>/dev/null | tr -d '\r ')
         if [ -n "$viewers" ] && [ "$viewers" -gt 0 ] 2>/dev/null; then
-            echo "post-commit: $viewers viewer(s) streaming — not restarting; run publish again when idle"
-            echo "post-commit: (set J0KERS_FORCE_PUBLISH=1 to replace the exe anyway)"
-            [ -z "$J0KERS_FORCE_PUBLISH" ] && exit 0
+            echo "post-commit: $viewers viewer(s) streaming — publishing without restarting"
+            powershell -NoProfile -Command \
+                "Move-Item '$exe' '$exe.inuse' -Force -ErrorAction SilentlyContinue" 2>/dev/null
+        else
+            was_running=1
+            echo "post-commit: stopping the idle server so its exe can be replaced"
+            powershell -NoProfile -Command \
+                "Get-Process j0kers-media-server -ErrorAction SilentlyContinue | Stop-Process -Force" 2>/dev/null
+            sleep 2
         fi
-
-        was_running=1
-        echo "post-commit: stopping the idle server so its exe can be replaced"
-        powershell -NoProfile -Command \
-            "Get-Process j0kers-media-server -ErrorAction SilentlyContinue | Stop-Process -Force" 2>/dev/null
-        sleep 2
     fi
 fi
+
+# Sweep up exes moved aside by an earlier commit, now that whatever was
+# running from them has exited. Best effort: one still in use just stays.
+rm -f publish/*.inuse 2>/dev/null
 
 echo "post-commit: publishing $(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' J0kersMediaServer.csproj)"
 if dotnet publish J0kersMediaServer.csproj -c Release -r win-x64 --self-contained false \
