@@ -1066,15 +1066,14 @@ public sealed class FfmpegManager : IDisposable
                 // once every few seconds, against a CDN built for exactly
                 // that — and removes the idle socket that keeps going away.
                 "-http_persistent", "0",
-                // The relayed ingest rewrites every segment to
-                // /api/tv/r?u=… — no media extension on the path — and the
-                // HLS demuxer's allowlist rejects exactly that (exit -22,
-                // "not in allowed_segment_extensions"). The check guards a
-                // player against a playlist smuggling file:// or .exe
-                // references; this input is our own server handing back
-                // media over loopback, so the guard has nothing to guard.
-                "-allowed_extensions", "ALL",
-                "-extension_picky", "0",
+                // No allowed_extensions/extension_picky override here. Both
+                // were added so the relayed ingest could fetch segments
+                // through /api/tv/r?u=… , which has no file extension for
+                // the demuxer's allowlist to accept. The relay was reverted
+                // the same evening and these were left behind: doing nothing
+                // except disabling a check whose job is stopping a playlist
+                // pointing ffmpeg at file:// or an executable. A weakened
+                // guard with no remaining purpose is worse than no change.
             });
         }
         args.AddRange(new[] { "-i", OwnSchemeFor(url) });
