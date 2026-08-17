@@ -801,6 +801,7 @@
       <div id="pctl" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px">
         <button id="pc-back" title="Back 15 seconds (←)">⏪ 15s</button>
         <button id="pc-fwd" title="Forward 15 seconds (→)">15s ⏩</button>
+        <span style="color:var(--muted);font-size:11.5px" title="Works whenever the player is on screen and you are not typing in a field">space plays/pauses</span>
         <span style="flex:1"></span>
         <label style="color:var(--muted);font-size:12px">Subtitles
           <select id="pc-subs" class="am-in" style="padding:3px 6px">
@@ -2791,19 +2792,37 @@ function seekPlayerBy(delta) {
 $("pc-back").addEventListener("click", () => seekPlayerBy(-SKIP_SECONDS));
 $("pc-fwd").addEventListener("click", () => seekPlayerBy(SKIP_SECONDS));
 
-/* Arrow keys jump, the same ten seconds the buttons do. The browser only
-   does this while the video's own control bar has focus, which after
-   clicking anywhere else on the page it does not.
-   The dashboard is a page full of fields, so this only takes the keypress
-   when there is a player on screen and nothing is being typed into. */
+/* Keyboard controls for the dashboard player: arrows skip, space or K plays
+   and pauses — the same keys the watch page answers to.
+
+   The browser only does any of this while the video's own control bar has
+   focus, which after clicking anywhere else on the page it does not. The
+   dashboard is a page full of fields, so this only takes the keypress when
+   there is a player on screen and nothing is being typed into.
+
+   Space needs one guard the arrows don't: it is also how a focused button or
+   link is pressed. Swallowing it there would break every control on the page
+   for anyone working by keyboard, so when the focus is on something that
+   space already means something to, space keeps its old meaning. */
 document.addEventListener("keydown", e => {
   if (e.altKey || e.ctrlKey || e.metaKey) return;
-  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  const isSkip  = e.key === "ArrowLeft" || e.key === "ArrowRight";
+  const isPause = e.key === " " || e.key === "Spacebar" || e.key === "k" || e.key === "K";
+  if (!isSkip && !isPause) return;
   if ($("hlsplayer").style.display === "none") return;
+
   const t = e.target;
   if (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-  seekPlayerBy(e.key === "ArrowRight" ? SKIP_SECONDS : -SKIP_SECONDS);
-  e.preventDefault();
+  if (isPause && t && (t.tagName === "BUTTON" || t.tagName === "A" || t.tagName === "SUMMARY")) return;
+
+  if (isSkip) {
+    seekPlayerBy(e.key === "ArrowRight" ? SKIP_SECONDS : -SKIP_SECONDS);
+  } else {
+    const v = $("hlsvideo");
+    viewerTookControl();          // a deliberate act: don't drag them elsewhere
+    if (v.paused) v.play().catch(() => {}); else v.pause();
+  }
+  e.preventDefault();             // or the page scrolls a screen on every space
 });
 
 /* A brief note under the player, cleared after a few seconds. */
