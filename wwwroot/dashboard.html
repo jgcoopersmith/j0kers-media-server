@@ -2793,17 +2793,64 @@ $("pc-back").addEventListener("click", () => seekPlayerBy(-SKIP_SECONDS));
 $("pc-fwd").addEventListener("click", () => seekPlayerBy(SKIP_SECONDS));
 
 /* Keyboard controls for the dashboard player: arrows skip, space or K plays
-   and pauses — the same keys the watch page answers to.
+   and pauses.
 
-   The browser only does any of this while the video's own control bar has
-   focus, which after clicking anywhere else on the page it does not. The
-   dashboard is a page full of fields, so this only takes the keypress when
-   there is a player on screen and nothing is being typed into.
+   Space has been wrong twice, both times because I reasoned about what the
+   browser would do with it instead of measuring, and both times the guess
+   was that one toggle was happening when two were. The video element brings
+   its own handling of space and I cannot reliably observe, from here,
+   whether a given browser's control bar acts before this handler, after it,
+   or at all.
 
-   Space needs one guard the arrows don't: it is also how a focused button or
-   link is pressed. Swallowing it there would break every control on the page
-   for anyone working by keyboard, so when the focus is on something that
-   space already means something to, space keeps its old meaning. */
+   So this no longer depends on knowing. It states an intention — play, or
+   pause — and then holds the player to it for a moment afterwards. If
+   anything flips the player back within that window, whatever it was and
+   whenever it ran, it is put right. One keypress produces one outcome even
+   if two handlers fire, and it would still be correct if a browser stopped
+   double-firing tomorrow.
+
+   The window is short and cancelled by any click on the player, so pressing
+   space and then immediately clicking pause does what you asked, rather than
+   being overruled by the key you pressed a moment earlier.
+
+   The listener is registered in the CAPTURE phase, and that part is not
+   decoration. Holding the player to an intention only works if the
+   intention was read before anything else touched it: a listener on the
+   video runs in the target phase, which is after document capture and
+   before document bubble. Registered as a bubble listener — which is what
+   it was — a press while paused could be read as "it is playing, so pause
+   it", because something else had already started it. Capture is what makes
+   "what state was it in when the key went down" a question with one answer. */
+const TOGGLE_HOLD_MS = 500;
+let toggleWant = null, toggleAt = 0;
+
+function togglePlayback() {
+  const v = $("hlsvideo");
+  viewerTookControl();                 // a deliberate act: don't drag them elsewhere
+  toggleWant = v.paused ? "play" : "pause";
+  toggleAt = performance.now();
+  applyToggleWant();
+}
+
+function applyToggleWant() {
+  const v = $("hlsvideo");
+  if (toggleWant === "play") { if (v.paused) v.play().catch(() => {}); }
+  else if (toggleWant === "pause") { if (!v.paused) v.pause(); }
+}
+
+// The enforcement. A play or pause event that contradicts what was just
+// asked for, inside the hold window, is the second toggle — undo it.
+for (const ev of ["play", "pause"]) {
+  $("hlsvideo").addEventListener(ev, () => {
+    if (!toggleWant) return;
+    if (performance.now() - toggleAt > TOGGLE_HOLD_MS) { toggleWant = null; return; }
+    applyToggleWant();
+  });
+}
+// A click on the player is the viewer changing their mind, and outranks a
+// key they pressed half a second ago.
+$("hlsvideo").addEventListener("pointerdown", () => { toggleWant = null; });
+
 document.addEventListener("keydown", e => {
   if (e.altKey || e.ctrlKey || e.metaKey) return;
   const isSkip  = e.key === "ArrowLeft" || e.key === "ArrowRight";
@@ -2813,32 +2860,15 @@ document.addEventListener("keydown", e => {
 
   const t = e.target;
   if (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+  // space is also how a focused button or link is pressed; leave it theirs
   if (isPause && t && (t.tagName === "BUTTON" || t.tagName === "A" || t.tagName === "SUMMARY")) return;
 
-  // The video already has its own answer to space, and it is the right one.
-  //
-  // Chrome's control bar lives in the video's shadow DOM and handles space
-  // with an ordinary listener, not a cancellable default action — so
-  // preventDefault here does not stop it. Toggling as well meant two
-  // toggles for one keypress: it started, then immediately stopped, which
-  // reads as space not working at all. The first version of this got that
-  // wrong by trying to override the browser rather than stay out of its way.
-  //
-  // So when the focus is on the player itself, space is the browser's. This
-  // handler exists for the rest of the page, where nothing would happen
-  // otherwise. K is ours in both cases — the browser has no meaning for it.
-  if (isPause && (e.key === " " || e.key === "Spacebar")
-      && t && (t.id === "hlsvideo" || (t.closest && t.closest("#hlsvideo")))) return;
+  e.preventDefault();     // or the page scrolls a screen on every space
+  if (e.repeat) return;   // holding the key down is one instruction, not forty
 
-  if (isSkip) {
-    seekPlayerBy(e.key === "ArrowRight" ? SKIP_SECONDS : -SKIP_SECONDS);
-  } else {
-    const v = $("hlsvideo");
-    viewerTookControl();          // a deliberate act: don't drag them elsewhere
-    if (v.paused) v.play().catch(() => {}); else v.pause();
-  }
-  e.preventDefault();             // or the page scrolls a screen on every space
-});
+  if (isSkip) seekPlayerBy(e.key === "ArrowRight" ? SKIP_SECONDS : -SKIP_SECONDS);
+  else togglePlayback();
+}, true);   // capture — see below
 
 /* A brief note under the player, cleared after a few seconds. */
 let playerMsgTimer = 0;
