@@ -3421,8 +3421,8 @@ public sealed partial class ControlApi : IDisposable
             <div id="msg">loading…</div>
             <div id="seeknote"></div>
             <div id="skip">
-              <button id="sk-back" title="Back 30 seconds (← or J)">⏪ 30s</button>
-              <button id="sk-fwd" title="Forward 30 seconds (→ or L)">30s ⏩</button>
+              <button id="sk-back" title="Back 15 seconds (← or J)">⏪ 15s</button>
+              <button id="sk-fwd" title="Forward 15 seconds (→ or L)">15s ⏩</button>
             </div>
             <div id="hint">click for fullscreen</div>
             <script>
@@ -3532,7 +3532,7 @@ public sealed partial class ControlApi : IDisposable
                  could be minutes. This asks for an exact position, and the
                  note says where it landed, so a stream that still snaps is
                  visible rather than mystifying. */
-              const SKIP = 30;
+              const SKIP = 15;   // same as the dashboard player: one skip, everywhere
               const note = document.getElementById("seeknote");
               let noteTimer = 0;
               const clock = s => {

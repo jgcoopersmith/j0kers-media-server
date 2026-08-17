@@ -799,8 +799,8 @@
       <div id="vtitle"><span id="vtitle-text"></span></div>
       <video id="hlsvideo" controls playsinline crossorigin="anonymous"></video>
       <div id="pctl" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px">
-        <button id="pc-back" title="Back 10 seconds">⏪ 10s</button>
-        <button id="pc-fwd" title="Forward 10 seconds">10s ⏩</button>
+        <button id="pc-back" title="Back 15 seconds (←)">⏪ 15s</button>
+        <button id="pc-fwd" title="Forward 15 seconds (→)">15s ⏩</button>
         <span style="flex:1"></span>
         <label style="color:var(--muted);font-size:12px">Subtitles
           <select id="pc-subs" class="am-in" style="padding:3px 6px">
@@ -2761,6 +2761,12 @@ function playableEnd(v) {
   return isFinite(v.duration) ? v.duration : Infinity;
 }
 
+/* How far the skip buttons and the arrow keys move, in seconds. One
+   constant, used by both, and the same number the watch page uses — a skip
+   that means something different depending on which player you happen to be
+   in is worse than either value. */
+const SKIP_SECONDS = 15;
+
 function seekPlayerBy(delta) {
   viewerTookControl();
   const v = $("hlsvideo");
@@ -2782,8 +2788,8 @@ function seekPlayerBy(delta) {
   }
   v.currentTime = wanted;
 }
-$("pc-back").addEventListener("click", () => seekPlayerBy(-10));
-$("pc-fwd").addEventListener("click", () => seekPlayerBy(10));
+$("pc-back").addEventListener("click", () => seekPlayerBy(-SKIP_SECONDS));
+$("pc-fwd").addEventListener("click", () => seekPlayerBy(SKIP_SECONDS));
 
 /* Arrow keys jump, the same ten seconds the buttons do. The browser only
    does this while the video's own control bar has focus, which after
@@ -2796,7 +2802,7 @@ document.addEventListener("keydown", e => {
   if ($("hlsplayer").style.display === "none") return;
   const t = e.target;
   if (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-  seekPlayerBy(e.key === "ArrowRight" ? 10 : -10);
+  seekPlayerBy(e.key === "ArrowRight" ? SKIP_SECONDS : -SKIP_SECONDS);
   e.preventDefault();
 });
 
@@ -2917,7 +2923,7 @@ async function playHls(url, startAt, tab) {
   // It has to yield to the viewer, though. A big film starts playing seconds
   // after it is clicked, and anyone who skips ahead in the meantime used to
   // be dragged back to the start the moment the first `playing` landed —
-  // which reads as "the 10s button restarted the film", since tapping it a
+  // which reads as "the skip button restarted the film", since tapping it a
   // few times is what puts you in that window. The correction cannot tell a
   // player's own jump from a deliberate seek, so any sign of the viewer
   // choosing a position cancels it. hls.js is given startPosition regardless,
