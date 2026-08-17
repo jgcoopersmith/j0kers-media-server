@@ -3557,14 +3557,45 @@ public sealed partial class ControlApi : IDisposable
 
               goFullscreen();
               addEventListener("click", () => { goFullscreen(); hint.style.opacity = "0"; }, { once: true });
+              // Capture phase, and an intention held for half a second.
+              //
+              // Measured in Chrome 148: a keydown reaches document capture,
+              // then any listener on the video, then document bubble. This
+              // was a bubble listener, so the video's own control bar had
+              // already toggled play/pause by the time it ran — it then read
+              // the state the video had just changed and toggled it straight
+              // back. Press space while paused and it started, then stopped.
+              // Capture reads the state before anything else touches it, and
+              // holding the intention undoes a second toggle from either
+              // side, whoever fires it.
+              let want = null, wantAt = 0;
+              function hold() {
+                if (want === "play") { if (v.paused) v.play().catch(() => {}); }
+                else if (want === "pause") { if (!v.paused) v.pause(); }
+              }
+              for (const ev of ["play", "pause"]) v.addEventListener(ev, () => {
+                if (!want) return;
+                if (performance.now() - wantAt > 500) { want = null; return; }
+                hold();
+              });
+              v.addEventListener("pointerdown", () => { want = null; });  // a click outranks the key
+
               addEventListener("keydown", e => {
                 if (e.key === "f") { goFullscreen(); return; }
+                const t = e.target;
+                if (t && (t.tagName === "SELECT" || t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
                 // preventDefault, or the browser adds its own 5-second seek
-                // on top of ours and the skip is neither 30 nor predictable
-                if (e.key === "ArrowLeft"  || e.key === "j" || e.key === "J") { e.preventDefault(); skip(-SKIP); }
-                if (e.key === "ArrowRight" || e.key === "l" || e.key === "L") { e.preventDefault(); skip(SKIP); }
-                if (e.key === " " || e.key === "k" || e.key === "K") { e.preventDefault(); v.paused ? v.play() : v.pause(); }
-              });
+                // on top of ours and the skip is neither 15 nor predictable
+                if (e.key === "ArrowLeft"  || e.key === "j" || e.key === "J") { e.preventDefault(); if (!e.repeat) skip(-SKIP); }
+                if (e.key === "ArrowRight" || e.key === "l" || e.key === "L") { e.preventDefault(); if (!e.repeat) skip(SKIP); }
+                if (e.key === " " || e.key === "Spacebar" || e.key === "k" || e.key === "K") {
+                  e.preventDefault();
+                  if (e.repeat) return;
+                  want = v.paused ? "play" : "pause";
+                  wantAt = performance.now();
+                  hold();
+                }
+              }, true);
               // it stops being useful the moment fullscreen happens
               document.addEventListener("fullscreenchange",
                 () => { if (document.fullscreenElement) hint.style.display = "none"; });

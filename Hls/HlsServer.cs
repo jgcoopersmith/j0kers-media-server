@@ -716,8 +716,8 @@ public sealed class HlsServer : IDisposable
             <body>
             <video id="v" controls playsinline></video>
             <div class="ctl">
-              <button id="back" title="Back 10 seconds (← arrow)">⏪ 10s</button>
-              <button id="fwd" title="Forward 10 seconds (→ arrow)">10s ⏩</button>
+              <button id="back" title="Back 15 seconds (← arrow) · space plays and pauses">⏪ 15s</button>
+              <button id="fwd" title="Forward 15 seconds (→ arrow) · space plays and pauses">15s ⏩</button>
               <span style="flex:1"></span>
               <label>Speed
                 <select id="speed">
@@ -832,8 +832,8 @@ public sealed class HlsServer : IDisposable
                 }
                 v.currentTime = wanted;
               }
-              document.getElementById("back").addEventListener("click", function () { seekBy(-10); });
-              document.getElementById("fwd").addEventListener("click", function () { seekBy(10); });
+              document.getElementById("back").addEventListener("click", function () { seekBy(-15); });
+              document.getElementById("fwd").addEventListener("click", function () { seekBy(15); });
 
               speed.addEventListener("change", function () {
                 v.playbackRate = parseFloat(speed.value) || 1;
@@ -848,18 +848,50 @@ public sealed class HlsServer : IDisposable
                 v.playbackRate = parseFloat(speed.value) || 1;
               });
 
-              // Arrow keys jump. The browser only does this while its own
-              // control bar has focus, which after clicking anywhere on the
-              // page it does not — so the whole document listens instead.
-              // The dropdowns keep their arrows: that is how a select is
-              // operated from the keyboard.
+              // Arrow keys jump 15 seconds, space plays and pauses. The
+              // browser only does any of this while its own control bar has
+              // focus, which after clicking anywhere on the page it does not
+              // — so the whole document listens instead. The dropdowns keep
+              // their arrows: that is how a select is operated from the
+              // keyboard.
+              //
+              // Capture phase, and an intention held for half a second.
+              // Measured in Chrome 148: a keydown reaches document capture,
+              // then any listener on the video, then document bubble. On
+              // bubble, the video's own controls have already toggled
+              // play/pause, so reading v.paused there reads the state they
+              // just changed and toggling again undoes it — space starts the
+              // film and stops it again. Capture reads the state first, and
+              // the hold puts right a second toggle from either side.
+              let want = null, wantAt = 0;
+              function hold() {
+                if (want === "play") { if (v.paused) v.play().catch(function () {}); }
+                else if (want === "pause") { if (!v.paused) v.pause(); }
+              }
+              ["play", "pause"].forEach(function (ev) {
+                v.addEventListener(ev, function () {
+                  if (!want) return;
+                  if (performance.now() - wantAt > 500) { want = null; return; }
+                  hold();
+                });
+              });
+              v.addEventListener("pointerdown", function () { want = null; });
+
               document.addEventListener("keydown", function (e) {
                 if (e.altKey || e.ctrlKey || e.metaKey) return;
                 const t = e.target;
                 if (t && (t.tagName === "SELECT" || t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
-                if (e.key === "ArrowRight") { seekBy(10); e.preventDefault(); }
-                else if (e.key === "ArrowLeft") { seekBy(-10); e.preventDefault(); }
-              });
+                if (t && (t.tagName === "BUTTON" || t.tagName === "A")) return;
+                if (e.key === "ArrowRight") { e.preventDefault(); if (!e.repeat) seekBy(15); }
+                else if (e.key === "ArrowLeft") { e.preventDefault(); if (!e.repeat) seekBy(-15); }
+                else if (e.key === " " || e.key === "Spacebar" || e.key === "k" || e.key === "K") {
+                  e.preventDefault();
+                  if (e.repeat) return;
+                  want = v.paused ? "play" : "pause";
+                  wantAt = performance.now();
+                  hold();
+                }
+              }, true);
 
               v.play().catch(() => {}); // autoplay may need a tap; controls are visible
             </script>
