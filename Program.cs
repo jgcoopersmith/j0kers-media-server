@@ -425,8 +425,14 @@ try
                 // the dashboard must not take the server down
                 config.Control.ShutdownOnClose = false;
                 Log.Info("main", $"running in the tray — double-click the joker icon for the dashboard ({dashboardUrl})");
-                icon.Notify("j0kers Media Server",
-                    $"Running in the background.\nIf you don't see the icon, click the ^ arrow on the taskbar.\n{dashboardUrl}");
+                // No balloon here. Background mode fires this on every single
+                // startup — the log shows it dozens of times — which is a
+                // notification for something the user already asked to have
+                // happen every time. The one balloon worth showing is on the
+                // *other* end: closing the dashboard while in the background
+                // is the moment someone could mistake for the app having
+                // quit, and that one (OnDashboardClosed, below) already only
+                // fires when background mode is the thing actually in effect.
                 return true;
             }
 
