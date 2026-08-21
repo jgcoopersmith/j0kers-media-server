@@ -414,11 +414,24 @@ public sealed class HlsServer : IDisposable
             // on it at that exact point and hand the segment over when it
             // lands. This is the whole of skipping ahead: the player never
             // learns the segment was not already there.
-            if (!File.Exists(segment) && !EnsureSegmentReady(parts[0], streamDir, segment))
+            //
+            // What actually gets served is resolved here rather than assumed
+            // to be `segment` itself: a seek job never writes the canonical
+            // name — see SeekSegmentPath — so the file worth opening below
+            // may be a differently-named stand-in. The canonical name wins
+            // once it exists, since that is the in-order job's own
+            // continuous encode and the authoritative one.
+            var toServe = segment;
+            if (!File.Exists(toServe))
             {
-                WriteText(res, 404, "text/plain", "not found");
-                return;
+                toServe = FindServableSegment(parts[0], streamDir, segment);
+                if (toServe is null)
+                {
+                    WriteText(res, 404, "text/plain", "not found");
+                    return;
+                }
             }
+            segment = toServe;
 
             res.StatusCode = 200;
             res.ContentType = Path.GetExtension(segment).ToLowerInvariant() switch
@@ -525,33 +538,48 @@ public sealed class HlsServer : IDisposable
     }
 
     /// <summary>
-    /// Waits for a segment that has not been converted yet, having asked for
-    /// it to be made. True when it can be served.
+    /// Finds (starting production if nothing is under way) the file that
+    /// answers a request for a segment nobody has converted yet — the
+    /// canonical name once the in-order job reaches it, or a seek job's own
+    /// tagged stand-in before that. Null when neither turns up in time.
     /// </summary>
     /// <remarks>
-    /// The wait is bounded: a player that is made to wait indefinitely gives
-    /// up on its own terms and shows a failure, which is worse than a gap it
-    /// can retry. A segment counts as ready when the encoder has moved past
-    /// it — the one after it exists — or when it has stopped growing, which
-    /// is how the last segment of a run finishes.
+    /// A seek job never writes the canonical name — see
+    /// Media.FfmpegManager.SeekSegmentPath — so what gets served is
+    /// resolved by what actually exists on disk, not assumed from the URL.
+    /// That split is itself a fix: this and the in-order job used to write
+    /// the identical filename, and on a machine that encodes a film in a
+    /// few minutes the in-order job reaches a seek's target well within a
+    /// single visit, so whichever finished writing last silently overwrote
+    /// the other mid-flight. The corrupt fragment that produced is what a
+    /// player answers by reloading the entire film from the start — which
+    /// is what skipping forward kept doing, reliably, after however long it
+    /// took the in-order job to catch up. Separate names make that
+    /// collision impossible rather than merely unlikely.
+    ///
+    /// The wait itself is bounded: a player left waiting indefinitely gives
+    /// up on its own terms and shows a failure, which is worse than a gap
+    /// it can retry. A segment counts as ready when the job producing it
+    /// has moved past it — the one after it exists, under the same tag —
+    /// or when it has stopped growing, which is how the last segment of a
+    /// run finishes.
     /// </remarks>
-    private bool EnsureSegmentReady(string stream, string streamDir, string segment)
+    private string? FindServableSegment(string stream, string streamDir, string canonicalSegment)
     {
-        var name = Path.GetFileNameWithoutExtension(segment);
-        if (!name.StartsWith("seg_", StringComparison.OrdinalIgnoreCase)) return false;
+        var name = Path.GetFileNameWithoutExtension(canonicalSegment);
+        if (!name.StartsWith("seg_", StringComparison.OrdinalIgnoreCase)) return null;
         if (!int.TryParse(name.AsSpan(4), NumberStyles.Integer, CultureInfo.InvariantCulture, out var index))
-            return false;
-        if (Ffmpeg is null || !Ffmpeg.EnsureVodSegment(stream, index)) return false;
+            return null;
+        if (Ffmpeg is null || !Ffmpeg.EnsureVodSegment(stream, index)) return null;
 
-        var ext = Path.GetExtension(segment);
-        var next = Path.Combine(streamDir, $"seg_{index + 1:D5}{ext}");
         // Measured, in wwwroot/hls.min.js's bundled default policy, not
         // guessed: a fragment request gets maxTimeToFirstByteMs = 10000
-        // before hls.js calls it a timeout — and this held the connection
-        // open, sending nothing at all, for up to 30 seconds. Every seek
-        // into unconverted film broke the same way regardless of how fast
-        // the encode actually was, because silence past ten seconds is a
-        // timeout on its own terms, not a matter of finishing in time.
+        // before hls.js calls it a timeout — and this used to hold the
+        // connection open, sending nothing at all, for up to 30 seconds.
+        // Every seek into unconverted film broke the same way regardless of
+        // how fast the encode actually was, because silence past ten
+        // seconds is a timeout on its own terms, not a matter of finishing
+        // in time.
         //
         // A timeout and an honest miss are not answered the same way by
         // the player, and that difference is the fix. A timeout gets
@@ -565,29 +593,45 @@ public sealed class HlsServer : IDisposable
         // within the window, ready or not, is what earns that better
         // handling. The encoder job itself is untouched by any of this and
         // keeps running underneath every attempt.
+        var ext = Path.GetExtension(canonicalSegment).TrimStart('.');
         var deadline = DateTime.UtcNow.AddSeconds(7);
         long lastSize = -1;
         var stableFor = 0;
+        string? lastSeen = null;
         while (DateTime.UtcNow < deadline)
         {
-            if (File.Exists(segment))
+            if (File.Exists(canonicalSegment)) return canonicalSegment;   // in-order job got there
+
+            string? found;
+            try { found = Directory.EnumerateFiles(streamDir, $"seg_{index:D5}.seek*.{ext}").FirstOrDefault(); }
+            catch { found = null; }
+
+            if (found is not null)
             {
-                if (File.Exists(next)) return true;          // encoder has moved on
+                if (found != lastSeen) { lastSeen = found; stableFor = 0; lastSize = -1; }
+                // "the job producing this has moved past it" — parse the
+                // same tag back out and check for that job's next segment,
+                // the seek-job equivalent of the in-order case above.
+                var tag = Path.GetFileNameWithoutExtension(found).Split('.', 3).ElementAtOrDefault(1);
+                if (tag is not null && tag.StartsWith("seek", StringComparison.OrdinalIgnoreCase)
+                    && File.Exists(Path.Combine(streamDir, $"seg_{index + 1:D5}.{tag}.{ext}")))
+                    return found;
+
                 long size;
-                try { size = new FileInfo(segment).Length; } catch { size = -1; }
+                try { size = new FileInfo(found).Length; } catch { size = -1; }
                 if (size > 0 && size == lastSize)
                 {
-                    if (++stableFor >= 3) return true;        // finished, nothing following it
+                    if (++stableFor >= 3) return found;       // finished, nothing following it
                 }
                 else stableFor = 0;
                 lastSize = size;
             }
             Thread.Sleep(200);
         }
-        // Not a failure — the encoder is still running and the next request
+        // Not a failure — a job is still running and the next request
         // (hls.js's own retry, a second or so from now) will very likely
         // find it done. Only worth a log line if it keeps happening.
-        return false;
+        return null;
     }
 
     private string BuildPlaylist(string streamDir)
@@ -597,6 +641,16 @@ public sealed class HlsServer : IDisposable
             // init.mp4 is an initialization segment, not media — listing it
             // (it also sorts first) produced an unplayable playlist
             .Where(f => !Path.GetFileName(f).Equals("init.mp4", StringComparison.OrdinalIgnoreCase))
+            // A seek job's own stand-ins (seg_NNNNN.seekMMMMM.ext — see
+            // Media.FfmpegManager.SeekSegmentPath) are not segments of their
+            // own; they are a temporary cover for a canonical name until
+            // the in-order job writes it, or leftovers once it has. Once a
+            // conversion finishes this method is what serves it — a
+            // directory-scan fallback, unlike the arithmetic whole-film
+            // playlist used while still converting — and it would otherwise
+            // list every leftover stand-in as an extra, bogus segment
+            // alongside the real ones.
+            .Where(f => !Path.GetFileNameWithoutExtension(f).Contains(".seek", StringComparison.OrdinalIgnoreCase))
             .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
             .ToList();
 

@@ -499,6 +499,7 @@ public sealed class FfmpegManager : IDisposable
                             _vodJobs.Remove(stream);
                     }
                     lock (_progressLock) _vodProgress.Remove(stream);
+                    SweepSupersededSeekSegments(dir);
                 });
             _vodJobs[stream] = job;
             started = stream;
@@ -534,13 +535,15 @@ public sealed class FfmpegManager : IDisposable
     public static int SegmentSeconds => VodSegmentSeconds;
 
     /// <summary>
-    /// The segment index a running job is about to write next, or -1 when
-    /// nothing is producing that part of the film.
+    /// How far a specific seek job has actually reached: the first index
+    /// from <paramref name="from"/> for which its own tagged file does not
+    /// yet exist. Distinct from the in-order job's progress, which is read
+    /// straight off the canonical filenames it alone writes.
     /// </summary>
-    private static int NextIndexOnDisk(string dir, int from)
+    private static int NextIndexOnDisk(string dir, int from, int jobStart)
     {
         var i = from;
-        while (File.Exists(SegmentPath(dir, i))) i++;
+        while (File.Exists(SeekSegmentPath(dir, i, jobStart))) i++;
         return i;
     }
 
@@ -548,6 +551,76 @@ public sealed class FfmpegManager : IDisposable
         File.Exists(Path.Combine(dir, "init.mp4"))
             ? Path.Combine(dir, $"seg_{index:D5}.m4s")
             : Path.Combine(dir, $"seg_{index:D5}.ts");
+
+    /// <summary>
+    /// A seek job's own name for the segment at <paramref name="index"/>,
+    /// tagged with the job's own start so two jobs — a seek job and the
+    /// in-order conversion, or two seek jobs — can never write the same
+    /// file.
+    /// </summary>
+    /// <remarks>
+    /// The in-order conversion never stops: it runs from 0 to the end of
+    /// the film regardless of any seek, so every index a seek job produces
+    /// is one the in-order job will eventually reach too — not eventually
+    /// in the sense of maybe, but on a machine that encodes this much
+    /// faster than the film plays, in well under the length of a viewer's
+    /// visit. Both processes used to write the identical filename, so
+    /// whichever finished last simply overwrote the other's segment
+    /// mid-flight — the corrupt fragment a player then chokes on and
+    /// answers by reloading the entire film from the start. This tag is
+    /// the fix: nothing but the in-order job ever writes the plain name,
+    /// so it can never be overwritten by anything, and each seek job has
+    /// a name only it uses, so two of those can't collide with each other
+    /// either.
+    /// </remarks>
+    public static string SeekSegmentPath(string dir, int index, int jobStart) =>
+        File.Exists(Path.Combine(dir, "init.mp4"))
+            ? Path.Combine(dir, $"seg_{index:D5}.seek{jobStart:D5}.m4s")
+            : Path.Combine(dir, $"seg_{index:D5}.seek{jobStart:D5}.ts");
+
+    /// <summary>
+    /// Deletes a seek job's stand-in wherever the in-order job has since
+    /// written that same index's canonical file — the stand-in served its
+    /// purpose and is now just a second copy of the same six seconds. Only
+    /// ever removes a file whose canonical sibling provably exists, so an
+    /// interrupted conversion loses nothing it was still covering for.
+    /// Called when the in-order job exits, successfully or not — a partial
+    /// run still leaves some segments genuinely superseded even if not all
+    /// of them.
+    /// </summary>
+    private static void SweepSupersededSeekSegments(string dir)
+    {
+        try
+        {
+            foreach (var f in Directory.EnumerateFiles(dir, "seg_*.seek*.*"))
+            {
+                var name = Path.GetFileNameWithoutExtension(f);           // seg_00016.seek00016
+                var parts = name.Split('.', 3);
+                if (parts.Length < 2 || !int.TryParse(parts[0].AsSpan(4), System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture, out var index))
+                    continue;
+                if (File.Exists(SegmentPath(dir, index)))
+                {
+                    try { File.Delete(f); } catch { }
+                }
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// Any already-produced stand-in for this segment from a seek job,
+    /// current or past — used both to avoid starting a redundant job and
+    /// to serve a segment nobody has promoted to the canonical name yet.
+    /// </summary>
+    private static string? ExistingSeekSegment(string dir, int index, string segExt)
+    {
+        try
+        {
+            return Directory.EnumerateFiles(dir, $"seg_{index:D5}.seek*.{segExt}").FirstOrDefault();
+        }
+        catch { return null; }
+    }
 
     /// <summary>
     /// Makes sure something is producing the segment at <paramref name="index"/>,
@@ -559,7 +632,10 @@ public sealed class FfmpegManager : IDisposable
         if (index < 0) return false;
         var dir = Path.Combine(_mediaRoot, stream);
         if (!Directory.Exists(dir)) return false;
-        if (File.Exists(SegmentPath(dir, index))) return true;
+        var fmp4Check = File.Exists(Path.Combine(dir, "init.mp4"));
+        var extCheck = fmp4Check ? "m4s" : "ts";
+        if (File.Exists(SegmentPath(dir, index)) || ExistingSeekSegment(dir, index, extCheck) is not null)
+            return true;
 
         string source;
         try { source = File.ReadAllText(Path.Combine(dir, "source.txt")).Trim(); }
@@ -568,27 +644,32 @@ public sealed class FfmpegManager : IDisposable
 
         lock (_lock)
         {
-            if (File.Exists(SegmentPath(dir, index))) return true;
+            if (File.Exists(SegmentPath(dir, index)) || ExistingSeekSegment(dir, index, extCheck) is not null)
+                return true;
 
             // Somebody already on their way there? A job counts as covering
             // this segment when it starts at or before it and has not yet
             // been overtaken by the request — within a few segments it is
             // quicker to let it arrive than to start another encoder.
+            //
+            // The in-order conversion used to get this same grace, treated
+            // as covering anything within a few segments of wherever it had
+            // reached. That assumed it moves roughly with the viewer, which
+            // held right up until a machine fast enough to encode a film in
+            // a few minutes made it false: the in-order job can be tens of
+            // segments past where it looks, blowing straight through a
+            // seek's target before this ever gets called. It doesn't need
+            // the grace any more anyway — seek and in-order segments no
+            // longer share a filename, so there is nothing left for the
+            // in-order job's position to protect against.
             if (_seekJobs.TryGetValue(stream, out var jobs))
             {
                 jobs.RemoveAll(j => { try { return j.Process.HasExited; } catch { return true; } });
                 foreach (var j in jobs)
                 {
                     if (j.StartIndex > index) continue;
-                    if (NextIndexOnDisk(dir, j.StartIndex) + 4 >= index) return true;
+                    if (NextIndexOnDisk(dir, j.StartIndex, j.StartIndex) + 4 >= index) return true;
                 }
-            }
-            // the original in-order conversion counts too, if it is close
-            if (_vodJobs.TryGetValue(stream, out var main))
-            {
-                var alive = false;
-                try { alive = !main.HasExited; } catch { }
-                if (alive && NextIndexOnDisk(dir, 0) + 4 >= index) return true;
             }
 
             // Two at a time is plenty: one catching up to where the viewer
@@ -604,8 +685,8 @@ public sealed class FfmpegManager : IDisposable
             }
 
             var at = (double)index * VodSegmentSeconds;
-            var fmp4 = File.Exists(Path.Combine(dir, "init.mp4"));
-            var segExt = fmp4 ? "m4s" : "ts";
+            var fmp4 = fmp4Check;
+            var segExt = extCheck;
 
             // -ss before -i so ffmpeg seeks the input rather than decoding
             // and discarding everything up to the mark. -output_ts_offset
@@ -639,7 +720,11 @@ public sealed class FfmpegManager : IDisposable
                                   "-hls_playlist_type", "event",
                                   "-start_number", Inv(index) });
             if (fmp4) args.AddRange(new[] { "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4" });
-            args.AddRange(new[] { "-hls_segment_filename", Path.Combine(dir, $"seg_%05d.{segExt}"),
+            // Tagged with this job's own start, not the canonical name the
+            // in-order job uses — see SeekSegmentPath. %05d is still
+            // ffmpeg's own per-segment counter; -start_number above makes
+            // its first substitution equal index, same as before.
+            args.AddRange(new[] { "-hls_segment_filename", Path.Combine(dir, $"seg_%05d.seek{index:D5}.{segExt}"),
                                   Path.Combine(dir, $"seek_{index:D5}.m3u8") });
 
             Log.Info("ffmpeg", $"seek-ahead: {stream} from segment {index} ({Inv(at)}s)");
