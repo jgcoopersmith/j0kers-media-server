@@ -661,6 +661,20 @@
   .root-chip .open { cursor: pointer; }
   .root-chip.active { border-color: var(--series-1); color: var(--ink); }
   .root-chip button { border: none; background: none; padding: 2px 4px; }
+
+  /* Selecting text in the stream list.
+     A link and an image are draggable to the browser whether or not anyone
+     asked, so dragging across a stream's title started a link drag and the
+     selection never began — the reason the list still could not be copied
+     after the card's own drag was taken out of the way. Rows are not a
+     place you drag things from: the ⠿ grip reorders, and nothing else in a
+     row is worth dragging out of the page. The condensed tiles are exempt,
+     because there the tile *is* the drag handle. */
+  #hls { user-select: text; -webkit-user-select: text; }
+  #hls:not(.tv-grid) a, #hls:not(.tv-grid) img {
+    -webkit-user-drag: none; user-drag: none;
+  }
+
   /* small poster next to each HLS stream row */
   .hls-thumb {
     width: 56px; height: 32px; flex: none; border-radius: 5px;
@@ -2404,7 +2418,10 @@ function renderHls() {
     // small poster frame taken from the stream's own media; click to play.
     // Falls back to an icon if a frame can't be grabbed.
     const posterUrl = mediaUrl("/" + encodeURIComponent(s.name) + "/thumb.jpg");
-    const thumb = cls => '<img class="' + cls + '" src="' + esc(posterUrl) + '" alt=""'
+    // draggable="false" as well as the CSS: Firefox has no -webkit-user-drag,
+    // and the attribute is what it honours. A tile still drags, because the
+    // tile itself carries draggable="true" and this only speaks for the image.
+    const thumb = cls => '<img class="' + cls + '" draggable="false" src="' + esc(posterUrl) + '" alt=""'
       + ' data-act="hls-play" data-arg="' + esc(url) + '" title="' + esc(s.source || s.name) + '"'
       + ' onerror="this.replaceWith(Object.assign(document.createElement(\'span\'),'
       + '{className:\'' + cls + ' hls-thumb-fallback\',textContent:\'🎬\'}))">';
@@ -2430,7 +2447,7 @@ function renderHls() {
       + '<span class="hls-grip" title="Drag to reorder">⠿</span>'
       + thumb("hls-thumb")
       + '<div style="flex:1;min-width:0">' + transcoding
-      + '<a href="' + esc(watchUrl) + '" target="_blank" rel="noopener" title="Open the watch page">'
+      + '<a href="' + esc(watchUrl) + '" target="_blank" rel="noopener" draggable="false" title="Open the watch page">'
       + esc(s.title || s.name) + '</a>'
       + '<div class="mono" style="color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
       + esc(s.name) + '</div>'

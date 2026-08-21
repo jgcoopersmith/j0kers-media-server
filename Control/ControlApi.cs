@@ -3541,12 +3541,51 @@ public sealed partial class ControlApi : IDisposable
                 return (h ? h + ":" + String(m).padStart(2, "0") : String(m))
                        + ":" + String(x).padStart(2, "0");
               };
+              /* How far playback can actually go right now.
+                 seekable first, duration only as a fallback — and that order
+                 is the whole point. While a file is still being converted the
+                 playlist grows as ffmpeg writes it, and duration is the
+                 optimistic figure: it names an end that has not been written
+                 yet. Clamping a skip to it seeks onto a fragment that does
+                 not exist, hls.js raises a fatal error, the recovery above
+                 reloads and restores the position, and the next press does it
+                 again — forward a few times, then a stall, a pause and a
+                 restart. seekable is the honest bound; the dashboard player
+                 and the watch page both take it, and this one now agrees. */
+              function playableEnd() {
+                if (v.seekable && v.seekable.length) return v.seekable.end(v.seekable.length - 1);
+                return isFinite(v.duration) ? v.duration : Infinity;
+              }
               function skip(by) {
                 if (!isFinite(v.duration) && by > 0 && live) return;   // no seeking past a live edge
-                const end = isFinite(v.duration) ? v.duration
-                          : (v.seekable.length ? v.seekable.end(v.seekable.length - 1) : 0);
-                const want = Math.min(Math.max(0, v.currentTime + by), Math.max(0, end - 0.5));
+                if (by < 0) {
+                  const back = Math.max(0, v.currentTime + by);
+                  try { v.currentTime = back; } catch { return; }
+                  showNote(by, back);
+                  return;
+                }
+                // a moment short of the edge: landing exactly on it is what a
+                // player reads as "past the end", and on a growing playlist
+                // the edge is moving anyway
+                const limit = playableEnd() - 0.5;
+                const wanted = v.currentTime + by;
+                let want = wanted;
+                if (isFinite(limit) && wanted > limit) {
+                  // Already there. Seeking to the same spot over and over is
+                  // exactly what provokes the reload, so say so and stay put.
+                  if (v.currentTime >= limit - 1) {
+                    note.textContent = "That's as far as this stream goes right now.";
+                    note.style.opacity = "1";
+                    clearTimeout(noteTimer);
+                    noteTimer = setTimeout(() => { note.style.opacity = "0"; }, 2200);
+                    return;
+                  }
+                  want = Math.max(0, limit);
+                }
                 try { v.currentTime = want; } catch { return; }
+                showNote(by, want);
+              }
+              function showNote(by, want) {
                 note.textContent = (by > 0 ? "⏩ +" : "⏪ −") + Math.abs(by) + "s · " + clock(want);
                 note.style.opacity = "1";
                 clearTimeout(noteTimer);
