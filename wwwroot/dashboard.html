@@ -5244,7 +5244,14 @@ let draggingCard = null;
    Everything else — the title bar, the card's own background, plain
    headings and labels — is fair game as a handle. */
 const NO_DRAG_FROM = "button, a, input, select, textarea, label, video, audio, img," +
-                     " [data-act], [contenteditable], table, pre, code, #log, .tiles";
+                     " [data-act], [contenteditable], table, pre, code, #log, .tiles," +
+                     // The stream list is text you want to get out of it — the
+                     // stream id the URLs are built from, the playlist address in
+                     // Info view. Dragging across it to select was arming the card
+                     // instead, so the selection never happened and the card slid
+                     // away under the pointer. Rows keep their own reordering:
+                     // that is armed by the ⠿ grip, which is not affected by this.
+                     " #hls";
 
 function canDragFrom(target) {
   if (!(target instanceof Element)) return true;
