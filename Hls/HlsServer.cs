@@ -339,6 +339,25 @@ public sealed class HlsServer : IDisposable
                 // A playlist written by a segmenter (ffmpeg VOD/live jobs)
                 // wins — it has exact durations and live-window state. The
                 // generated playlist covers plain directories of segments.
+                // A conversion still running: serve the whole film's worth of
+                // segments rather than the encoder's own playlist, which lists
+                // only what it has written. Every segment is a fixed length
+                // beginning at a forced keyframe, so segment i is [6i, 6i+6)
+                // whether or not it exists yet — and one that does not exist
+                // is made when it is asked for. That is what lets the seek bar
+                // cover the film from the start and a skip land past the
+                // encoder instead of stopping the stream.
+                if (parts[1] is "index.m3u8" or "playlist.m3u8")
+                {
+                    var whole = WholeVodPlaylist(streamDir, parts[0]);
+                    if (whole is not null)
+                    {
+                        WriteText(res, 200, "application/vnd.apple.mpegurl",
+                            AppendTokenToUris(whole, token));
+                        return;
+                    }
+                }
+
                 var onDisk = Path.Combine(streamDir, parts[1]);
                 if (File.Exists(onDisk) && !parts[1].Contains(".."))
                 {
@@ -383,8 +402,19 @@ public sealed class HlsServer : IDisposable
 
             var segment = Path.GetFullPath(Path.Combine(streamDir, parts[1]));
             if (!segment.StartsWith(streamDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
-                !File.Exists(segment) ||
                 !SegmentExtensions.Contains(Path.GetExtension(segment).ToLowerInvariant()))
+            {
+                WriteText(res, 404, "text/plain", "not found");
+                return;
+            }
+
+            // Asked for a part of the film nobody has converted yet — which is
+            // what skipping forward past the encoder looks like from here.
+            // Rather than the 404 that used to stop playback, put an encoder
+            // on it at that exact point and hand the segment over when it
+            // lands. This is the whole of skipping ahead: the player never
+            // learns the segment was not already there.
+            if (!File.Exists(segment) && !EnsureSegmentReady(parts[0], streamDir, segment))
             {
                 WriteText(res, 404, "text/plain", "not found");
                 return;
@@ -435,6 +465,107 @@ public sealed class HlsServer : IDisposable
         // root ("C:\"), and appending another would match nothing.
         var prefix = _mediaRoot.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
         return full.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? full : null;
+    }
+
+    /// <summary>
+    /// The playlist for a conversion still in progress: every segment the
+    /// finished film will have, listed now.
+    /// </summary>
+    /// <remarks>
+    /// The encoder's own playlist grows behind it, which is why the seek bar
+    /// used to stop where the conversion had reached and a skip past it had
+    /// nowhere to land. Segment length is fixed and every segment starts at a
+    /// forced keyframe, so segment i covers [6i, 6i+6) by arithmetic — the
+    /// list can be written before the segments exist, and a request for one
+    /// that doesn't makes it.
+    ///
+    /// Null when this isn't such a stream: an unconverted directory, a live
+    /// channel, a conversion that has finished, or one whose length was never
+    /// recorded. Those keep the playlist they had.
+    /// </remarks>
+    private string? WholeVodPlaylist(string streamDir, string stream)
+    {
+        if (!stream.StartsWith("vod-", StringComparison.OrdinalIgnoreCase)) return null;
+        var transcoding = Ffmpeg?.ActiveVodStreams
+            .Contains(stream, StringComparer.OrdinalIgnoreCase) ?? false;
+        if (!transcoding) return null;
+
+        double duration;
+        try
+        {
+            var text = File.ReadAllText(Path.Combine(streamDir, "duration.txt")).Trim();
+            if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out duration))
+                return null;
+        }
+        catch { return null; }
+        if (duration <= 0) return null;
+
+        var seconds = Media.FfmpegManager.SegmentSeconds;
+        var count = (int)Math.Ceiling(duration / seconds);
+        if (count <= 0) return null;
+        var fmp4 = File.Exists(Path.Combine(streamDir, "init.mp4"));
+        var ext = fmp4 ? "m4s" : "ts";
+
+        var sb = new StringBuilder();
+        sb.Append("#EXTM3U\n");
+        sb.Append("#EXT-X-VERSION:3\n");
+        sb.Append($"#EXT-X-TARGETDURATION:{seconds}\n");
+        sb.Append("#EXT-X-MEDIA-SEQUENCE:0\n");
+        sb.Append("#EXT-X-PLAYLIST-TYPE:VOD\n");
+        if (fmp4) sb.Append("#EXT-X-MAP:URI=\"init.mp4\"\n");
+        for (var i = 0; i < count; i++)
+        {
+            // the last one is whatever is left over, not a full segment
+            var len = i == count - 1 ? Math.Max(0.1, duration - (double)i * seconds) : seconds;
+            sb.Append("#EXTINF:").Append(len.ToString("0.000", CultureInfo.InvariantCulture)).Append(",\n");
+            sb.Append($"seg_{i:D5}.{ext}\n");
+        }
+        sb.Append("#EXT-X-ENDLIST\n");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Waits for a segment that has not been converted yet, having asked for
+    /// it to be made. True when it can be served.
+    /// </summary>
+    /// <remarks>
+    /// The wait is bounded: a player that is made to wait indefinitely gives
+    /// up on its own terms and shows a failure, which is worse than a gap it
+    /// can retry. A segment counts as ready when the encoder has moved past
+    /// it — the one after it exists — or when it has stopped growing, which
+    /// is how the last segment of a run finishes.
+    /// </remarks>
+    private bool EnsureSegmentReady(string stream, string streamDir, string segment)
+    {
+        var name = Path.GetFileNameWithoutExtension(segment);
+        if (!name.StartsWith("seg_", StringComparison.OrdinalIgnoreCase)) return false;
+        if (!int.TryParse(name.AsSpan(4), NumberStyles.Integer, CultureInfo.InvariantCulture, out var index))
+            return false;
+        if (Ffmpeg is null || !Ffmpeg.EnsureVodSegment(stream, index)) return false;
+
+        var ext = Path.GetExtension(segment);
+        var next = Path.Combine(streamDir, $"seg_{index + 1:D5}{ext}");
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        long lastSize = -1;
+        var stableFor = 0;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (File.Exists(segment))
+            {
+                if (File.Exists(next)) return true;          // encoder has moved on
+                long size;
+                try { size = new FileInfo(segment).Length; } catch { size = -1; }
+                if (size > 0 && size == lastSize)
+                {
+                    if (++stableFor >= 3) return true;        // finished, nothing following it
+                }
+                else stableFor = 0;
+                lastSize = size;
+            }
+            Thread.Sleep(200);
+        }
+        Log.Warn("hls", $"segment {index} of {stream} did not arrive in time");
+        return false;
     }
 
     private string BuildPlaylist(string streamDir)
@@ -816,21 +947,13 @@ public sealed class HlsServer : IDisposable
               }
               function seekBy(delta) {
                 if (delta < 0) { v.currentTime = Math.max(0, v.currentTime + delta); return; }
-                // stay a moment short of the edge: landing exactly on it is
-                // what a player reads as "past the end", and on a growing
-                // playlist the edge moves anyway
-                const limit = playableEnd() - 0.5;
+                // Anywhere in the film. The playlist covers its whole length
+                // from the first moment and a segment that has not been
+                // converted yet is made when it is asked for, so there is no
+                // converted edge to stop short of.
+                const end = isFinite(v.duration) ? v.duration : playableEnd();
                 const wanted = v.currentTime + delta;
-                if (!isFinite(limit)) { v.currentTime = wanted; return; }
-                if (wanted > limit) {
-                  if (v.currentTime >= limit - 1) {
-                    say("That's as far as this stream goes right now.");
-                    return;
-                  }
-                  v.currentTime = limit;
-                  return;
-                }
-                v.currentTime = wanted;
+                v.currentTime = isFinite(end) ? Math.min(wanted, Math.max(0, end - 0.5)) : wanted;
               }
               document.getElementById("back").addEventListener("click", function () { seekBy(-15); });
               document.getElementById("fwd").addEventListener("click", function () { seekBy(15); });

@@ -3564,24 +3564,14 @@ public sealed partial class ControlApi : IDisposable
                   showNote(by, back);
                   return;
                 }
-                // a moment short of the edge: landing exactly on it is what a
-                // player reads as "past the end", and on a growing playlist
-                // the edge is moving anyway
-                const limit = playableEnd() - 0.5;
-                const wanted = v.currentTime + by;
-                let want = wanted;
-                if (isFinite(limit) && wanted > limit) {
-                  // Already there. Seeking to the same spot over and over is
-                  // exactly what provokes the reload, so say so and stay put.
-                  if (v.currentTime >= limit - 1) {
-                    note.textContent = "That's as far as this stream goes right now.";
-                    note.style.opacity = "1";
-                    clearTimeout(noteTimer);
-                    noteTimer = setTimeout(() => { note.style.opacity = "0"; }, 2200);
-                    return;
-                  }
-                  want = Math.max(0, limit);
-                }
+                // Skip anywhere in the film, converted or not. The playlist
+                // covers the whole length from the start now, and a segment
+                // that has not been made yet is made when the player asks
+                // for it — so there is no converted edge to stop at and
+                // nothing to clamp to. The only bound left is the film.
+                const end = isFinite(v.duration) ? v.duration : playableEnd();
+                const want = Math.min(Math.max(0, v.currentTime + by),
+                                      isFinite(end) ? Math.max(0, end - 0.5) : v.currentTime + by);
                 try { v.currentTime = want; } catch { return; }
                 showNote(by, want);
               }

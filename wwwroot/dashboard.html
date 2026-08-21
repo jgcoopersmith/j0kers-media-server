@@ -2815,22 +2815,12 @@ function seekPlayerBy(delta) {
   viewerTookControl();
   const v = $("hlsvideo");
   if (delta < 0) { v.currentTime = Math.max(0, v.currentTime + delta); return; }
-  // stay a moment short of the edge: landing exactly on it is what a player
-  // reads as "past the end", and on a growing playlist the edge moves anyway
-  const limit = playableEnd(v) - 0.5;
+  // Anywhere in the film. The playlist covers its whole length from the
+  // first moment now, and a segment that has not been converted yet is made
+  // when the player asks for it, so there is no converted edge to stop at.
+  const end = isFinite(v.duration) ? v.duration : playableEnd(v);
   const wanted = v.currentTime + delta;
-  if (!isFinite(limit)) { v.currentTime = wanted; return; }
-  if (wanted > limit) {
-    // already as far as the conversion has got — say so rather than
-    // silently doing nothing or throwing playback back to the start
-    if (v.currentTime >= limit - 1) {
-      flashPlayerMsg("That's as far as this file has been converted so far.");
-      return;
-    }
-    v.currentTime = limit;
-    return;
-  }
-  v.currentTime = wanted;
+  v.currentTime = isFinite(end) ? Math.min(wanted, Math.max(0, end - 0.5)) : wanted;
 }
 $("pc-back").addEventListener("click", () => seekPlayerBy(-SKIP_SECONDS));
 $("pc-fwd").addEventListener("click", () => seekPlayerBy(SKIP_SECONDS));

@@ -187,6 +187,9 @@ public sealed class FfmpegManager : IDisposable
 
     private static string Inv(int value) => value.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
+    /// <summary>Same, for a time or a length in seconds.</summary>
+    private static string Inv(double value) => value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+
     /// <summary>Encoders/codecs MPEG-TS cannot carry — these need fMP4 segments (RFC 8216 §3.1).</summary>
     private static readonly HashSet<string> Fmp4Only = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -477,6 +480,11 @@ public sealed class FfmpegManager : IDisposable
             var title = Media.StreamTitle.Prettify(stream);
             var duration = ProbeDurationSeconds(info.FullName);
             lock (_progressLock) _vodProgress[stream] = new VodProgress(stream, title, 0, duration);
+            // The length of the film, next to the segments, so the HLS server
+            // can list every segment the finished conversion will have before
+            // it has them. That is what lets the seek bar cover the whole film
+            // from the first moment instead of growing behind the encoder.
+            try { File.WriteAllText(Path.Combine(dir, "duration.txt"), Inv(duration)); } catch { }
 
             var job = Spawn(args, $"vod {info.Name}", dir,
                 onProgressLine: line => NoteVodProgress(stream, title, duration, line),
@@ -500,6 +508,151 @@ public sealed class FfmpegManager : IDisposable
         // playback can begin, and trimming the cache is not part of that.
         ScheduleEviction(started);
         return (started, false);
+    }
+
+    // ---- skipping forward into a film that has not been converted yet ----
+    //
+    // The conversion writes segments strictly in order, so until now a skip
+    // could only land inside what the encoder had already reached. Past that
+    // there was nothing to play, and asking for it stopped the film.
+    //
+    // A segment is a fixed six seconds and every one begins at a forced
+    // keyframe, so segment i is exactly [6i, 6i+6) — its content is known
+    // from its number alone, whether or not it exists. That makes a missing
+    // segment something to go and make rather than a wall: seek to 6i in the
+    // source, encode from there, and number the output from i so it lands in
+    // the same timeline as the rest.
+    //
+    // The original conversion is left running. It is usually well ahead of
+    // where it was when the skip happened, the viewer may skip back into
+    // what it has done, and stopping it would mean re-encoding all of that.
+    private readonly Dictionary<string, List<SeekJob>> _seekJobs = new(StringComparer.OrdinalIgnoreCase);
+
+    private sealed record SeekJob(int StartIndex, Process Process);
+
+    /// <summary>How many seconds of film one segment holds.</summary>
+    public static int SegmentSeconds => VodSegmentSeconds;
+
+    /// <summary>
+    /// The segment index a running job is about to write next, or -1 when
+    /// nothing is producing that part of the film.
+    /// </summary>
+    private static int NextIndexOnDisk(string dir, int from)
+    {
+        var i = from;
+        while (File.Exists(SegmentPath(dir, i))) i++;
+        return i;
+    }
+
+    private static string SegmentPath(string dir, int index) =>
+        File.Exists(Path.Combine(dir, "init.mp4"))
+            ? Path.Combine(dir, $"seg_{index:D5}.m4s")
+            : Path.Combine(dir, $"seg_{index:D5}.ts");
+
+    /// <summary>
+    /// Makes sure something is producing the segment at <paramref name="index"/>,
+    /// starting an encoder at that point in the film if nothing already is.
+    /// Returns false only when the stream cannot be converted at all.
+    /// </summary>
+    public bool EnsureVodSegment(string stream, int index)
+    {
+        if (index < 0) return false;
+        var dir = Path.Combine(_mediaRoot, stream);
+        if (!Directory.Exists(dir)) return false;
+        if (File.Exists(SegmentPath(dir, index))) return true;
+
+        string source;
+        try { source = File.ReadAllText(Path.Combine(dir, "source.txt")).Trim(); }
+        catch { return false; }
+        if (!File.Exists(source)) return false;
+
+        lock (_lock)
+        {
+            if (File.Exists(SegmentPath(dir, index))) return true;
+
+            // Somebody already on their way there? A job counts as covering
+            // this segment when it starts at or before it and has not yet
+            // been overtaken by the request — within a few segments it is
+            // quicker to let it arrive than to start another encoder.
+            if (_seekJobs.TryGetValue(stream, out var jobs))
+            {
+                jobs.RemoveAll(j => { try { return j.Process.HasExited; } catch { return true; } });
+                foreach (var j in jobs)
+                {
+                    if (j.StartIndex > index) continue;
+                    if (NextIndexOnDisk(dir, j.StartIndex) + 4 >= index) return true;
+                }
+            }
+            // the original in-order conversion counts too, if it is close
+            if (_vodJobs.TryGetValue(stream, out var main))
+            {
+                var alive = false;
+                try { alive = !main.HasExited; } catch { }
+                if (alive && NextIndexOnDisk(dir, 0) + 4 >= index) return true;
+            }
+
+            // Two at a time is plenty: one catching up to where the viewer
+            // is, one left over from the skip before it. A third means
+            // somebody is hammering the button, and three encoders would
+            // slow down the one they are actually waiting for.
+            jobs ??= _seekJobs[stream] = new List<SeekJob>();
+            while (jobs.Count >= 2)
+            {
+                var oldest = jobs[0];
+                jobs.RemoveAt(0);
+                try { if (!oldest.Process.HasExited) oldest.Process.Kill(true); } catch { }
+            }
+
+            var at = (double)index * VodSegmentSeconds;
+            var fmp4 = File.Exists(Path.Combine(dir, "init.mp4"));
+            var segExt = fmp4 ? "m4s" : "ts";
+
+            // -ss before -i so ffmpeg seeks the input rather than decoding
+            // and discarding everything up to the mark. -output_ts_offset
+            // puts the result back on the film's own clock, so the player
+            // reads these segments as the part of the timeline they are and
+            // not as a second film starting at zero.
+            var args = new List<string> { "-hide_banner", "-loglevel", "error", "-nostats",
+                                          "-ss", Inv(at), "-y", "-i", source,
+                                          "-output_ts_offset", Inv(at) };
+            if (VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase))
+            {
+                args.AddRange(new[] { "-c:v", "copy" });
+            }
+            else
+            {
+                args.AddRange(new[] { "-c:v", VideoEncoder });
+                args.AddRange(VideoQualityArgs());
+                args.AddRange(new[] { "-pix_fmt", "yuv420p" });
+                args.AddRange(new[] { "-force_key_frames", $"expr:gte(t,n_forced*{VodSegmentSeconds})",
+                                      "-sc_threshold", "0" });
+            }
+            args.AddRange(AudioEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase)
+                ? new[] { "-c:a", "copy" }
+                : new[] { "-c:a", AudioEncoder, "-b:a", "160k", "-ac", "2" });
+
+            // A playlist of its own, never index.m3u8: the HLS server builds
+            // the playlist this stream is served from, and letting a second
+            // encoder rewrite the first one's would truncate the film to
+            // whatever this job happens to have done.
+            args.AddRange(new[] { "-f", "hls", "-hls_time", Inv(VodSegmentSeconds), "-hls_list_size", "0",
+                                  "-hls_playlist_type", "event",
+                                  "-start_number", Inv(index) });
+            if (fmp4) args.AddRange(new[] { "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4" });
+            args.AddRange(new[] { "-hls_segment_filename", Path.Combine(dir, $"seg_%05d.{segExt}"),
+                                  Path.Combine(dir, $"seek_{index:D5}.m3u8") });
+
+            Log.Info("ffmpeg", $"seek-ahead: {stream} from segment {index} ({Inv(at)}s)");
+            var proc = Spawn(args, $"seek {stream}@{index}", dir,
+                onExited: p =>
+                {
+                    lock (_lock)
+                        if (_seekJobs.TryGetValue(stream, out var list))
+                            list.RemoveAll(j => ReferenceEquals(j.Process, p));
+                });
+            jobs.Add(new SeekJob(index, proc));
+            return true;
+        }
     }
 
     /// <summary>
@@ -652,6 +805,7 @@ public sealed class FfmpegManager : IDisposable
                 try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
                 _vodJobs.Remove(stream);
             }
+            StopSeekJobs(stream);
         }
         var dir = Path.Combine(_mediaRoot, stream);
         if (!Directory.Exists(dir)) return false;
@@ -666,11 +820,26 @@ public sealed class FfmpegManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// Stops any encoders started by skipping ahead in this stream. Call with
+    /// the lock held. They are not the conversion, so nothing here decides
+    /// whether the stream itself is still being made.
+    /// </summary>
+    private void StopSeekJobs(string stream)
+    {
+        if (!_seekJobs.Remove(stream, out var jobs)) return;
+        foreach (var j in jobs)
+        {
+            try { if (!j.Process.HasExited) j.Process.Kill(entireProcessTree: true); } catch { }
+        }
+    }
+
     /// <summary>Kills a running conversion (e.g. before deleting its stream). True if one was running.</summary>
     public bool CancelVod(string stream)
     {
         lock (_lock)
         {
+            StopSeekJobs(stream);
             if (!_vodJobs.Remove(stream, out var p)) return false;
             KillAndRelease(p);
             Log.Info("ffmpeg", $"vod job cancelled: {stream}");
@@ -1723,6 +1892,7 @@ public sealed class FfmpegManager : IDisposable
         _disposed = true;
         lock (_lock)
         {
+            foreach (var key in _seekJobs.Keys.ToList()) StopSeekJobs(key);
             foreach (var key in _vodJobs.Keys.ToList()) StopJob(_vodJobs, key);
             foreach (var key in _liveJobs.Keys.ToList()) StopJob(_liveJobs, key);
         }
