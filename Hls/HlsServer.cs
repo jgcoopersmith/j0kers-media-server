@@ -378,13 +378,44 @@ public sealed class HlsServer : IDisposable
                     // the finite recording it now is.
                     var transcoding = Ffmpeg?.ActiveVodStreams
                         .Contains(parts[0], StringComparer.OrdinalIgnoreCase) ?? false;
-                    if (!transcoding
-                        && parts[0].StartsWith("vod-", StringComparison.OrdinalIgnoreCase)
-                        && !text.Contains("#EXT-X-ENDLIST"))
+                    if (!transcoding && parts[0].StartsWith("vod-", StringComparison.OrdinalIgnoreCase))
                     {
-                        text = text.Replace("#EXT-X-PLAYLIST-TYPE:EVENT", "#EXT-X-PLAYLIST-TYPE:VOD");
-                        if (!text.EndsWith('\n')) text += "\n";
-                        text += "#EXT-X-ENDLIST\n";
+                        // The written playlist can go stale while the job that
+                        // was still growing it keeps producing segment files —
+                        // seen for real, on two separate finished conversions:
+                        // ffmpeg exited cleanly and left 1121 and 1136 real,
+                        // contiguous segments on disk, but its own index.m3u8
+                        // had stopped being extended at 15 and 11 entries.
+                        // Nothing is ever going to fix that file again — the
+                        // job is gone — so a player reading it sees a "film"
+                        // a minute and a half long, plays to the real end of
+                        // that, and pressing play again after the end is what
+                        // restarts a video from zero. Every other, older
+                        // conversion checked had a playlist that matched its
+                        // segments exactly; this is not the common case, but
+                        // it is a silent, permanent one once it happens, so
+                        // it is worth the one extra directory listing to rule
+                        // out on every request to a finished stream.
+                        //
+                        // BuildPlaylist scans the directory itself, so it is
+                        // right by construction — it can behave only as its
+                        // own comment says, listing what is actually there. A
+                        // real, on-disk mismatch is what decides whether it's
+                        // used, not this comment's say-so.
+                        var real = CountRealSegments(streamDir);
+                        var listed = CountExtinf(text);
+                        if (real >= 0 && real != listed)
+                        {
+                            Log.Warn("hls", $"{parts[0]}: playlist listed {listed} segments, "
+                                + $"{real} exist — rebuilding from disk");
+                            text = BuildPlaylist(streamDir);
+                        }
+                        else if (!text.Contains("#EXT-X-ENDLIST"))
+                        {
+                            text = text.Replace("#EXT-X-PLAYLIST-TYPE:EVENT", "#EXT-X-PLAYLIST-TYPE:VOD");
+                            if (!text.EndsWith('\n')) text += "\n";
+                            text += "#EXT-X-ENDLIST\n";
+                        }
                     }
 
                     WriteText(res, 200, "application/vnd.apple.mpegurl", AppendTokenToUris(text, token));
@@ -632,6 +663,32 @@ public sealed class HlsServer : IDisposable
         // (hls.js's own retry, a second or so from now) will very likely
         // find it done. Only worth a log line if it keeps happening.
         return null;
+    }
+
+    /// <summary>Real segment files on disk — the ground truth a stale playlist is checked against.</summary>
+    private static int CountRealSegments(string streamDir)
+    {
+        try
+        {
+            return Directory.EnumerateFiles(streamDir)
+                .Where(f => SegmentExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()))
+                .Count(f => !Path.GetFileName(f).Equals("init.mp4", StringComparison.OrdinalIgnoreCase)
+                    && !Path.GetFileNameWithoutExtension(f).Contains(".seek", StringComparison.OrdinalIgnoreCase));
+        }
+        catch { return -1; }   // unreadable: never claim a mismatch over that
+    }
+
+    /// <summary>How many segments a playlist's own text claims to have.</summary>
+    private static int CountExtinf(string playlistText)
+    {
+        var count = 0;
+        var idx = 0;
+        while ((idx = playlistText.IndexOf("#EXTINF", idx, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            idx += 7;
+        }
+        return count;
     }
 
     private string BuildPlaylist(string streamDir)
