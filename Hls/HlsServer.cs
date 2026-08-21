@@ -545,7 +545,27 @@ public sealed class HlsServer : IDisposable
 
         var ext = Path.GetExtension(segment);
         var next = Path.Combine(streamDir, $"seg_{index + 1:D5}{ext}");
-        var deadline = DateTime.UtcNow.AddSeconds(30);
+        // Measured, in wwwroot/hls.min.js's bundled default policy, not
+        // guessed: a fragment request gets maxTimeToFirstByteMs = 10000
+        // before hls.js calls it a timeout — and this held the connection
+        // open, sending nothing at all, for up to 30 seconds. Every seek
+        // into unconverted film broke the same way regardless of how fast
+        // the encode actually was, because silence past ten seconds is a
+        // timeout on its own terms, not a matter of finishing in time.
+        //
+        // A timeout and an honest miss are not answered the same way by
+        // the player, and that difference is the fix. A timeout gets
+        // hls.js's timeoutRetry — four attempts with no delay between them,
+        // which just repeats the same ten-second wait for however long the
+        // segment takes to finish, each one still silent, still capable of
+        // being the one that runs out. A fast 404 gets errorRetry instead —
+        // six attempts with backoff up to eight seconds apart — and that is
+        // what actually survives an encode slower than one window: it
+        // hangs up and calls back rather than sitting on hold. Answering
+        // within the window, ready or not, is what earns that better
+        // handling. The encoder job itself is untouched by any of this and
+        // keeps running underneath every attempt.
+        var deadline = DateTime.UtcNow.AddSeconds(7);
         long lastSize = -1;
         var stableFor = 0;
         while (DateTime.UtcNow < deadline)
@@ -564,7 +584,9 @@ public sealed class HlsServer : IDisposable
             }
             Thread.Sleep(200);
         }
-        Log.Warn("hls", $"segment {index} of {stream} did not arrive in time");
+        // Not a failure — the encoder is still running and the next request
+        // (hls.js's own retry, a second or so from now) will very likely
+        // find it done. Only worth a log line if it keeps happening.
         return false;
     }
 
