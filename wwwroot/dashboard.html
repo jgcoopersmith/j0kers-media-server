@@ -2530,8 +2530,34 @@ let draggingHls = null;
 // set when a poll wanted to redraw during a drag; spent when the drag ends
 let hlsRenderDeferred = false;
 
+/* Nothing in a list is dragged except by its grip.
+   Reported precisely: selecting a stream's title alone does nothing, but a
+   selection begun on the id line underneath and dragged up over the title
+   works. What decides it is where the press lands. Press inside the title
+   and the browser reads press-and-move on a link as picking the link up —
+   a drag of the URL, so no selection ever starts. Press on the plain line
+   below and it is an ordinary sweep, which then extends over the title
+   without complaint.
+
+   draggable="false" and -webkit-user-drag: none were meant to settle that
+   and did not, so this stops asking politely: any dragstart that did not
+   come from a row armed by its ⠿ grip is cancelled. Capture phase, so it
+   runs before the row's own dragstart handler. Reordering is untouched —
+   the grip sets item.draggable, and a condensed tile carries the attribute
+   itself, and both are let through. The listener goes on the box, which
+   survives re-rendering; the rows inside it do not. */
+function blockStrayDrags(box) {
+  if (box.dataset.dragGuard) return;
+  box.dataset.dragGuard = "1";
+  box.addEventListener("dragstart", e => {
+    const item = e.target.closest && e.target.closest(".hls-item, .ch-item, .mnt-item");
+    if (!item || !item.draggable) e.preventDefault();
+  }, true);
+}
+
 function wireHlsDrag(box, cfg) {
   cfg = cfg || REORDER.hls;
+  blockStrayDrags(box);
   for (const item of box.querySelectorAll(cfg.item)) {
     const grip = item.querySelector(cfg.grip);
     // rows are armed by their grip; a tile is its own handle
