@@ -2376,6 +2376,16 @@ function renderHls() {
   // order off the freshly drawn list — silently throwing the move away.
   // Redraw when the drag is over instead.
   if (draggingHls) { hlsRenderDeferred = true; return; }
+  // The same is true of a plain text selection. The card polls every 2s
+  // and used to rebuild unconditionally — replace the nodes a Range points
+  // into and the browser collapses the selection, the instant it happens.
+  // That is what made a stream's title look copyable for a moment and then
+  // not: the highlight was real, and the very next poll erased it, often
+  // before there was time to press Ctrl+C. Deferring here is not enough on
+  // its own — nothing currently wakes a deferred redraw back up once the
+  // selection clears, the way dragend does for a drag — so a listener does
+  // that below.
+  if (hlsSelectionActive()) { hlsRenderDeferred = true; return; }
   hlsRenderDeferred = false;
   const box = $("hls");
 
@@ -2529,6 +2539,27 @@ function saveOrder(cfg, box) {
 let draggingHls = null;
 // set when a poll wanted to redraw during a drag; spent when the drag ends
 let hlsRenderDeferred = false;
+
+/* True while the window's selection has any part of itself inside #hls.
+   collapsed excludes a plain click, which leaves a zero-length selection
+   sitting wherever the caret landed — that is not a copy in progress and
+   should not hold the card's redraw hostage forever. */
+function hlsSelectionActive() {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return false;
+  const box = document.getElementById("hls");
+  return !!box && box.contains(sel.anchorNode);
+}
+
+// Catches a deferred redraw back up once the selection it was waiting on
+// goes away — a Ctrl+C, a click elsewhere, pressing Escape. Without this,
+// a poll that deferred stays deferred forever: nothing else asks renderHls
+// to run again. selectionchange fires for every kind of selection on the
+// page, most of which have nothing to do with this card, so the cheap
+// checks (deferred? still active?) run before the more expensive contains().
+document.addEventListener("selectionchange", () => {
+  if (hlsRenderDeferred && !hlsSelectionActive()) renderHls();
+});
 
 /* Nothing in a list is dragged except by its grip.
    Reported precisely: selecting a stream's title alone does nothing, but a
