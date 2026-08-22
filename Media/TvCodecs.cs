@@ -46,9 +46,25 @@ public sealed class TvCodecs
     /// DVD program stream: the MPEG-2 in it is decodable, but the wrapper is
     /// not something a DLNA client is built to open, and a set of them is a
     /// film cut into 1 GB pieces besides.
+    ///
+    /// MKV is the odd one here: the codecs inside are almost always fine —
+    /// h264/AAC in Matroska is nearly as common as in MP4 — and it plays
+    /// perfectly well locally or through this server's own web player. DLNA
+    /// specifically is where it falls down. A wide range of real DLNA
+    /// renderers, television firmware very much included, either refuse a
+    /// Matroska container outright or accept it and then can't seek within
+    /// it — a byte-range request lands wherever, MKV's parseable positions
+    /// are governed by its own cue index rather than uniform playback time,
+    /// and a renderer without that index open just guesses. That is a
+    /// closer match to what was reported than anything about the codecs
+    /// checked below: a film that never starts, or starts and then can't be
+    /// advanced through. Treating the container itself as the reason, the
+    /// same as the others here, is what gets it a real converted copy
+    /// instead of the raw file the checks further down would otherwise wave
+    /// through.
     private static readonly HashSet<string> UnplayableContainers = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".vob", ".ifo", ".divx", ".rm", ".rmvb", ".ogm", ".asf",
+        ".vob", ".ifo", ".divx", ".rm", ".rmvb", ".ogm", ".asf", ".mkv",
     };
 
     private readonly string _cacheFile;
