@@ -141,24 +141,25 @@ public sealed partial class ControlApi : IDisposable
     {
         try
         {
-            // Per file, not per preference. A conversion is a re-encode, so
-            // substituting one for a file the television could have played
-            // by itself costs picture for nothing — and never substituting
-            // one takes away the only copy of an XviD rip the set can play.
-            // Neither is a setting: which of the two is right is a fact
-            // about the file, and the codec answers it.
-            //
-            // dlnaUseTranscode forces substitution regardless, for a set that
-            // rejects something this check thinks is fine.
-            if (!_serverConfig.Discovery.DlnaUseTranscode
-                && _tvCodecs?.NeedsConversion(sourceFile) != true)
-                return null;
-
             var mediaRoot = Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
                 ? _serverConfig.Hls.MediaRoot
                 : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
             if (!Directory.Exists(mediaRoot)) return null;
 
+            // A conversion that already exists is used regardless of what
+            // the codec check below thinks the original needs — that check
+            // only ever asked "would the original need one," and answered
+            // no for files whose codecs are on paper fine and still would
+            // not decode: a 1080p rip and a 640x352 file can carry the
+            // identical codec name and neither VLC nor, going by what was
+            // reported, a real television could get a picture out of the
+            // former, played directly or through this exact DLNA path,
+            // measured with nothing about this server in between. The web
+            // dashboard had already made a full, finished re-encode of
+            // exactly this film — pressing play there is what a "needs
+            // conversion" original does regardless of this codec check —
+            // and it was sitting unused because nothing here ever looked
+            // for it once the check said no.
             foreach (var dir in Directory.EnumerateDirectories(mediaRoot, "vod-*"))
             {
                 // "vod-dune-720p-a1b2c3d4" was scaled; "vod-dune-a1b2c3d4" was not
@@ -198,6 +199,25 @@ public sealed partial class ControlApi : IDisposable
                 var mp4 = parts[^1].Item1.EndsWith(".m4s", StringComparison.OrdinalIgnoreCase) || File.Exists(init);
                 return new Dlna.DlnaService.Transcode(parts, total, mp4 ? "video/mp4" : "video/mp2t");
             }
+
+            // Nothing exists yet. Only start one where the codec check
+            // already says the original can't be trusted — the same guard
+            // as before this change, kept here rather than dropped, so a
+            // file that plays fine as-is doesn't get a redundant re-encode
+            // queued behind it every time a television so much as browses
+            // past it.
+            //
+            // StartVod is idempotent — a job already running, or a finished
+            // one already on disk, is reused rather than restarted — so
+            // this costs nothing extra on a second touch. It does not wait:
+            // an in-progress conversion has no final size to declare yet,
+            // which DLNA needs up front unlike HLS's growing playlist, so
+            // this request still gets the raw file. The next browse or
+            // play attempt is what finds the finished copy, at the top of
+            // this function — on this hardware, well under real-time, a
+            // short wait rather than a long one.
+            if (_serverConfig.Discovery.DlnaUseTranscode || _tvCodecs?.NeedsConversion(sourceFile) == true)
+                _ffmpeg?.StartVod(sourceFile);
         }
         catch (Exception ex) { Log.Debug("dlna", $"could not look for a conversion: {ex.Message}"); }
         return null;
