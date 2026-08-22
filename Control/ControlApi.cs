@@ -207,7 +207,40 @@ public sealed partial class ControlApi : IDisposable
                 if (parts.Count == 0 || total == 0) continue;
 
                 var mp4 = parts[^1].Item1.EndsWith(".m4s", StringComparison.OrdinalIgnoreCase) || File.Exists(init);
-                return new Dlna.DlnaService.Transcode(parts, total, mp4 ? "video/mp4" : "video/mp2t");
+                if (mp4) return new Dlna.DlnaService.Transcode(parts, total, "video/mp4");
+
+                // The cache is MPEG-TS segments — right for the web player,
+                // which is what this cache was built for, but not for a
+                // television. A real capture of a real television proved
+                // this precisely: it opened a connection, read nothing
+                // this server had not already offered it, and closed —
+                // never once asking for the file. What it had already been
+                // offered was protocolInfo declaring video/mp2t, an honest
+                // label for what these bytes actually are, and honesty
+                // was the problem. On-demand MPEG-TS over DLNA is far less
+                // reliably accepted by real renderers than MP4, unlike the
+                // same bytes inside an HLS playlist a browser's own player
+                // reads — so a label that told the truth was read by the
+                // television as "I can't play this" before it ever tried.
+                var dlnaMp4 = Path.Combine(dir, "dlna.mp4");
+                if (File.Exists(dlnaMp4))
+                {
+                    var mp4Len = new FileInfo(dlnaMp4).Length;
+                    if (mp4Len > 0)
+                        return new Dlna.DlnaService.Transcode(
+                            new List<(string, long)> { (dlnaMp4, mp4Len) }, mp4Len, "video/mp4");
+                }
+
+                // Not made yet. Same discipline as starting a conversion in
+                // the first place: only from an actual play request, never
+                // from a folder listing touching every file in it. The
+                // repackaging itself is cheap — no re-encode, the same
+                // essence copied into a different box, measured elsewhere
+                // this session at a few seconds for a feature-length film —
+                // so the television's next attempt, moments later, finds a
+                // real MP4 waiting rather than the same mislabelled TS.
+                if (allowStart) StartDlnaRemux(dir);
+                return new Dlna.DlnaService.Transcode(parts, total, "video/mp2t");
             }
 
             // Nothing exists yet. Only start one where the codec check
@@ -232,6 +265,83 @@ public sealed partial class ControlApi : IDisposable
         }
         catch (Exception ex) { Log.Debug("dlna", $"could not look for a conversion: {ex.Message}"); }
         return null;
+    }
+
+    /// <summary>
+    /// Repackages an existing TS-segment conversion into a real MP4 for
+    /// DLNA — no re-encode, the same essence copied into a different
+    /// container, which is what makes it fast: a feature-length film,
+    /// measured directly, took a few seconds.
+    ///
+    /// One at a time per directory. This is called from every DLNA touch
+    /// that finds no MP4 yet, and a television that already gave up on one
+    /// attempt is exactly the television about to try again — without this
+    /// guard, a second attempt arriving while the first remux is still
+    /// running would start a second, identical one right beside it.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _remuxing = new(StringComparer.OrdinalIgnoreCase);
+
+    private void StartDlnaRemux(string dir)
+    {
+        if (_ffmpeg is null) return;
+        if (!_remuxing.TryAdd(dir, 0)) return;   // already running for this one
+
+        var playlist = Path.Combine(dir, "index.m3u8");
+        var target = Path.Combine(dir, "dlna.mp4");
+        var tmp = Path.Combine(dir, $"dlna.mp4.tmp{Environment.ProcessId}");
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(_ffmpeg.FfmpegPath)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true,
+            };
+            // -f mp4 explicitly: ffmpeg otherwise infers the container from
+            // the output filename's extension, and the tmp name deliberately
+            // doesn't end in .mp4 — see the tmp-name comment below — so left
+            // to guess, it refuses outright ("unable to choose an output
+            // format") rather than writing anything. Measured directly: the
+            // same command with only this missing produced no file at all.
+            foreach (var a in new[] { "-hide_banner", "-loglevel", "error", "-y",
+                                      "-i", playlist, "-c", "copy", "-movflags", "+faststart", "-f", "mp4", tmp })
+                psi.ArgumentList.Add(a);
+            var proc = System.Diagnostics.Process.Start(psi);
+            if (proc is null) { _remuxing.TryRemove(dir, out _); return; }
+            Log.Info("dlna", $"repackaging {Path.GetFileName(dir)} into a real MP4 for television playback");
+            // Read as it runs, not after exit: stderr has a fixed-size pipe
+            // buffer, and a process that fills it while nobody is reading
+            // blocks forever rather than exiting — the exact way the first
+            // version of this found a real ffmpeg error and printed only
+            // an exit code, because nothing had ever asked what it said.
+            var stderr = new StringBuilder();
+            proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) stderr.AppendLine(e.Data); };
+            proc.BeginErrorReadLine();
+            proc.EnableRaisingEvents = true;
+            proc.Exited += (_, _) =>
+            {
+                try
+                {
+                    // A tmp name until it is genuinely whole, so nothing
+                    // ever finds a truncated dlna.mp4 mid-write and hands
+                    // a broken file to a television believing it is done.
+                    if (proc.ExitCode == 0 && File.Exists(tmp) && new FileInfo(tmp).Length > 0)
+                        File.Move(tmp, target, overwrite: true);
+                    else
+                    {
+                        try { File.Delete(tmp); } catch { }
+                        Log.Warn("dlna", $"repackaging {Path.GetFileName(dir)} failed (exit {proc.ExitCode}): "
+                            + stderr.ToString().Trim());
+                    }
+                }
+                finally { _remuxing.TryRemove(dir, out _); proc.Dispose(); }
+            };
+        }
+        catch (Exception ex)
+        {
+            _remuxing.TryRemove(dir, out _);
+            Log.Warn("dlna", $"could not start repackaging {Path.GetFileName(dir)}: {ex.Message}");
+        }
     }
 
     /// <summary>Turns DLNA on or off while the server runs; returns what it now is.</summary>
