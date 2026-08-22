@@ -2814,6 +2814,27 @@ public sealed partial class ControlApi : IDisposable
                 // H.264/AAC instead, at the same picture size.
                 var transcode = dlna.FindTranscode?.Invoke(file);
 
+                // The cache-eviction sweep deletes whichever VOD directory
+                // was written to least recently, to make room for a new
+                // conversion — and until now, nothing serving DLNA ever
+                // touched that timestamp. The HLS web path does, on every
+                // segment; a television reading the exact same cached
+                // conversion over DLNA never did, so it looked idle no
+                // matter how long it had been streaming. Pressing play on
+                // one film could evict the very directory a television was
+                // mid-way through another one from — its connection breaks,
+                // the file is gone, and the stream disappears from the
+                // dashboard while someone is still watching it. Touched on
+                // every request, the same as the web path: a HEAD is asked
+                // before anybody is watching, same reasoning as there, but
+                // it costs nothing to mark early and is one less place a
+                // television's first request could lose the race.
+                if (transcode is not null)
+                {
+                    try { Directory.SetLastWriteTimeUtc(Path.GetDirectoryName(transcode.Parts[0].Path)!, DateTime.UtcNow); }
+                    catch { }
+                }
+
                 // A HEAD is the TV asking how big the file is and whether it
                 // may seek — the same reasoning as an HLS playlist fetch, and
                 // not yet anybody watching. The GET that follows is.
