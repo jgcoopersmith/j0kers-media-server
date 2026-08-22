@@ -226,7 +226,6 @@ public sealed partial class ControlApi : IDisposable
     private readonly Media.Providers.HlsProxy _tvProxy;
     private readonly HashSet<string> _relayProviders;
     private readonly Media.TvCodecs? _tvCodecs;
-    private readonly Media.Shelf? _shelf;
 
     /// <summary>
     /// Writes out whatever this API is holding in memory. Called on a timer
@@ -265,19 +264,11 @@ public sealed partial class ControlApi : IDisposable
         _history = new Media.WatchHistory(baseDirectory);
         _dlnaShare = new Dlna.DlnaShare(baseDirectory);
 
-        // What a television can and cannot decode, and the shelf that makes
-        // the difference go away. Both need ffmpeg: without it nothing can be
-        // probed and nothing can be converted, so both stay null and the
-        // DLNA path falls back to handing over originals, as it always did.
+        // What a television can and cannot decode — needs ffmpeg to probe
+        // with, so it stays null without one and the DLNA path falls back
+        // to handing over originals, as it always did.
         if (ffmpeg is not null)
-        {
             _tvCodecs = new Media.TvCodecs(baseDirectory, ffmpeg.FfprobePath);
-            // The shelf covers exactly what the television can see: the
-            // library folders actually shared over DLNA. Converting a folder
-            // the TV is not shown would be work nothing could ever play.
-            _shelf = new Media.Shelf(baseDirectory, MediaRootPath(), ffmpeg, _tvCodecs,
-                                     () => _dlnaShare.Shared(_library.All));
-        }
 
         if (serverConfig.Discovery.Dlna) _dlna = NewDlna();
         // The moment somebody starts watching anything — dashboard, phone,
@@ -369,10 +360,6 @@ public sealed partial class ControlApi : IDisposable
         Log.Info("control", $"listening on {Services.UrlScheme.Prefix}{bound}:{_config.Port}/api/");
         _ = AcceptLoopAsync();
         StartDlnaListener();
-        // A shelf that was running when the server went down carries on. It
-        // is a job measured in days; making it start over because of a
-        // restart, or a commit, would mean it never finished.
-        _shelf?.ResumeIfWasRunning();
     }
 
     /// <summary>
@@ -577,8 +564,7 @@ public sealed partial class ControlApi : IDisposable
         // adding or removing what the server offers; listing it stays Read
         if (method is "POST" or "PUT" or "DELETE"
             && path is "/api/mounts" or "/api/channels" or "/api/library"
-                or "/api/favorites" or "/api/playlists" or "/api/hls" or "/api/hls/retranscode"
-                or "/api/shelf")
+                or "/api/favorites" or "/api/playlists" or "/api/hls" or "/api/hls/retranscode")
             return AccessLevel.Edit;
 
         // cutting off somebody else's stream is an operator action
@@ -1510,57 +1496,6 @@ public sealed partial class ControlApi : IDisposable
             {
                 RemoveHlsStream(ctx);
                 return;
-            }
-
-            // The shelf: the library, made playable on the television.
-            //   GET               progress, cheap enough to poll
-            //   GET  ?survey=1    walks the library and counts — seconds, not
-            //                     milliseconds, so it is asked for explicitly
-            //   POST ?action=…    start | stop | retry
-            if (path == "/api/shelf")
-            {
-                if (_shelf is null)
-                {
-                    WriteJson(res, 503, new { error = "ffmpeg is not available, so nothing can be converted" });
-                    return;
-                }
-
-                if (method == "GET")
-                {
-                    if (ctx.Request.QueryString["survey"] == "1")
-                    {
-                        var (need, have, bytes) = _shelf.Survey();
-                        WriteJson(res, 200, new { survey = true, need, have, todo = need - have, sourceBytes = bytes });
-                        return;
-                    }
-                    WriteJson(res, 200, new
-                    {
-                        running = _shelf.Running,
-                        total = _shelf.Total,
-                        done = _shelf.Done,
-                        skipped = _shelf.Skipped,
-                        current = _shelf.Current,
-                        note = _shelf.Note,
-                        freeSpaceFloorGb = _shelf.FreeSpaceFloorGb,
-                        failed = _shelf.Failed.Take(50).Select(f => new { file = f.Key, reason = f.Value }),
-                    });
-                    return;
-                }
-
-                if (method == "POST")
-                {
-                    switch (ctx.Request.QueryString["action"])
-                    {
-                        case "start": _shelf.Start(); break;
-                        case "stop":  _shelf.Stop();  break;
-                        case "retry": _shelf.ClearFailures(); _shelf.Start(); break;
-                        default:
-                            WriteJson(res, 400, new { error = "action must be start, stop or retry" });
-                            return;
-                    }
-                    WriteJson(res, 200, new { running = _shelf.Running, note = _shelf.Note });
-                    return;
-                }
             }
 
             // Convert this media again from scratch: for a conversion that

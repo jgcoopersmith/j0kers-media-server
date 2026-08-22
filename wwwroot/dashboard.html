@@ -955,24 +955,6 @@
 
   <div class="card">
     <h2 style="display:flex;align-items:center;gap:8px">
-      <span style="flex:1">TV shelf</span>
-      <button id="shelf-survey" onclick="surveyShelf()"
-              title="Walk the library and count what the TV cannot play">🔍 Check library</button>
-      <button id="shelf-go" class="edit-only" onclick="startShelf(this)"
-              title="Convert everything the TV cannot play, one at a time, in the background">▶ Start</button>
-      <button id="shelf-stop" class="danger edit-only" style="display:none" onclick="stopShelf()"
-              title="Stop after the conversion running now">⏹ Stop</button></h2>
-    <div style="color:var(--muted);font-size:12px;margin-bottom:8px">
-      Your TV plays H.264 and HEVC; it cannot decode the XviD, DivX and DVD rips that
-      make up most of an older library — which is why some films play on the PC and not
-      on the television. The shelf converts those, and only those, at full resolution.
-      Originals are never touched, nothing is downscaled, and it stops before the disk fills.
-    </div>
-    <div id="shelf"><div class="empty">Press <b>Check library</b> to see how much of it the TV can't play.</div></div>
-  </div>
-
-  <div class="card">
-    <h2 style="display:flex;align-items:center;gap:8px">
       <span style="flex:1">Free TV</span>
       <select id="tv-provider" onchange="loadLineup(true)" class="am-in" style="width:auto"></select>
       <input id="tv-search" class="am-in" placeholder="search channels" style="width:150px" oninput="lineupSearch()">
@@ -1753,12 +1735,6 @@ async function tick() {
   refreshHistory();
   refreshMounts();   // cheap, cached-ish
   refreshHls();
-  // Only while there is something to say. The shelf is idle almost always,
-  // and an idle card should not cost a request a second forever.
-  if (shelfBooted !== "idle") shelfStatus().then(s => {
-    shelfBooted = s && (s.running || s.total) ? "live" : "idle";
-    renderShelf(s);
-  });
   await refreshChannels(false);
   refreshPlaylists(false);
   refreshFavorites(false);
@@ -1778,9 +1754,6 @@ async function tick() {
 }
 let libraryBooted = false;
 let tvBooted = false;
-/* "live" while the shelf has something to report, "idle" once it hasn't.
-   Starting it sets this back to "live" so the poll resumes. */
-let shelfBooted = "live";
 
 let activeTranscodes = [];
 
@@ -2280,92 +2253,6 @@ function convertingRow(t) {
     + ' — playable as soon as the first part is ready</div>'
     + '<div class="conv-bar"><div style="width:' + (pct !== null ? pct : 0) + '%"></div></div>'
     + '</div></div>';
-}
-
-/* ===== TV shelf ======================================================
-   Converting a library so a television can play it is a job measured in
-   days, not seconds, so everything here is built around being interrupted:
-   the survey is asked for rather than polled, the progress line is cheap,
-   and starting is a decision made against a real number rather than a
-   hopeful click. */
-
-async function shelfStatus() {
-  try {
-    const r = await fetch("/api/shelf", { headers: headers() });
-    if (!r.ok) return null;
-    return await r.json();
-  } catch { return null; }
-}
-
-function renderShelf(s) {
-  if (!s) return;
-  $("shelf-go").style.display   = s.running ? "none" : "";
-  $("shelf-stop").style.display = s.running ? "" : "none";
-
-  const bits = [];
-  if (s.total) {
-    const pct = Math.round((s.done / s.total) * 100);
-    bits.push('<div style="display:flex;align-items:center;gap:8px">'
-      + '<div class="conv-bar" style="flex:1"><div style="width:' + pct + '%"></div></div>'
-      + '<span style="color:var(--muted);font-size:12px">' + s.done + " / " + s.total + "</span></div>");
-  }
-  if (s.current) bits.push('<div style="font-size:12.5px">⏳ ' + esc(s.current) + "</div>");
-  if (s.note)    bits.push('<div style="color:var(--muted);font-size:12px">' + esc(s.note) + "</div>");
-  if (s.skipped) bits.push('<div style="color:var(--warning);font-size:12px">' + s.skipped
-    + " skipped — files ffmpeg could not read. <a href=\"#\" onclick=\"retryShelf();return false\">Try them again</a></div>");
-  $("shelf").innerHTML = bits.length ? bits.join("")
-    : '<div class="empty">Press <b>Check library</b> to see how much of it the TV can\'t play.</div>';
-}
-
-/* Walks the library — thousands of ffprobe calls the first time, cached
-   after that — so it says so rather than appearing to hang. */
-async function surveyShelf() {
-  const btn = $("shelf-survey");
-  const was = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = "Checking…";
-  $("shelf").innerHTML = '<div class="empty">Reading the library. The first pass probes every '
-    + 'file and can take a few minutes; after that it is remembered.</div>';
-  try {
-    const r = await fetch("/api/shelf?survey=1", { headers: headers() });
-    const d = await r.json();
-    if (!r.ok) { $("shelf").innerHTML = '<div class="empty">' + esc(d.error || "check failed") + "</div>"; return; }
-    const gb = (d.sourceBytes / 1073741824);
-    $("shelf").innerHTML = d.need === 0
-      ? '<div class="empty">Nothing to do — the TV can already play everything in the library.</div>'
-      : '<div style="font-size:13px">' + d.need.toLocaleString() + " file" + (d.need === 1 ? "" : "s")
-        + " the TV can't play, of which <b>" + d.have.toLocaleString() + "</b> "
-        + (d.have === 1 ? "is" : "are") + " already converted.</div>"
-        + '<div style="color:var(--muted);font-size:12px;margin-top:4px">'
-        + d.todo.toLocaleString() + " to go, from " + gb.toFixed(0) + " GB of originals. "
-        + "Converting runs one film at a time in the background and can be stopped at any point.</div>";
-  } catch (e) {
-    $("shelf").innerHTML = '<div class="empty">' + esc(e.message) + "</div>";
-  } finally {
-    btn.disabled = false;
-    btn.textContent = was;
-  }
-}
-
-async function startShelf(at) {
-  if (!await confirmAt(at, "Start converting the library for the TV?"
-      + "\n\nThis runs for days and uses a lot of CPU and disk. Originals are"
-      + "\nnever modified and nothing is downscaled. It stops on its own before"
-      + "\nfree space runs low, and you can stop it whenever you like.", "Start")) return;
-  await fetch("/api/shelf?action=start", { method: "POST", headers: headers() });
-  shelfBooted = "live";
-  renderShelf(await shelfStatus());
-}
-
-async function stopShelf() {
-  await fetch("/api/shelf?action=stop", { method: "POST", headers: headers() });
-  renderShelf(await shelfStatus());
-}
-
-async function retryShelf() {
-  await fetch("/api/shelf?action=retry", { method: "POST", headers: headers() });
-  shelfBooted = "live";
-  renderShelf(await shelfStatus());
 }
 
 /* Kept apart from the fetch so switching view doesn't re-hit the media port. */

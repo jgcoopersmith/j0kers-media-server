@@ -372,11 +372,10 @@ public sealed class FfmpegManager : IDisposable
     /// The cache directory name a conversion of this file would use, without
     /// starting one. Null when the file is gone.
     ///
-    /// Kept apart from StartVod because the shelf needs to ask "is this one
-    /// already done?" thousands of times, and the only safe way to answer is
-    /// to compute the name the same way the converter will. Two copies of
-    /// this arithmetic would eventually disagree, and the symptom would be a
-    /// shelf that converts the whole library again every run.
+    /// Kept apart from StartVod because callers need to ask "is this one
+    /// already done?" without starting a conversion, and the only safe way
+    /// to answer is to compute the name the same way the converter will —
+    /// two copies of this arithmetic would eventually disagree.
     /// </summary>
     public string? VodStreamName(string file, int height = 0)
     {
@@ -782,13 +781,6 @@ public sealed class FfmpegManager : IDisposable
         {
             entries = new DirectoryInfo(_mediaRoot)
                 .EnumerateDirectories("vod-*")
-                // The shelf is not cache. The cap exists so conversions made
-                // in passing don't accumulate; a conversion made deliberately,
-                // so a television can play a film it otherwise cannot, is the
-                // whole point and outlives any cap. Counting it toward the
-                // budget would also be silently circular — the shelf would
-                // rebuild what the cache had just evicted, indefinitely.
-                .Where(d => !File.Exists(Path.Combine(d.FullName, "shelf.txt")))
                 .Select(d => (d, d.EnumerateFiles().Sum(f => f.Length)))
                 .ToList();
         }

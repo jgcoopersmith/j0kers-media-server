@@ -18,9 +18,9 @@ namespace J0kersMediaServer.Media;
 /// quality lost — and reach for a conversion only where it genuinely is the
 /// difference between playing and not.
 ///
-/// Probing costs an ffprobe launch per file, and the shelf asks about
-/// thousands, so answers are cached by path, size and modification time. A
-/// file that changes is re-probed; a file that doesn't is asked once ever.
+/// Probing costs an ffprobe launch per file, so answers are cached by path,
+/// size and modification time. A file that changes is re-probed; a file
+/// that doesn't is asked once ever.
 /// </summary>
 public sealed class TvCodecs
 {
@@ -148,33 +148,6 @@ public sealed class TvCodecs
         if (audio is not null && !PlayableAudio.Contains(audio)) return true;
         return false;
     }
-
-    /// <summary>One-line reason, for the shelf listing. Null when nothing needs doing.</summary>
-    public string? WhyConvert(string file)
-    {
-        if (UnplayableContainers.Contains(Path.GetExtension(file)))
-            return Path.GetExtension(file).TrimStart('.').ToUpperInvariant() + " container";
-
-        var (video, audio) = Codecs(file);
-        if (video is null) return null;
-        if (!PlayableVideo.Contains(video)) return Pretty(video) + " video";
-        if (audio is not null && !PlayableAudio.Contains(audio)) return Pretty(audio) + " audio";
-        return null;
-    }
-
-    /// ffprobe's names are not what anyone calls these formats.
-    private static string Pretty(string codec) => codec.ToLowerInvariant() switch
-    {
-        "mpeg4" => "XviD/DivX",
-        "msmpeg4v1" or "msmpeg4v2" or "msmpeg4v3" => "DivX 3",
-        "wmv1" or "wmv2" or "wmv3" => "WMV",
-        "vc1" => "VC-1",
-        "dts" => "DTS",
-        "truehd" => "TrueHD",
-        "vorbis" => "Vorbis",
-        "wmav1" or "wmav2" => "WMA",
-        _ => codec,
-    };
 
     public void Save()
     {
