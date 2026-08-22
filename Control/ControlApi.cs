@@ -136,40 +136,29 @@ public sealed partial class ControlApi : IDisposable
     /// Unfinished conversions are skipped too: a playlist without
     /// EXT-X-ENDLIST is still being written, and serving it would hand over
     /// a film that stops partway with no explanation.
-    ///
-    /// <paramref name="allowStart"/> is what stands between a television
-    /// pressing play and a television merely opening a folder. Browsing
-    /// calls this once per file just to learn what size and type to
-    /// advertise, and a single folder can hold dozens — starting a
-    /// conversion on "nothing found yet" from that path is not one
-    /// unwanted job, it is every incompatible file in the folder at once,
-    /// competing for the same disk and the same CPU, triggered by nothing
-    /// more than a menu opening. False there. True only where a play
-    /// request is what got here.
     /// </summary>
-    private Dlna.DlnaService.Transcode? FullResTranscodeFor(string sourceFile, bool allowStart)
+    private Dlna.DlnaService.Transcode? FullResTranscodeFor(string sourceFile)
     {
         try
         {
+            // Per file, not per preference. A conversion is a re-encode, so
+            // substituting one for a file the television could have played
+            // by itself costs picture for nothing — and never substituting
+            // one takes away the only copy of an XviD rip the set can play.
+            // Neither is a setting: which of the two is right is a fact
+            // about the file, and the codec answers it.
+            //
+            // dlnaUseTranscode forces substitution regardless, for a set that
+            // rejects something this check thinks is fine.
+            if (!_serverConfig.Discovery.DlnaUseTranscode
+                && _tvCodecs?.NeedsConversion(sourceFile) != true)
+                return null;
+
             var mediaRoot = Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
                 ? _serverConfig.Hls.MediaRoot
                 : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
             if (!Directory.Exists(mediaRoot)) return null;
 
-            // A conversion that already exists is used regardless of what
-            // the codec check below thinks the original needs — that check
-            // only ever asked "would the original need one," and answered
-            // no for files whose codecs are on paper fine and still would
-            // not decode: a 1080p rip and a 640x352 file can carry the
-            // identical codec name and neither VLC nor, going by what was
-            // reported, a real television could get a picture out of the
-            // former, played directly or through this exact DLNA path,
-            // measured with nothing about this server in between. The web
-            // dashboard had already made a full, finished re-encode of
-            // exactly this film — pressing play there is what a "needs
-            // conversion" original does regardless of this codec check —
-            // and it was sitting unused because nothing here ever looked
-            // for it once the check said no.
             foreach (var dir in Directory.EnumerateDirectories(mediaRoot, "vod-*"))
             {
                 // "vod-dune-720p-a1b2c3d4" was scaled; "vod-dune-a1b2c3d4" was not
@@ -207,141 +196,11 @@ public sealed partial class ControlApi : IDisposable
                 if (parts.Count == 0 || total == 0) continue;
 
                 var mp4 = parts[^1].Item1.EndsWith(".m4s", StringComparison.OrdinalIgnoreCase) || File.Exists(init);
-                if (mp4) return new Dlna.DlnaService.Transcode(parts, total, "video/mp4");
-
-                // The cache is MPEG-TS segments — right for the web player,
-                // which is what this cache was built for, but not for a
-                // television. A real capture of a real television proved
-                // this precisely: it opened a connection, read nothing
-                // this server had not already offered it, and closed —
-                // never once asking for the file. What it had already been
-                // offered was protocolInfo declaring video/mp2t, an honest
-                // label for what these bytes actually are, and honesty
-                // was the problem. On-demand MPEG-TS over DLNA is far less
-                // reliably accepted by real renderers than MP4, unlike the
-                // same bytes inside an HLS playlist a browser's own player
-                // reads — so a label that told the truth was read by the
-                // television as "I can't play this" before it ever tried.
-                var dlnaMp4 = Path.Combine(dir, "dlna.mp4");
-                if (File.Exists(dlnaMp4))
-                {
-                    var mp4Len = new FileInfo(dlnaMp4).Length;
-                    if (mp4Len > 0)
-                        return new Dlna.DlnaService.Transcode(
-                            new List<(string, long)> { (dlnaMp4, mp4Len) }, mp4Len, "video/mp4");
-                }
-
-                // Not made yet. Same discipline as starting a conversion in
-                // the first place: only from an actual play request, never
-                // from a folder listing touching every file in it. The
-                // repackaging itself is cheap — no re-encode, the same
-                // essence copied into a different box, measured elsewhere
-                // this session at a few seconds for a feature-length film —
-                // so the television's next attempt, moments later, finds a
-                // real MP4 waiting rather than the same mislabelled TS.
-                if (allowStart) StartDlnaRemux(dir);
-                return new Dlna.DlnaService.Transcode(parts, total, "video/mp2t");
+                return new Dlna.DlnaService.Transcode(parts, total, mp4 ? "video/mp4" : "video/mp2t");
             }
-
-            // Nothing exists yet. Only start one where the codec check
-            // already says the original can't be trusted — the same guard
-            // as before this change, kept here rather than dropped, so a
-            // file that plays fine as-is doesn't get a redundant re-encode
-            // queued behind it every time a television so much as browses
-            // past it.
-            //
-            // StartVod is idempotent — a job already running, or a finished
-            // one already on disk, is reused rather than restarted — so
-            // this costs nothing extra on a second touch. It does not wait:
-            // an in-progress conversion has no final size to declare yet,
-            // which DLNA needs up front unlike HLS's growing playlist, so
-            // this request still gets the raw file. The next browse or
-            // play attempt is what finds the finished copy, at the top of
-            // this function — on this hardware, well under real-time, a
-            // short wait rather than a long one.
-            if (allowStart
-                && (_serverConfig.Discovery.DlnaUseTranscode || _tvCodecs?.NeedsConversion(sourceFile) == true))
-                _ffmpeg?.StartVod(sourceFile);
         }
         catch (Exception ex) { Log.Debug("dlna", $"could not look for a conversion: {ex.Message}"); }
         return null;
-    }
-
-    /// <summary>
-    /// Repackages an existing TS-segment conversion into a real MP4 for
-    /// DLNA — no re-encode, the same essence copied into a different
-    /// container, which is what makes it fast: a feature-length film,
-    /// measured directly, took a few seconds.
-    ///
-    /// One at a time per directory. This is called from every DLNA touch
-    /// that finds no MP4 yet, and a television that already gave up on one
-    /// attempt is exactly the television about to try again — without this
-    /// guard, a second attempt arriving while the first remux is still
-    /// running would start a second, identical one right beside it.
-    /// </summary>
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _remuxing = new(StringComparer.OrdinalIgnoreCase);
-
-    private void StartDlnaRemux(string dir)
-    {
-        if (_ffmpeg is null) return;
-        if (!_remuxing.TryAdd(dir, 0)) return;   // already running for this one
-
-        var playlist = Path.Combine(dir, "index.m3u8");
-        var target = Path.Combine(dir, "dlna.mp4");
-        var tmp = Path.Combine(dir, $"dlna.mp4.tmp{Environment.ProcessId}");
-        try
-        {
-            var psi = new System.Diagnostics.ProcessStartInfo(_ffmpeg.FfmpegPath)
-            {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardError = true,
-            };
-            // -f mp4 explicitly: ffmpeg otherwise infers the container from
-            // the output filename's extension, and the tmp name deliberately
-            // doesn't end in .mp4 — see the tmp-name comment below — so left
-            // to guess, it refuses outright ("unable to choose an output
-            // format") rather than writing anything. Measured directly: the
-            // same command with only this missing produced no file at all.
-            foreach (var a in new[] { "-hide_banner", "-loglevel", "error", "-y",
-                                      "-i", playlist, "-c", "copy", "-movflags", "+faststart", "-f", "mp4", tmp })
-                psi.ArgumentList.Add(a);
-            var proc = System.Diagnostics.Process.Start(psi);
-            if (proc is null) { _remuxing.TryRemove(dir, out _); return; }
-            Log.Info("dlna", $"repackaging {Path.GetFileName(dir)} into a real MP4 for television playback");
-            // Read as it runs, not after exit: stderr has a fixed-size pipe
-            // buffer, and a process that fills it while nobody is reading
-            // blocks forever rather than exiting — the exact way the first
-            // version of this found a real ffmpeg error and printed only
-            // an exit code, because nothing had ever asked what it said.
-            var stderr = new StringBuilder();
-            proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) stderr.AppendLine(e.Data); };
-            proc.BeginErrorReadLine();
-            proc.EnableRaisingEvents = true;
-            proc.Exited += (_, _) =>
-            {
-                try
-                {
-                    // A tmp name until it is genuinely whole, so nothing
-                    // ever finds a truncated dlna.mp4 mid-write and hands
-                    // a broken file to a television believing it is done.
-                    if (proc.ExitCode == 0 && File.Exists(tmp) && new FileInfo(tmp).Length > 0)
-                        File.Move(tmp, target, overwrite: true);
-                    else
-                    {
-                        try { File.Delete(tmp); } catch { }
-                        Log.Warn("dlna", $"repackaging {Path.GetFileName(dir)} failed (exit {proc.ExitCode}): "
-                            + stderr.ToString().Trim());
-                    }
-                }
-                finally { _remuxing.TryRemove(dir, out _); proc.Dispose(); }
-            };
-        }
-        catch (Exception ex)
-        {
-            _remuxing.TryRemove(dir, out _);
-            Log.Warn("dlna", $"could not start repackaging {Path.GetFileName(dir)}: {ex.Message}");
-        }
     }
 
     /// <summary>Turns DLNA on or off while the server runs; returns what it now is.</summary>
@@ -2888,14 +2747,7 @@ public sealed partial class ControlApi : IDisposable
                 // point of it is a television that cannot decode the original
                 // — an HEVC file, an unfamiliar container — being handed
                 // H.264/AAC instead, at the same picture size.
-                // Only a GET may start a conversion. A HEAD is the same
-                // "not yet anybody watching" moment as the comment below
-                // already treats it — a television checking size and
-                // seekability before it commits to anything — and some
-                // clients HEAD several items in a row while deciding what
-                // to show, which is the same stampede risk browsing is,
-                // just through a different door.
-                var transcode = dlna.FindTranscode?.Invoke(file, method == "GET");
+                var transcode = dlna.FindTranscode?.Invoke(file);
 
                 // The cache-eviction sweep deletes whichever VOD directory
                 // was written to least recently, to make room for a new

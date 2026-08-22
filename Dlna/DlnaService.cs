@@ -55,17 +55,7 @@ public sealed class DlnaService
     /// leaving it null serves originals, which is what happened before this
     /// existed and remains the behaviour when the option is off.
     /// </summary>
-    /// <param name="allowStart">
-    /// Whether finding nothing may start a conversion — true only for an
-    /// actual play request. Listing a folder calls this once per file to
-    /// learn what size and type to advertise, and must never be the thing
-    /// that starts a background job: a single Browse can enumerate dozens
-    /// of files, and each one asking "does the original decode" and
-    /// launching ffmpeg on "no" is a stampede of unrequested conversions
-    /// competing for the same disk and the same CPU, started by nothing
-    /// more than a menu opening.
-    /// </param>
-    public Func<string, bool, Transcode?>? FindTranscode { get; set; }
+    public Func<string, Transcode?>? FindTranscode { get; set; }
 
     /// <summary>
     /// The folders DLNA may show — the library, narrowed by what has been
@@ -304,7 +294,7 @@ public sealed class DlnaService
         // its buffer and computes seek offsets from what is advertised here,
         // so advertising the original's numbers and then sending different
         // bytes is how a scrubber ends up pointing at the wrong place.
-        var tr = FindTranscode?.Invoke(path, false);   // listing a folder — never starts a job
+        var tr = FindTranscode?.Invoke(path);
         if (tr is not null) { size = tr.TotalBytes; mime = tr.ContentType; }
         var url = $"{baseUrl}/dlna/file?id={Encode(path)}";
         // DLNA.ORG_OP=01 advertises byte-range seeking, which is what lets a
