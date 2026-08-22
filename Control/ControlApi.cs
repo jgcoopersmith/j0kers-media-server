@@ -136,8 +136,18 @@ public sealed partial class ControlApi : IDisposable
     /// Unfinished conversions are skipped too: a playlist without
     /// EXT-X-ENDLIST is still being written, and serving it would hand over
     /// a film that stops partway with no explanation.
+    ///
+    /// <paramref name="allowStart"/> is what stands between a television
+    /// pressing play and a television merely opening a folder. Browsing
+    /// calls this once per file just to learn what size and type to
+    /// advertise, and a single folder can hold dozens — starting a
+    /// conversion on "nothing found yet" from that path is not one
+    /// unwanted job, it is every incompatible file in the folder at once,
+    /// competing for the same disk and the same CPU, triggered by nothing
+    /// more than a menu opening. False there. True only where a play
+    /// request is what got here.
     /// </summary>
-    private Dlna.DlnaService.Transcode? FullResTranscodeFor(string sourceFile)
+    private Dlna.DlnaService.Transcode? FullResTranscodeFor(string sourceFile, bool allowStart)
     {
         try
         {
@@ -216,7 +226,8 @@ public sealed partial class ControlApi : IDisposable
             // play attempt is what finds the finished copy, at the top of
             // this function — on this hardware, well under real-time, a
             // short wait rather than a long one.
-            if (_serverConfig.Discovery.DlnaUseTranscode || _tvCodecs?.NeedsConversion(sourceFile) == true)
+            if (allowStart
+                && (_serverConfig.Discovery.DlnaUseTranscode || _tvCodecs?.NeedsConversion(sourceFile) == true))
                 _ffmpeg?.StartVod(sourceFile);
         }
         catch (Exception ex) { Log.Debug("dlna", $"could not look for a conversion: {ex.Message}"); }
@@ -2767,7 +2778,14 @@ public sealed partial class ControlApi : IDisposable
                 // point of it is a television that cannot decode the original
                 // — an HEVC file, an unfamiliar container — being handed
                 // H.264/AAC instead, at the same picture size.
-                var transcode = dlna.FindTranscode?.Invoke(file);
+                // Only a GET may start a conversion. A HEAD is the same
+                // "not yet anybody watching" moment as the comment below
+                // already treats it — a television checking size and
+                // seekability before it commits to anything — and some
+                // clients HEAD several items in a row while deciding what
+                // to show, which is the same stampede risk browsing is,
+                // just through a different door.
+                var transcode = dlna.FindTranscode?.Invoke(file, method == "GET");
 
                 // The cache-eviction sweep deletes whichever VOD directory
                 // was written to least recently, to make room for a new
