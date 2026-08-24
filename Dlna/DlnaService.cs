@@ -75,6 +75,34 @@ public sealed class DlnaService
         catch { return Array.Empty<(string, string)>(); }
     }
 
+    // SystemUpdateID / the per-Browse UpdateID. A DLNA client caches a
+    // container's contents and only re-fetches when this number rises — so a
+    // constant, as it was, means a television that has already browsed the
+    // server never notices a channel start and the Live TV folder appear.
+    // Bumped whenever the set of running channels changes, and monotone, which
+    // is what a client expects: it may only ever go up.
+    private readonly object _updLock = new();
+    private int _updateId = 1;
+    private string _updateSig = "";
+
+    private int CurrentUpdateId()
+    {
+        // Signature of what the tree currently shows that can change under a
+        // browsing client: the running channels, plus the shared-folder count.
+        var chans = Channels();
+        var sig = string.Join("|", chans.Select(c => c.Stream).OrderBy(s => s, StringComparer.Ordinal))
+                  + "#" + Roots().Count;
+        lock (_updLock)
+        {
+            if (sig != _updateSig)
+            {
+                _updateSig = sig;
+                _updateId++;
+            }
+            return _updateId;
+        }
+    }
+
     /// <summary>
     /// The folders DLNA may show — the library, narrowed by what has been
     /// shared. Everything here goes through this rather than the library
@@ -402,7 +430,7 @@ public sealed class DlnaService
                 _ = int.TryParse(SoapArg(body, "RequestedCount"), out var count);
                 var result = Browse(objectId, flag, start, count, baseUrl);
                 return (200, SoapEnvelope(
-                    $"""<u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1"><Result>{Escape(result.Didl)}</Result><NumberReturned>{result.Returned}</NumberReturned><TotalMatches>{result.Total}</TotalMatches><UpdateID>1</UpdateID></u:BrowseResponse>"""));
+                    $"""<u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1"><Result>{Escape(result.Didl)}</Result><NumberReturned>{result.Returned}</NumberReturned><TotalMatches>{result.Total}</TotalMatches><UpdateID>{CurrentUpdateId()}</UpdateID></u:BrowseResponse>"""));
             }
 
             case "GetSearchCapabilities":
@@ -415,7 +443,7 @@ public sealed class DlnaService
 
             case "GetSystemUpdateID":
                 return (200, SoapEnvelope(
-                    """<u:GetSystemUpdateIDResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1"><Id>1</Id></u:GetSystemUpdateIDResponse>"""));
+                    $"""<u:GetSystemUpdateIDResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1"><Id>{CurrentUpdateId()}</Id></u:GetSystemUpdateIDResponse>"""));
 
             case "GetProtocolInfo":
                 return (200, SoapEnvelope(
