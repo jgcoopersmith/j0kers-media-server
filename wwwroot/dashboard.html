@@ -799,7 +799,7 @@
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Transcode</span>
       <button id="tc-add" onclick="tcAddFolder()" class="edit-only" title="Browse to any drive or folder">➕ Add folder</button>
       <button id="tc-up" onclick="tcUp()" title="Up one folder">↑ Up</button>
-      <button id="tc-refresh" onclick="tcReload(tcState.path)" title="Re-scan this folder">🔄</button>
+      <button id="tc-refresh" onclick="tcRefresh()" title="Re-scan this folder and refresh the conversion list">🔄 Refresh</button>
       <button id="tc-go" class="primary" onclick="tcTranscode()" disabled
               title="Convert the ticked files and folders">Transcode selected</button>
     </h2>
@@ -2295,6 +2295,14 @@ function tcSyncGo() {
 }
 
 function tcUp() { if (tcState.parent !== null) tcReload(tcState.parent); }
+
+/* Refresh button: re-scan the folder (picks up files added/converted since it
+   was opened) and pull a fresh status so the conversion list and free space
+   update at once instead of on the next poll. */
+function tcRefresh() {
+  if (tcState.path) tcReload(tcState.path);
+  tick();
+}
 
 async function tcTranscode() {
   const paths = [...tcState.selected];
