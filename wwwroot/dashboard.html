@@ -2167,10 +2167,12 @@ function tcRender(entries) {
 
     const nm = document.createElement("span");
     nm.className = "tc-name";
-    nm.textContent = isDrive ? (e.name + (e.label ? " (" + e.label + ")" : ""))
-                   : isFolder ? e.name
-                   : (e.title || e.name);
+    // Files show their REAL filename — so a search for "(2)" visibly matches
+    // "…(H.264) (2).mp4", and the .avi / (H.264).mp4 / (H.264) (2).mp4 copies
+    // are told apart instead of all reading as the same prettified title.
+    nm.textContent = isDrive ? (e.name + (e.label ? " (" + e.label + ")" : "")) : e.name;
     if (openable) { nm.title = "Open"; nm.onclick = () => tcReload(full); }
+    else if (e.title && e.title !== e.name) nm.title = e.title;   // pretty name on hover
     row.appendChild(nm);
 
     if (isDrive) {
