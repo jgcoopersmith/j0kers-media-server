@@ -767,7 +767,7 @@
 
   <div class="card server-admin-only" id="logcard">
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Log</span>
-      <select id="log-filter" class="am-in" style="width:auto" onchange="renderLog()" title="Hide anything below this level">
+      <select id="log-filter" class="am-in" style="width:auto" onchange="onLogFilterChange()" title="Sets what the server actually logs, not just what's shown here">
         <option value="TRACE">Everything</option>
         <option value="DEBUG">Debug and up</option>
         <option value="INFO" selected>Normal</option>
@@ -1863,8 +1863,19 @@ function renderSessions(list) {
 const LOG_LEVELS = { TRACE: 0, DEBUG: 1, INFO: 2, WARN: 3, ERROR: 4 };
 const LOG_KEEP = 500;              // matches the server's ring
 let logLines = [], logSeq = 0, logFollow = true, logMissed = false;
+let logLevelSynced = false;
 
 async function refreshLog() {
+  // the dropdown on the log card IS the server's real logging level, not
+  // just a client-side filter — show what it's actually set to, once,
+  // rather than defaulting to "Normal" and lying about the current state
+  if (!logLevelSynced) {
+    logLevelSynced = true;
+    try {
+      const s = await api("/api/settings");
+      if (s.logLevel) $("log-filter").value = s.logLevel.toUpperCase();
+    } catch { /* keep the dropdown's default */ }
+  }
   let data;
   try { data = await api("/api/log?since=" + logSeq); }
   catch { return; }               // not an admin, or the server blinked
@@ -1873,6 +1884,22 @@ async function refreshLog() {
   logSeq = data.last;
   logLines = logLines.concat(data.entries).slice(-LOG_KEEP);
   renderLog();
+}
+
+// Picking a level here changes what the server logs (and re-applies on the
+// next restart or crash, via the same settings.json the ⚙ Config dialog
+// writes to) — not only what this dropdown hides from the lines already on
+// screen.
+async function onLogFilterChange() {
+  renderLog();
+  try {
+    const r = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers() },
+      body: JSON.stringify({ logLevel: $("log-filter").value.toLowerCase() }),
+    });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || "could not change the log level"); }
+  } catch { alert("could not reach the server to change the log level"); }
 }
 
 function renderLog() {
