@@ -2080,8 +2080,10 @@ function tcShowEmpty() {
     + 'Click <b style="margin:0 4px">➕ Add folder</b> to browse to a drive or folder to convert.</div>';
 }
 
+let tcReloadGen = 0;
 async function tcReload(path) {
   if (!path) { tcShowEmpty(); return; }   // boot, and Up past a drive root
+  const gen = ++tcReloadGen;              // ignore a slow response a newer one has replaced
   // Moving to a different folder ends any search; refreshing the same folder
   // keeps it (that's how the search stays put while you tick and convert).
   if (path !== tcState.path) {
@@ -2100,7 +2102,8 @@ async function tcReload(path) {
     const r = await fetch(url, { headers: headers() });
     data = await r.json();
     if (!r.ok) throw new Error(data.error || r.status);
-  } catch (e) { list.innerHTML = ""; msg.textContent = "cannot open: " + e.message; return; }
+  } catch (e) { if (gen === tcReloadGen) { list.innerHTML = ""; msg.textContent = "cannot open: " + e.message; } return; }
+  if (gen !== tcReloadGen) return;   // a newer search/navigation already ran
 
   tcState.path = data.path || "";
   tcState.parent = data.parent ?? (data.path ? "" : null);
