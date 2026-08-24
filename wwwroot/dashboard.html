@@ -2155,6 +2155,7 @@ async function tcTranscode() {
   const msg = $("tc-msg");
   $("tc-go").disabled = true;
   msg.textContent = "queuing…";
+  let result = "";
   try {
     const r = await fetch("/api/transcode", {
       method: "POST",
@@ -2163,11 +2164,17 @@ async function tcTranscode() {
     });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.status);
-    msg.textContent = d.queued > 0
-      ? d.queued + " file(s) queued for conversion" + (d.found > d.queued ? " (" + (d.found - d.queued) + " already done or in progress)" : "")
+    const gap = parseInt(($("tc-stagger") || {}).value || "0", 10);
+    result = d.queued > 0
+      ? d.queued + " file(s) queued for conversion"
+        + (d.found > d.queued ? " (" + (d.found - d.queued) + " already done or in progress)" : "")
+        + (gap > 0 ? " — starting one every " + gap + "s" : "")
       : "nothing to do — those are already converted or in progress";
-  } catch (e) { msg.textContent = "failed: " + e.message; }
-  tcReload(tcState.path);   // reflect the new states
+  } catch (e) { result = "failed: " + e.message; }
+  // refresh the listing first (it clears the message), then show the result so
+  // it doesn't vanish the instant it appears
+  await tcReload(tcState.path);
+  msg.textContent = result;
 }
 
 /* ---- the log panel: what the console window used to show ----
