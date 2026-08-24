@@ -94,6 +94,7 @@ public sealed class FfmpegManager : IDisposable
         // before anything of ours starts, so a leftover writer is gone
         // rather than sharing a channel directory with its replacement
         KillOrphanedJobs();
+        CleanIncompleteVodDirs();   // drop partials a crash or restart left behind
         LoadChannels();
         LoadQueueSettings();
     }
@@ -414,13 +415,28 @@ public sealed class FfmpegManager : IDisposable
         lock (_lock)
         {
             var running = _vodJobs.TryGetValue(stream, out var proc) && !proc.HasExited;
-            if (File.Exists(playlist) && !running)
+            if (running)
+                return (stream, File.Exists(playlist));   // playable once segments exist
+
+            // "Finished earlier" must mean *finished*, not merely "a playlist
+            // file is present". An interrupted run (a crash, or the server
+            // stopped mid-encode) leaves a partial index.m3u8 with no
+            // EXT-X-ENDLIST; treating that as done is why a re-run "did
+            // nothing". Require the end marker, and clear any partial so the
+            // conversion restarts cleanly instead of being pointed at a stale,
+            // half-written directory.
+            var complete = File.Exists(playlist)
+                && File.ReadAllText(playlist).Contains("#EXT-X-ENDLIST", StringComparison.Ordinal);
+            if (complete)
             {
                 Directory.SetLastWriteTimeUtc(dir, DateTime.UtcNow); // LRU touch
                 return (stream, true); // finished earlier
             }
-            if (running)
-                return (stream, File.Exists(playlist));
+            if (Directory.Exists(dir))
+            {
+                try { Directory.Delete(dir, recursive: true); }
+                catch (Exception ex) { Log.Warn("ffmpeg", $"could not clear partial {stream}: {ex.Message}"); }
+            }
 
             // Eviction is deliberately not done here. Sizing the cache means
             // stat-ing every file in it, and going over budget means deleting
@@ -494,13 +510,22 @@ public sealed class FfmpegManager : IDisposable
                     // keep the job table from accumulating finished processes.
                     // Matched by reference so a rerun that has already taken
                     // the slot isn't evicted by its predecessor's exit.
+                    var superseded = false;
                     lock (_lock)
                     {
                         if (_vodJobs.TryGetValue(stream, out var q) && ReferenceEquals(q, p))
                             _vodJobs.Remove(stream);
+                        else
+                            superseded = true;   // a rerun already owns this stream+dir
                     }
                     lock (_progressLock) _vodProgress.Remove(stream);
                     SweepSupersededSeekSegments(dir);
+                    // Stopped, killed or crashed before ffmpeg wrote EXT-X-ENDLIST:
+                    // the directory holds a partial copy that will never play.
+                    // Remove it so a half-finished conversion doesn't linger on
+                    // disk (and isn't mistaken for a real one). A rerun that took
+                    // the slot owns the dir now, so leave that alone.
+                    if (!superseded) CleanupIfIncomplete(stream, dir);
                     // a batch conversion just freed a slot — start the next
                     PumpVodQueue();
                 });
@@ -965,16 +990,19 @@ public sealed class FfmpegManager : IDisposable
 
     private void PumpVodQueue()
     {
-        if (!Available) return;
+        if (!Available || _disposed) return;
         lock (_pumpLock)
         {
             while (ActiveVodStreams.Count < MaxConcurrentVod && !_vodQueue.IsEmpty)
             {
                 // Stagger: leave the configured gap between one start and the
-                // next. If the gap hasn't passed, wake up when it has instead
-                // of starting now — time already elapsed counts towards it.
+                // next. It applies only while something is already converting —
+                // the point is to keep several encodes from thrashing one disk,
+                // so when nothing is running the next start (the first of a
+                // batch) never waits. Time already elapsed counts towards the
+                // gap; if it hasn't passed, wake up when it has instead of now.
                 var gap = TimeSpan.FromSeconds(Math.Clamp(VodStaggerSeconds, 0, 120));
-                if (gap > TimeSpan.Zero)
+                if (gap > TimeSpan.Zero && ActiveVodStreams.Count > 0)
                 {
                     var wait = gap - (DateTime.UtcNow - _lastVodStartUtc);
                     if (wait > TimeSpan.Zero)
@@ -1000,6 +1028,59 @@ public sealed class FfmpegManager : IDisposable
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Removes a conversion's output directory when it did not finish — no
+    /// EXT-X-ENDLIST in the playlist means ffmpeg was stopped, killed or
+    /// crashed partway, leaving segments that will never play. A finished
+    /// conversion (ENDLIST present) is left untouched.
+    /// </summary>
+    private void CleanupIfIncomplete(string stream, string dir)
+    {
+        try
+        {
+            if (!Directory.Exists(dir)) return;
+            var playlist = Path.Combine(dir, "index.m3u8");
+            var complete = File.Exists(playlist)
+                && File.ReadAllText(playlist).Contains("#EXT-X-ENDLIST", StringComparison.Ordinal);
+            if (complete) return;
+            Directory.Delete(dir, recursive: true);
+            Log.Info("ffmpeg", $"removed incomplete conversion: {stream}");
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("ffmpeg", $"could not remove incomplete conversion {stream}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// At startup, clears out conversions left half-finished by a previous run
+    /// (a crash, or the server being stopped mid-encode — which a restart does).
+    /// Only "vod-*" directories are considered, and only those missing the
+    /// EXT-X-ENDLIST marker, so finished copies and live-channel directories are
+    /// never touched.
+    /// </summary>
+    private void CleanIncompleteVodDirs()
+    {
+        try
+        {
+            if (!Directory.Exists(_mediaRoot)) return;
+            foreach (var dir in Directory.EnumerateDirectories(_mediaRoot, "vod-*"))
+            {
+                var playlist = Path.Combine(dir, "index.m3u8");
+                var complete = File.Exists(playlist)
+                    && File.ReadAllText(playlist).Contains("#EXT-X-ENDLIST", StringComparison.Ordinal);
+                if (complete) continue;
+                try
+                {
+                    Directory.Delete(dir, recursive: true);
+                    Log.Info("ffmpeg", $"cleared incomplete conversion left by a previous run: {Path.GetFileName(dir)}");
+                }
+                catch (Exception ex) { Log.Warn("ffmpeg", $"could not clear {Path.GetFileName(dir)}: {ex.Message}"); }
+            }
+        }
+        catch (Exception ex) { Log.Warn("ffmpeg", $"incomplete-conversion sweep failed: {ex.Message}"); }
     }
 
     /// <summary>

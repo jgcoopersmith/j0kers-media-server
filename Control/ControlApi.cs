@@ -3465,9 +3465,16 @@ public sealed partial class ControlApi : IDisposable
         }
 
         var unique = files.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        var queued = _ffmpeg.QueueVod(unique);
-        Log.Info("control", $"transcode: {queued} file(s) queued from {req.Paths.Count} selection(s) ({unique.Count} video file(s) found)");
-        WriteJson(res, 200, new { queued, found = unique.Count });
+        // Only convert what a TV can't already play. Selecting a folder that
+        // holds a film plus its existing H.264 copies should convert the one
+        // that needs it, not re-encode the copies too. Unprobeable files are
+        // left alone (NeedsConversion answers false), matching the pills.
+        var needsConv = unique.Where(f => _tvCodecs?.NeedsConversion(f) ?? true).ToList();
+        var alreadyGood = unique.Count - needsConv.Count;
+        var queued = _ffmpeg.QueueVod(needsConv);
+        Log.Info("control", $"transcode: {queued} file(s) queued from {req.Paths.Count} selection(s) "
+            + $"({unique.Count} video file(s) found, {alreadyGood} already play on a TV)");
+        WriteJson(res, 200, new { queued, found = unique.Count, needs = needsConv.Count, alreadyGood });
     }
 
     private sealed class TranscodeRequest
