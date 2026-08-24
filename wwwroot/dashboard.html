@@ -2138,23 +2138,24 @@ function tcFolderPills(s) {
   if (!s || !s.media)
     return '<span class="tc-badge b-ok" title="Nothing in here a TV could play or convert">no media</span>';
   let out = "";
+  // The headline is whether there is anything TO convert. A file counts as
+  // "needs converting" only if a TV can't play it AND no converted copy exists
+  // yet — so a folder holding an original plus its H.264 copy reads as done,
+  // not as "1/3", because the copy already plays and nothing is outstanding.
   if (s.needs > 0)
-    out += '<span class="tc-badge b-need" title="' + s.needs + ' file(s) under here need converting for a TV">'
+    out += '<span class="tc-badge b-need" title="' + s.needs + ' file(s) here still need converting for a TV">'
          + s.needs + ' to convert' + (s.unknown ? '+' : '') + '</span>';
-  if (s.done > 0) {
-    // green only when everything here is converted; a partial count (1/3) is
-    // amber — it is not finished, and green would read as "done".
-    const allDone = s.done >= s.media;
-    out += '<span class="tc-badge ' + (allDone ? 'b-done' : 'b-conv') + '" title="'
-         + s.done + ' of ' + s.media + ' already have a converted copy">'
-         + (allDone ? 'all converted' : s.done + '/' + s.media + ' converted') + '</span>';
-  }
+  else if (s.unknown > 0)
+    out += '<span class="tc-badge b-conv" title="Codecs not read yet — open this folder to fill it in">checking…</span>';
+  else
+    out += '<span class="tc-badge b-done" title="Everything here plays on a TV — either converted, or a format a TV already handles">TV-ready</span>';
+  // Neutral detail — facts, not work, so they never read as "incomplete".
+  if (s.done > 0)
+    out += '<span class="tc-badge b-ok" title="' + s.done + ' file(s) already have a converted copy">' + s.done + ' converted</span>';
   if (s.ready > 0)
-    out += '<span class="tc-badge b-ok" title="' + s.ready + ' file(s) a TV plays as they are">' + s.ready + ' TV ready</span>';
-  if (!s.needs && !s.done && !s.ready && s.unknown > 0)
-    out += '<span class="tc-badge b-conv" title="Codecs not read yet — browse into this folder to fill it in">checking…</span>';
+    out += '<span class="tc-badge b-ok" title="' + s.ready + ' file(s) a TV plays as they are, no conversion needed">' + s.ready + ' play as-is</span>';
   if (s.capped) out += '<span class="tc-badge b-ok" title="Stopped counting at 4000 files">4000+</span>';
-  return out || '<span class="tc-badge b-ok">' + s.media + ' media</span>';
+  return out;
 }
 
 /* The conversion list — like the media conversion tool's: what's running now
