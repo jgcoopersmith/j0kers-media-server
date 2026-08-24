@@ -5110,22 +5110,15 @@ async function pickerLoad(path) {
       : joinPath(picker.path, e.name);
 
     if (e.ready !== false) {
-      const canEnter = e.type !== "file";
-      if (picker.mode === "folder" && canEnter) {
-        // A folder picker drills in on a single click — the way an OS
-        // "choose folder" dialog works — so you can reach any depth. The
-        // "Select this folder" button then takes the directory you're in.
-        row.onclick = () => pickerLoad(full);
-      } else {
-        row.onclick = () => {
-          list.querySelectorAll(".pick-row").forEach(r2 => r2.classList.remove("selected"));
-          row.classList.add("selected");
-          picker.selected = full;
-          picker.selectedType = e.type;
-          pickerSync();
-        };
-        if (canEnter) row.ondblclick = () => pickerLoad(full);
-      }
+      row.onclick = () => {
+        list.querySelectorAll(".pick-row").forEach(r2 => r2.classList.remove("selected"));
+        row.classList.add("selected");
+        picker.selected = full;
+        picker.selectedType = e.type;
+        pickerSync();
+      };
+      if (e.type !== "file")
+        row.ondblclick = () => pickerLoad(full);
     }
     list.appendChild(row);
   }
