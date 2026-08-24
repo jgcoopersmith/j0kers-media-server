@@ -536,6 +536,7 @@ public sealed partial class ControlApi : IDisposable
             case "/api/transcode":
             case "/api/transcode/scan":
             case "/api/transcode/config":
+            case "/api/transcode/remove":
                 return AccessLevel.ServerAdmin;
 
             // what an unauthenticated protocol is allowed to see is an
@@ -912,6 +913,11 @@ public sealed partial class ControlApi : IDisposable
                                 doneSeconds = (int)v.DoneSeconds,
                                 durationSeconds = (int)v.DurationSeconds,
                             }),
+                        // files waiting to convert, in order — the dashboard
+                        // lists these with a remove button (running ones can't
+                        // be removed here, only what hasn't started)
+                        transcodeQueue = (_ffmpeg?.VodQueueSnapshot ?? (IReadOnlyList<string>)Array.Empty<string>())
+                            .Select(p => new { path = p, title = Media.StreamTitle.PrettifyFile(Path.GetFileName(p)) }),
                     });
                     return;
 
@@ -1047,6 +1053,11 @@ public sealed partial class ControlApi : IDisposable
             if (path == "/api/transcode/config" && method is "GET" or "POST")
             {
                 TranscodeConfig(ctx, method == "POST");
+                return;
+            }
+            if (method == "POST" && path == "/api/transcode/remove")
+            {
+                TranscodeRemove(ctx);
                 return;
             }
 
@@ -3486,6 +3497,39 @@ public sealed partial class ControlApi : IDisposable
     {
         [System.Text.Json.Serialization.JsonPropertyName("maxParallel")] public int? MaxParallel { get; set; }
         [System.Text.Json.Serialization.JsonPropertyName("staggerSeconds")] public int? StaggerSeconds { get; set; }
+    }
+
+    private sealed class TranscodeRemoveRequest
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("path")] public string? Path { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("clear")] public bool Clear { get; set; }
+    }
+
+    /// <summary>
+    /// POST /api/transcode/remove { path } — drops one waiting file from the
+    /// conversion queue; { clear:true } empties the whole waiting queue. A
+    /// conversion that has already started is not in the queue and is left
+    /// running.
+    /// </summary>
+    private void TranscodeRemove(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        if (_ffmpeg is null) { WriteJson(res, 503, new { error = "ffmpeg is not available" }); return; }
+
+        TranscodeRemoveRequest? req;
+        try { req = JsonSerializer.Deserialize<TranscodeRemoveRequest>(ReadBody(ctx), BodyJson); }
+        catch (Exception ex) { WriteJson(res, 400, new { error = "bad JSON: " + ex.Message }); return; }
+
+        if (req?.Clear == true)
+        {
+            var cleared = _ffmpeg.ClearVodQueue();
+            Log.Info("control", $"transcode queue cleared ({cleared} waiting file(s) removed)");
+            WriteJson(res, 200, new { cleared });
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(req?.Path)) { WriteJson(res, 400, new { error = "no path given" }); return; }
+        var removed = _ffmpeg.RemoveFromVodQueue(req.Path);
+        WriteJson(res, 200, new { removed });
     }
 
     /// <summary>

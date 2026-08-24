@@ -830,6 +830,15 @@
       <span><span class="tc-dot tc-conv"></span> converting</span>
       <span><span class="tc-dot tc-ok"></span> plays as-is</span>
     </div>
+
+    <div id="tc-conv-wrap" style="margin-top:10px;display:none">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+        <span style="flex:1;font-weight:600;font-size:12.5px">Conversions <span id="tc-conv-count" style="color:var(--muted);font-weight:400"></span></span>
+        <button id="tc-conv-clear" onclick="tcClearQueue()" title="Remove everything still waiting (running ones keep going)">🧹 Clear queue</button>
+      </div>
+      <div id="tc-conv-list" style="max-height:220px;overflow-y:auto;border:1px solid var(--grid);border-radius:10px;
+                                    background:var(--surface-2);padding:4px"></div>
+    </div>
   </div>
 
   <div class="card">
@@ -1786,6 +1795,7 @@ async function tick() {
   if (document.body.classList.contains("is-server-admin")) {
     refreshLog();
     tcBoot();
+    renderConversions(transcodingNow, status.transcodeQueue || []);
     // keep the listing live while conversions run, without a full reload
     // wiping a selection the user is building: only re-scan when something
     // is converting and nothing is ticked
@@ -2139,6 +2149,77 @@ function tcFolderPills(s) {
     out += '<span class="tc-badge b-conv" title="Codecs not read yet — browse into this folder to fill it in">checking…</span>';
   if (s.capped) out += '<span class="tc-badge b-ok" title="Stopped counting at 4000 files">4000+</span>';
   return out || '<span class="tc-badge b-ok">' + s.media + ' media</span>';
+}
+
+/* The conversion list — like the media conversion tool's: what's running now
+   (with progress, no remove — it's already going) and what's still waiting
+   (each with a ✕ to drop it before it starts). */
+function renderConversions(running, queued) {
+  const wrap = $("tc-conv-wrap"), list = $("tc-conv-list"), count = $("tc-conv-count");
+  if (!wrap) return;
+  running = running || []; queued = queued || [];
+  if (!running.length && !queued.length) { wrap.style.display = "none"; list.innerHTML = ""; count.textContent = ""; return; }
+  wrap.style.display = "";
+  count.textContent = "· " + running.length + " running, " + queued.length + " waiting";
+  list.innerHTML = "";
+
+  const row = (title) => {
+    const r = document.createElement("div");
+    r.className = "tc-row";
+    const icon = document.createElement("span"); icon.textContent = "🎞"; icon.style.flex = "none";
+    const nm = document.createElement("span"); nm.className = "tc-name"; nm.textContent = title;
+    r.appendChild(icon); r.appendChild(nm);
+    return r;
+  };
+
+  for (const rr of running) {
+    const r = row(rr.title || rr.stream);
+    const badge = document.createElement("span");
+    badge.className = "tc-badge b-conv";
+    badge.textContent = "converting " + (rr.percent != null ? rr.percent + "%" : "…");
+    r.appendChild(badge);
+    const dash = document.createElement("span");
+    dash.style.cssText = "flex:none;width:24px;text-align:center;color:var(--muted)";
+    dash.textContent = "—";
+    dash.title = "A running conversion can't be removed here — it finishes, or stop it from HLS streams";
+    r.appendChild(dash);
+    list.appendChild(r);
+  }
+  for (const q of queued) {
+    const r = row(q.title || q.path);
+    const badge = document.createElement("span");
+    badge.className = "tc-badge b-ok"; badge.textContent = "waiting";
+    r.appendChild(badge);
+    const rm = document.createElement("button");
+    rm.className = "danger"; rm.style.flex = "none"; rm.textContent = "✕";
+    rm.title = "Remove from the queue";
+    rm.onclick = () => tcRemoveQueued(q.path);   // path passed by closure — no escaping pitfalls
+    r.appendChild(rm);
+    list.appendChild(r);
+  }
+}
+
+async function tcRemoveQueued(path) {
+  try {
+    await fetch("/api/transcode/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers() },
+      body: JSON.stringify({ path }),
+    });
+  } catch { /* the next poll will re-render either way */ }
+  tick();   // pull a fresh status so the list updates at once
+}
+
+async function tcClearQueue() {
+  if (!confirm("Remove everything still waiting to convert? (Running conversions keep going.)")) return;
+  try {
+    await fetch("/api/transcode/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers() },
+      body: JSON.stringify({ clear: true }),
+    });
+  } catch {}
+  tick();
 }
 
 function tcSyncGo() {

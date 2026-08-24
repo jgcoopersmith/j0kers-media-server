@@ -969,6 +969,38 @@ public sealed class FfmpegManager : IDisposable
     /// <summary>Number of files waiting in the batch conversion queue.</summary>
     public int VodQueueDepth => _vodQueue.Count;
 
+    /// <summary>The files waiting in the batch queue (not yet started), in order.</summary>
+    public IReadOnlyList<string> VodQueueSnapshot => _vodQueue.ToArray();
+
+    /// <summary>
+    /// Removes a file from the waiting queue. Running conversions live in the
+    /// job table, not the queue, so this can never stop one that has already
+    /// started. Returns true if the file was waiting and is now removed.
+    /// </summary>
+    public bool RemoveFromVodQueue(string file)
+    {
+        lock (_pumpLock)
+        {
+            var all = _vodQueue.ToArray();
+            var kept = all.Where(f => !string.Equals(f, file, StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (kept.Length == all.Length) return false;   // wasn't waiting
+            while (_vodQueue.TryDequeue(out _)) { }
+            foreach (var f in kept) _vodQueue.Enqueue(f);
+            return true;
+        }
+    }
+
+    /// <summary>Empties the waiting queue; running conversions are unaffected.</summary>
+    public int ClearVodQueue()
+    {
+        lock (_pumpLock)
+        {
+            var n = 0;
+            while (_vodQueue.TryDequeue(out _)) n++;
+            return n;
+        }
+    }
+
     /// <summary>
     /// Queues files for conversion and starts as many as the concurrency cap
     /// allows, the rest following as slots free up. Files already converted
