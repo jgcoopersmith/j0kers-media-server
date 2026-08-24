@@ -3399,6 +3399,7 @@ public sealed partial class ControlApi : IDisposable
             // search never launches a probe; results are capped.
             if (!string.IsNullOrWhiteSpace(q))
             {
+                Log.Info("control", $"[searchdebug] rawQuery='{ctx.Request.Url?.Query}'  parsed q='{q}'");
                 const int searchCap = 500; var searchCapped = false;
                 var sopts = new EnumerationOptions
                 {
