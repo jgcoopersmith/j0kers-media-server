@@ -1915,11 +1915,20 @@ function renderSessions(list) {
    shows whether a TV needs it converted and whether a conversion exists, is
    running, or has never been made. */
 const tcState = { path: "", parent: null, booted: false, selected: new Set(), converting: false };
+const TC_FOLDER_KEY = "j0kers-tc-folder";   // last folder browsed, remembered per browser
 
 async function tcBoot() {
   if (tcState.booted) return;
   tcState.booted = true;
-  tcReload("");   // start at the drive list
+  let saved = null;
+  try { saved = localStorage.getItem(TC_FOLDER_KEY); } catch { /* private mode */ }
+  if (saved) {
+    await tcReload(saved);
+    // saved folder gone (unplugged drive, moved dir): fall back to empty
+    if (!tcState.path) { try { localStorage.removeItem(TC_FOLDER_KEY); } catch {} tcShowEmpty(); }
+  } else {
+    tcShowEmpty();
+  }
 }
 
 /* Jump to any drive or folder through the same browsable picker the media
@@ -1936,6 +1945,7 @@ function tcShowEmpty() {
   tcState.path = "";
   tcState.parent = null;
   tcState.selected.clear();
+  try { localStorage.removeItem(TC_FOLDER_KEY); } catch { /* private mode */ }
   tcSyncGo();
   $("tc-path").textContent = "No folder yet";
   $("tc-up").disabled = true;
@@ -1961,6 +1971,7 @@ async function tcReload(path) {
 
   tcState.path = data.path || "";
   tcState.parent = data.parent ?? (data.path ? "" : null);
+  try { if (tcState.path) localStorage.setItem(TC_FOLDER_KEY, tcState.path); } catch { /* private mode */ }
   $("tc-path").textContent = data.path || "Drives";
   $("tc-up").disabled = !data.path;
   tcRender(data.entries || []);
