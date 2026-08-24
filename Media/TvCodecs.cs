@@ -149,6 +149,42 @@ public sealed class TvCodecs
         return false;
     }
 
+    /// <summary>
+    /// Like <see cref="NeedsConversion"/> but never launches ffprobe: returns
+    /// null when the file has not been probed yet. A folder summary walks a
+    /// whole subtree, and probing every file it meets would turn opening a
+    /// directory into an hour of ffprobe launches — so the summary asks this
+    /// instead and shows "checking…" for what isn't known yet. An unplayable
+    /// container is decided by extension alone, so it still answers without a
+    /// probe.
+    /// </summary>
+    public bool? NeedsConversionCached(string file)
+    {
+        if (UnplayableContainers.Contains(Path.GetExtension(file))) return true;
+
+        string key;
+        try
+        {
+            var info = new FileInfo(file);
+            if (!info.Exists) return null;
+            key = $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
+        }
+        catch { return null; }
+
+        string? video, audio;
+        lock (_lock)
+        {
+            if (!_cache.TryGetValue(key, out var hit)) return null;   // not probed yet
+            var p = hit.Split('|');
+            video = string.IsNullOrEmpty(p.ElementAtOrDefault(0)) ? null : p[0];
+            audio = !string.IsNullOrEmpty(p.ElementAtOrDefault(1)) ? p[1] : null;
+        }
+        if (video is null) return false;                 // probed but unreadable: leave alone
+        if (!PlayableVideo.Contains(video)) return true;
+        if (audio is not null && !PlayableAudio.Contains(audio)) return true;
+        return false;
+    }
+
     public void Save()
     {
         lock (_lock)

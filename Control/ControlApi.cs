@@ -3339,7 +3339,7 @@ public sealed partial class ControlApi : IDisposable
             var dir = new DirectoryInfo(full);
             var entries = new List<object>();
             foreach (var d in dir.EnumerateDirectories().OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase))
-                entries.Add(new { name = d.Name, type = "folder" });
+                entries.Add(new { name = d.Name, type = "folder", summary = FolderMediaSummary(d.FullName) });
 
             foreach (var f in dir.EnumerateFiles().OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase))
             {
@@ -3368,6 +3368,46 @@ public sealed partial class ControlApi : IDisposable
         }
         catch (UnauthorizedAccessException) { WriteJson(res, 403, new { error = "access denied" }); }
         catch (Exception ex) { WriteJson(res, 400, new { error = ex.Message }); }
+    }
+
+    /// <summary>
+    /// A one-line count of what a folder holds, walked recursively, for the
+    /// pills beside it: how many videos are inside, how many a TV needs
+    /// converted, how many already have a converted copy, how many play as-is,
+    /// and how many haven't been probed yet. Codecs are read from the cache
+    /// only (see <see cref="Media.TvCodecs.NeedsConversionCached"/>) so opening
+    /// a directory never launches a probe; inaccessible sub-folders and symlink
+    /// loops are skipped, and the walk stops at a cap so a huge tree can't
+    /// stall the listing.
+    /// </summary>
+    private object FolderMediaSummary(string dir)
+    {
+        int media = 0, needs = 0, done = 0, ready = 0, unknown = 0;
+        const int cap = 4000;
+        var capped = false;
+        var opts = new EnumerationOptions
+        {
+            RecurseSubdirectories = true,
+            IgnoreInaccessible = true,
+            AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System,
+        };
+        try
+        {
+            foreach (var f in Directory.EnumerateFiles(dir, "*", opts))
+            {
+                if (!TranscodableExt.Contains(Path.GetExtension(f))) continue;
+                if (media >= cap) { capped = true; break; }
+                media++;
+                if ((_ffmpeg?.VodStatusFor(f) ?? Media.FfmpegManager.VodState.None) == Media.FfmpegManager.VodState.Done)
+                { done++; continue; }
+                var nc = _tvCodecs?.NeedsConversionCached(f);
+                if (nc == true) needs++;
+                else if (nc == false) ready++;
+                else unknown++;
+            }
+        }
+        catch { /* report whatever was counted before the walk failed */ }
+        return new { media, needs, done, ready, unknown, capped };
     }
 
     /// <summary>

@@ -2013,6 +2013,13 @@ function tcRender(entries) {
       row.appendChild(det);
     }
 
+    if (isFolder) {
+      const pills = document.createElement("span");
+      pills.style.cssText = "flex:none;display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end";
+      pills.innerHTML = tcFolderPills(e.summary);
+      row.appendChild(pills);
+    }
+
     if (e.type === "file") {
       const det = document.createElement("span");
       det.className = "tc-det";
@@ -2029,6 +2036,30 @@ function tcRender(entries) {
     }
     list.appendChild(row);
   }
+}
+
+/* Pills beside a folder — the same idea as the media conversion tool: how
+   much media is inside and how much of it a TV needs converted. The counts
+   come from the server, walked recursively and read from the codec cache
+   only, so opening a folder never launches a probe. Red "to convert" leads;
+   the settled facts trail. "checking…" means files under here haven't been
+   probed yet — browse into them (or play them) and the counts fill in. */
+function tcFolderPills(s) {
+  if (!s || !s.media)
+    return '<span class="tc-badge b-ok" title="Nothing in here a TV could play or convert">no media</span>';
+  let out = "";
+  if (s.needs > 0)
+    out += '<span class="tc-badge b-need" title="' + s.needs + ' file(s) under here need converting for a TV">'
+         + s.needs + ' to convert' + (s.unknown ? '+' : '') + '</span>';
+  if (s.done > 0)
+    out += '<span class="tc-badge b-done" title="' + s.done + ' of ' + s.media + ' already have a converted copy">'
+         + (s.done >= s.media ? 'all converted' : s.done + '/' + s.media + ' converted') + '</span>';
+  if (s.ready > 0)
+    out += '<span class="tc-badge b-ok" title="' + s.ready + ' file(s) a TV plays as they are">' + s.ready + ' TV ready</span>';
+  if (!s.needs && !s.done && !s.ready && s.unknown > 0)
+    out += '<span class="tc-badge b-conv" title="Codecs not read yet — browse into this folder to fill it in">checking…</span>';
+  if (s.capped) out += '<span class="tc-badge b-ok" title="Stopped counting at 4000 files">4000+</span>';
+  return out || '<span class="tc-badge b-ok">' + s.media + ' media</span>';
 }
 
 function tcSyncGo() {
