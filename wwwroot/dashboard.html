@@ -825,6 +825,7 @@
     <div id="tc-conv-wrap" style="margin:0 0 10px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
         <span style="flex:1;font-weight:600;font-size:12.5px">Conversions <span id="tc-conv-count" style="color:var(--muted);font-weight:400"></span></span>
+        <button id="tc-conv-order" onclick="tcToggleConvOrder()" title="How the conversion list is ordered">⇅ Active first</button>
         <button id="tc-conv-clear" class="edit-only" onclick="tcClearQueue()" title="Remove everything still waiting (running ones keep going)">🧹 Clear queue</button>
       </div>
       <div id="tc-conv-list" style="max-height:200px;overflow-y:auto;border:1px solid var(--grid);border-radius:10px;
@@ -2158,13 +2159,46 @@ function tcFolderPills(s) {
   return out;
 }
 
+/* View options for the conversion list — the media conversion tool's "Active
+   first" toggle, adapted to this list (running + waiting). Remembered per
+   browser. */
+const TC_ORDER_KEY = "j0kers-tc-conv-order";
+const TC_ORDERS = ["active", "waiting", "az"];
+const TC_ORDER_LABEL = { active: "⇅ Active first", waiting: "⇅ Waiting first", az: "⇅ A → Z" };
+const TC_ORDER_WHY = {
+  active: "Running first, then what's waiting in the order it will run.",
+  waiting: "Waiting first — handy for pruning the queue — then what's running.",
+  az: "Everything by title, running and waiting together.",
+};
+let tcConvOrder = (() => {
+  try { const s = localStorage.getItem(TC_ORDER_KEY); return TC_ORDERS.includes(s) ? s : "active"; }
+  catch { return "active"; }
+})();
+
+function paintTcConvOrder() {
+  const b = $("tc-conv-order");
+  if (!b) return;
+  const next = TC_ORDERS[(TC_ORDERS.indexOf(tcConvOrder) + 1) % TC_ORDERS.length];
+  b.textContent = TC_ORDER_LABEL[tcConvOrder];
+  b.title = TC_ORDER_WHY[tcConvOrder] + "\n\nPress for " + TC_ORDER_LABEL[next].replace("⇅ ", "").toLowerCase() + ".";
+}
+
+function tcToggleConvOrder() {
+  tcConvOrder = TC_ORDERS[(TC_ORDERS.indexOf(tcConvOrder) + 1) % TC_ORDERS.length];
+  try { localStorage.setItem(TC_ORDER_KEY, tcConvOrder); } catch { /* private mode */ }
+  paintTcConvOrder();
+  renderConversions(lastRunning, lastQueued);   // re-order without waiting for the next poll
+}
+
 /* The conversion list — like the media conversion tool's: what's running now
    (with progress, no remove — it's already going) and what's still waiting
    (each with a ✕ to drop it before it starts). */
+let lastRunning = [], lastQueued = [];
 function renderConversions(running, queued) {
   const wrap = $("tc-conv-wrap"), list = $("tc-conv-list"), count = $("tc-conv-count"), clear = $("tc-conv-clear");
   if (!wrap) return;
-  running = running || []; queued = queued || [];
+  running = lastRunning = running || []; queued = lastQueued = queued || [];
+  paintTcConvOrder();
   // Always visible, so it's findable and obviously shows nothing rather than
   // disappearing. Empty state when idle.
   if (!running.length && !queued.length) {
@@ -2177,38 +2211,42 @@ function renderConversions(running, queued) {
   if (clear) clear.style.display = queued.length ? "" : "none";
   list.innerHTML = "";
 
-  const row = (title) => {
+  // one flat list of items, tagged by kind, then ordered by the chosen view
+  const items = running.map(r => ({ kind: "running", title: r.title || r.stream, percent: r.percent }))
+    .concat(queued.map(q => ({ kind: "queued", title: q.title || q.path, path: q.path })));
+  if (tcConvOrder === "az")
+    items.sort((a, b) => (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" }));
+  else if (tcConvOrder === "waiting")
+    items.sort((a, b) => (a.kind === "queued" ? 0 : 1) - (b.kind === "queued" ? 0 : 1));
+  // "active" keeps the natural running-then-waiting order (no sort needed)
+
+  for (const it of items) {
     const r = document.createElement("div");
     r.className = "tc-row";
     const icon = document.createElement("span"); icon.textContent = "🎞"; icon.style.flex = "none";
-    const nm = document.createElement("span"); nm.className = "tc-name"; nm.textContent = title;
+    const nm = document.createElement("span"); nm.className = "tc-name"; nm.textContent = it.title;
     r.appendChild(icon); r.appendChild(nm);
-    return r;
-  };
 
-  for (const rr of running) {
-    const r = row(rr.title || rr.stream);
-    const badge = document.createElement("span");
-    badge.className = "tc-badge b-conv";
-    badge.textContent = "converting " + (rr.percent != null ? rr.percent + "%" : "…");
-    r.appendChild(badge);
-    const dash = document.createElement("span");
-    dash.style.cssText = "flex:none;width:24px;text-align:center;color:var(--muted)";
-    dash.textContent = "—";
-    dash.title = "A running conversion can't be removed here — it finishes, or stop it from HLS streams";
-    r.appendChild(dash);
-    list.appendChild(r);
-  }
-  for (const q of queued) {
-    const r = row(q.title || q.path);
-    const badge = document.createElement("span");
-    badge.className = "tc-badge b-ok"; badge.textContent = "waiting";
-    r.appendChild(badge);
-    const rm = document.createElement("button");
-    rm.className = "danger"; rm.style.flex = "none"; rm.textContent = "✕";
-    rm.title = "Remove from the queue";
-    rm.onclick = () => tcRemoveQueued(q.path);   // path passed by closure — no escaping pitfalls
-    r.appendChild(rm);
+    if (it.kind === "running") {
+      const badge = document.createElement("span");
+      badge.className = "tc-badge b-conv";
+      badge.textContent = "converting " + (it.percent != null ? it.percent + "%" : "…");
+      r.appendChild(badge);
+      const dash = document.createElement("span");
+      dash.style.cssText = "flex:none;width:24px;text-align:center;color:var(--muted)";
+      dash.textContent = "—";
+      dash.title = "A running conversion can't be removed here — it finishes, or stop it from HLS streams";
+      r.appendChild(dash);
+    } else {
+      const badge = document.createElement("span");
+      badge.className = "tc-badge b-ok"; badge.textContent = "waiting";
+      r.appendChild(badge);
+      const rm = document.createElement("button");
+      rm.className = "danger"; rm.style.flex = "none"; rm.textContent = "✕";
+      rm.title = "Remove from the queue";
+      rm.onclick = () => tcRemoveQueued(it.path);   // path via closure — no escaping pitfalls
+      r.appendChild(rm);
+    }
     list.appendChild(r);
   }
 }
