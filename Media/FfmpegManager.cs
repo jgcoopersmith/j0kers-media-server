@@ -292,6 +292,73 @@ public sealed class FfmpegManager : IDisposable
         }
     }
 
+    private string? _placeholderPath;
+    private readonly object _placeholderLock = new();
+
+    /// <summary>
+    /// A short H.264/AAC clip that reads "Transcoding…", generated once and
+    /// cached. It is what a television is handed the moment it presses play
+    /// on a file that has to be converted first and has no finished
+    /// conversion yet: DLNA has no other channel to tell the person at the
+    /// set what is happening, so the message is the picture. Returns null if
+    /// it cannot be made (no ffmpeg, or the draw failed), in which case the
+    /// caller falls back to serving the original.
+    /// </summary>
+    public string? TranscodingPlaceholder()
+    {
+        if (!Available) return null;
+        lock (_placeholderLock)
+        {
+            if (_placeholderPath is not null && File.Exists(_placeholderPath)) return _placeholderPath;
+
+            var path = Path.Combine(_mediaRoot, ".transcoding.mp4");
+            if (File.Exists(path)) { _placeholderPath = path; return path; }
+
+            // A Windows font, escaped for ffmpeg's filter parser: the drive
+            // colon becomes "\:" or drawtext reads it as an option separator.
+            var font = OperatingSystem.IsWindows()
+                ? @"C\:/Windows/Fonts/arialbd.ttf"
+                : "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+            var draw = File.Exists(font.Replace(@"\:", ":"))
+                ? $"drawtext=fontfile='{font}':text='Transcoding…':fontcolor=white:fontsize=64:x=(w-text_w)/2:y=(h-text_h)/2"
+                : "drawtext=text='Transcoding…':fontcolor=white:fontsize=64:x=(w-text_w)/2:y=(h-text_h)/2";
+
+            var args = new List<string>
+            {
+                "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "color=c=0x101418:s=1280x720:d=20:r=15",
+                "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+                "-vf", draw,
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.0",
+                "-preset", "veryfast", "-crf", "23",
+                "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+                "-shortest", "-movflags", "+faststart", path,
+            };
+            try
+            {
+                var psi = new ProcessStartInfo(FfmpegPath)
+                { RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+                foreach (var a in args) psi.ArgumentList.Add(a);
+                using var p = Process.Start(psi);
+                if (p is null) return null;
+                var err = p.StandardError.ReadToEnd();
+                if (!p.WaitForExit(60_000)) { try { p.Kill(true); } catch { } return null; }
+                if (p.ExitCode != 0 || !File.Exists(path))
+                {
+                    Log.Warn("dlna", $"could not make the Transcoding… placeholder: {err.Trim()}");
+                    return null;
+                }
+                _placeholderPath = path;
+                return path;
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("dlna", $"could not make the Transcoding… placeholder: {ex.Message}");
+                return null;
+            }
+        }
+    }
+
     /// <summary>ffprobe lives beside ffmpeg; falls back to PATH.</summary>
     public string FfprobePath
     {
@@ -377,7 +444,7 @@ public sealed class FfmpegManager : IDisposable
     /// to answer is to compute the name the same way the converter will —
     /// two copies of this arithmetic would eventually disagree.
     /// </summary>
-    public string? VodStreamName(string file, int height = 0)
+    public string? VodStreamName(string file, int height = 0, bool forceFmp4 = false)
     {
         FileInfo info;
         try { info = new FileInfo(file); if (!info.Exists) return null; }
@@ -388,21 +455,27 @@ public sealed class FfmpegManager : IDisposable
         // labelled with resolutions they didn't have)
         if (VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase)) height = 0;
 
-        // cache key: same file+size+mtime+height+codecs → same output dir, converted once
-        var key = Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(
-            $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}|{height}|{VideoEncoder}|{AudioEncoder}")))[..8].ToLowerInvariant();
+        // cache key: same file+size+mtime+height+codecs → same output dir,
+        // converted once. forceFmp4 adds a discriminator ONLY when set, so a
+        // DLNA conversion (fMP4, servable as video/mp4) lands in its own dir
+        // and never collides with the web player's .ts conversion of the
+        // same file — and the web keys stay byte-identical to before, so no
+        // existing cache is invalidated.
+        var salt = $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}|{height}|{VideoEncoder}|{AudioEncoder}"
+                   + (forceFmp4 ? "|fmp4" : "");
+        var key = Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(salt)))[..8].ToLowerInvariant();
         // readable link: filename slug + optional quality + short hash for uniqueness
         var slug = Slugify(Path.GetFileNameWithoutExtension(info.Name));
         return $"vod-{slug}{(height > 0 ? $"-{height}p" : "")}-{key}";
     }
 
-    public (string stream, bool ready) StartVod(string file, int height = 0)
+    public (string stream, bool ready) StartVod(string file, int height = 0, bool forceFmp4 = false)
     {
         if (!Available) throw new InvalidOperationException("ffmpeg is not available");
         var info = new FileInfo(file);
         if (!info.Exists) throw new FileNotFoundException("no such file", file);
 
-        var stream = VodStreamName(file, height)
+        var stream = VodStreamName(file, height, forceFmp4)
             ?? throw new FileNotFoundException("no such file", file);
         if (VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase)) height = 0;
         var dir = Path.Combine(_mediaRoot, stream);
@@ -468,7 +541,10 @@ public sealed class FfmpegManager : IDisposable
                 ? new[] { "-c:a", "copy" }
                 : new[] { "-c:a", AudioEncoder, "-b:a", "160k", "-ac", "2" });
 
-            var fmp4 = NeedsFmp4(info.FullName);
+            // DLNA wants fMP4: its init segment plus fragments concatenate
+            // into a valid video/mp4 stream, where raw .ts would have to be
+            // advertised as video/mp2t — which real TVs refuse to play.
+            var fmp4 = forceFmp4 || NeedsFmp4(info.FullName);
             var segExt = fmp4 ? "m4s" : "ts";
             args.AddRange(new[] { "-f", "hls", "-hls_time", Inv(VodSegmentSeconds), "-hls_list_size", "0",
                                   "-hls_playlist_type", "event" });

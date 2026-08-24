@@ -47,7 +47,12 @@ public sealed class DlnaService
     /// fMP4 stream. So the parts are handed over back to back, and the sizes
     /// are known in advance, which is what keeps byte-range seeking working.
     /// </summary>
-    public sealed record Transcode(IReadOnlyList<(string Path, long Length)> Parts, long TotalBytes, string ContentType);
+    public sealed record Transcode(IReadOnlyList<(string Path, long Length)> Parts, long TotalBytes, string ContentType,
+        // A placeholder is the short "Transcoding…" clip served while the
+        // real conversion is still being made — not a finished substitute.
+        // The GET that plays it is what starts the conversion (browse and
+        // HEAD never do); SourceFile is the library file to convert.
+        bool Placeholder = false, string? SourceFile = null);
 
     /// <summary>
     /// Finds a finished conversion for a library file, or null. Set by

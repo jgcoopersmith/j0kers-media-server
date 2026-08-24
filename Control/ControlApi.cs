@@ -157,8 +157,8 @@ public sealed partial class ControlApi : IDisposable
             var mediaRoot = Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
                 ? _serverConfig.Hls.MediaRoot
                 : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
-            if (!Directory.Exists(mediaRoot)) return null;
 
+            if (Directory.Exists(mediaRoot))
             foreach (var dir in Directory.EnumerateDirectories(mediaRoot, "vod-*"))
             {
                 // "vod-dune-720p-a1b2c3d4" was scaled; "vod-dune-a1b2c3d4" was not
@@ -170,6 +170,15 @@ public sealed partial class ControlApi : IDisposable
                 catch { continue; }
                 if (!src.Equals(sourceFile, StringComparison.OrdinalIgnoreCase)) continue;
 
+                // DLNA can only serve a conversion the TV will actually play,
+                // which means fMP4 (init.mp4 present) handed over as
+                // video/mp4. A .ts conversion made for the web player would
+                // have to be advertised as video/mp2t, which real TVs refuse
+                // — so it does not count here, and an on-demand fMP4 copy is
+                // made instead.
+                var init = Path.Combine(dir, "init.mp4");
+                if (!File.Exists(init)) continue;
+
                 var playlist = Path.Combine(dir, "index.m3u8");
                 string text;
                 try { text = File.ReadAllText(playlist); }
@@ -180,27 +189,38 @@ public sealed partial class ControlApi : IDisposable
                 long total = 0;
                 // the fMP4 initialisation segment belongs first, or the
                 // fragments after it are not a playable stream
-                var init = Path.Combine(dir, "init.mp4");
-                if (File.Exists(init)) { var l = new FileInfo(init).Length; parts.Add((init, l)); total += l; }
+                { var l = new FileInfo(init).Length; parts.Add((init, l)); total += l; }
 
+                var gap = false;
                 foreach (var line in text.Split('\n'))
                 {
                     var name = line.Trim();
                     if (name.Length == 0 || name[0] == '#') continue;
                     var seg = Path.Combine(dir, name.Split('?')[0]);
-                    if (!File.Exists(seg)) return null;      // a gap would be a corrupt stream
+                    if (!File.Exists(seg)) { gap = true; break; }   // a gap would be a corrupt stream
                     var len = new FileInfo(seg).Length;
                     parts.Add((seg, len));
                     total += len;
                 }
-                if (parts.Count == 0 || total == 0) continue;
+                if (gap || parts.Count == 0 || total == 0) continue;
 
-                var mp4 = parts[^1].Item1.EndsWith(".m4s", StringComparison.OrdinalIgnoreCase) || File.Exists(init);
-                return new Dlna.DlnaService.Transcode(parts, total, mp4 ? "video/mp4" : "video/mp2t");
+                return new Dlna.DlnaService.Transcode(parts, total, "video/mp4");
             }
         }
         catch (Exception ex) { Log.Debug("dlna", $"could not look for a conversion: {ex.Message}"); }
-        return null;
+
+        // Past the early return above, this file genuinely needs converting
+        // and no finished fMP4 conversion of it exists. Hand back the
+        // "Transcoding…" placeholder so the TV shows what is happening; the
+        // GET that plays it is what starts the real conversion (see the
+        // /dlna/file handler). If the placeholder itself can't be made, fall
+        // back to serving the original as before.
+        var ph = _ffmpeg?.TranscodingPlaceholder();
+        if (ph is null) return null;
+        long phLen;
+        try { phLen = new FileInfo(ph).Length; } catch { return null; }
+        return new Dlna.DlnaService.Transcode(
+            new[] { (ph, phLen) }, phLen, "video/mp4", Placeholder: true, SourceFile: sourceFile);
     }
 
     /// <summary>Turns DLNA on or off while the server runs; returns what it now is.</summary>
@@ -2764,10 +2784,37 @@ public sealed partial class ControlApi : IDisposable
                 // before anybody is watching, same reasoning as there, but
                 // it costs nothing to mark early and is one less place a
                 // television's first request could lose the race.
-                if (transcode is not null)
+                if (transcode is not null && !transcode.Placeholder)
                 {
                     try { Directory.SetLastWriteTimeUtc(Path.GetDirectoryName(transcode.Parts[0].Path)!, DateTime.UtcNow); }
                     catch { }
+                }
+
+                // Unplayable file, no finished conversion yet: the TV is shown
+                // the short "Transcoding…" clip so the person at the set knows
+                // what is happening — DLNA has no other way to tell them. The
+                // GET that plays it is what kicks off the real conversion
+                // (browse and HEAD deliberately never do, or a folder full of
+                // files would each start one just from being listed). It is
+                // idempotent — StartVod attaches to a running job rather than
+                // launching a second — so "only for files that do not have a
+                // transcode already" holds even across repeated presses. When
+                // the conversion finishes, reselecting the title on the TV
+                // re-browses, finds the finished fMP4 copy, and plays it.
+                if (transcode is { Placeholder: true })
+                {
+                    if (method == "GET" && transcode.SourceFile is { } srcToConvert)
+                    {
+                        try
+                        {
+                            var (stream, ready) = _ffmpeg!.StartVod(srcToConvert, forceFmp4: true);
+                            Log.Info("dlna", $"transcoding on demand for the TV: {Path.GetFileName(srcToConvert)} → {stream}"
+                                             + (ready ? " (already done)" : ""));
+                        }
+                        catch (Exception ex) { Log.Warn("dlna", $"could not start on-demand conversion: {ex.Message}"); }
+                    }
+                    dlna.ServeTranscode(ctx, transcode);   // the placeholder, for both HEAD and GET
+                    return;
                 }
 
                 // A HEAD is the TV asking how big the file is and whether it
