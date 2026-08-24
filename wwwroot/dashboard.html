@@ -809,7 +809,7 @@
     <div id="tc-path" style="font-size:12px;color:var(--muted);margin:2px 0 6px;word-break:break-all">Drives</div>
     <div style="position:relative;margin-bottom:6px">
       <input id="tc-search" class="am-in" style="width:100%;padding-right:28px"
-             placeholder="🔍 Search this folder and everything under it — Enter to search"
+             placeholder="🔍 Type an exact string, e.g. (2), then press Enter to search this folder and below"
              oninput="tcSearchTyped()"
              onkeydown="if(event.key==='Escape')tcClearSearch();else if(event.key==='Enter')tcSearchNow()">
       <button id="tc-search-clear" onclick="tcClearSearch()" title="Clear search (Esc)"
@@ -2013,24 +2013,23 @@ async function tcAddFolder() {
 }
 
 /* Search — recursively finds video files under the current folder by name,
-   like the media library search. Debounced while typing, or Enter to run now. */
-let tcSearchTimer = null;
+   like the media library search. Runs the EXACT string only when you press
+   Enter, so typing "(2)" isn't searched piecemeal as "(", "(2", "(2)" — you
+   get one clean search for what you actually typed. */
 function tcSearchTyped() {
-  const q = $("tc-search").value.trim();
+  // just show/hide the clear button while typing; the search itself waits for
+  // Enter. Emptying the box clears an active search.
+  const q = $("tc-search").value;
   $("tc-search-clear").style.display = q ? "" : "none";
-  clearTimeout(tcSearchTimer);
-  if (!q) { tcClearSearch(); return; }
-  tcSearchTimer = setTimeout(tcSearchNow, 350);
+  if (!q && tcState.search) tcClearSearch();
 }
 function tcSearchNow() {
-  clearTimeout(tcSearchTimer);
   if (!tcState.path) { $("tc-msg").textContent = "Open a folder first, then search inside it."; return; }
   tcState.search = $("tc-search").value.trim();
   $("tc-search-clear").style.display = tcState.search ? "" : "none";
-  tcReload(tcState.path);   // same path → keeps the search set above
+  if (tcState.search) tcReload(tcState.path);   // same path → keeps the search set above
 }
 function tcClearSearch() {
-  clearTimeout(tcSearchTimer);
   $("tc-search").value = "";
   $("tc-search-clear").style.display = "none";
   const had = tcState.search;

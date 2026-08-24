@@ -3399,7 +3399,6 @@ public sealed partial class ControlApi : IDisposable
             // search never launches a probe; results are capped.
             if (!string.IsNullOrWhiteSpace(q))
             {
-                Log.Info("control", $"[searchdebug] rawQuery='{ctx.Request.Url?.Query}'  parsed q='{q}'");
                 const int searchCap = 500; var searchCapped = false;
                 var sopts = new EnumerationOptions
                 {
@@ -3407,7 +3406,6 @@ public sealed partial class ControlApi : IDisposable
                     IgnoreInaccessible = true,
                     AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System,
                 };
-                var dbgSamples = new List<string>();
                 try
                 {
                     foreach (var fp in Directory.EnumerateFiles(full, "*", sopts))
@@ -3415,12 +3413,10 @@ public sealed partial class ControlApi : IDisposable
                         if (!TranscodableExt.Contains(Path.GetExtension(fp))) continue;
                         if (Path.GetFileName(fp).IndexOf(q, StringComparison.OrdinalIgnoreCase) < 0) continue;
                         if (entries.Count >= searchCap) { searchCapped = true; break; }
-                        if (dbgSamples.Count < 5) dbgSamples.Add(Path.GetFileName(fp));
                         entries.Add(TranscodeFileEntry(new FileInfo(fp), cacheOnly: true));
                     }
                 }
                 catch { /* report whatever matched before the walk failed */ }
-                Log.Info("control", $"[searchdebug] q='{q}' matched={entries.Count} samples=[{string.Join(" | ", dbgSamples)}]");
                 WriteJson(res, 200, new { path = full, parent = dir.Parent?.FullName, entries, search = q, capped = searchCapped });
                 return;
             }
