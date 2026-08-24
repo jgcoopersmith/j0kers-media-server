@@ -2140,9 +2140,14 @@ function tcFolderPills(s) {
   if (s.needs > 0)
     out += '<span class="tc-badge b-need" title="' + s.needs + ' file(s) under here need converting for a TV">'
          + s.needs + ' to convert' + (s.unknown ? '+' : '') + '</span>';
-  if (s.done > 0)
-    out += '<span class="tc-badge b-done" title="' + s.done + ' of ' + s.media + ' already have a converted copy">'
-         + (s.done >= s.media ? 'all converted' : s.done + '/' + s.media + ' converted') + '</span>';
+  if (s.done > 0) {
+    // green only when everything here is converted; a partial count (1/3) is
+    // amber — it is not finished, and green would read as "done".
+    const allDone = s.done >= s.media;
+    out += '<span class="tc-badge ' + (allDone ? 'b-done' : 'b-conv') + '" title="'
+         + s.done + ' of ' + s.media + ' already have a converted copy">'
+         + (allDone ? 'all converted' : s.done + '/' + s.media + ' converted') + '</span>';
+  }
   if (s.ready > 0)
     out += '<span class="tc-badge b-ok" title="' + s.ready + ' file(s) a TV plays as they are">' + s.ready + ' TV ready</span>';
   if (!s.needs && !s.done && !s.ready && s.unknown > 0)
