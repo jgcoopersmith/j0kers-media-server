@@ -535,6 +535,7 @@ public sealed partial class ControlApi : IDisposable
             // disk, the same class of power as the log and the config
             case "/api/transcode":
             case "/api/transcode/scan":
+            case "/api/transcode/config":
                 return AccessLevel.ServerAdmin;
 
             // what an unauthenticated protocol is allowed to see is an
@@ -1041,6 +1042,11 @@ public sealed partial class ControlApi : IDisposable
             if (method == "POST" && path == "/api/transcode")
             {
                 TranscodeBatch(ctx);
+                return;
+            }
+            if (path == "/api/transcode/config" && method is "GET" or "POST")
+            {
+                TranscodeConfig(ctx, method == "POST");
                 return;
             }
 
@@ -3467,6 +3473,40 @@ public sealed partial class ControlApi : IDisposable
     private sealed class TranscodeRequest
     {
         [System.Text.Json.Serialization.JsonPropertyName("paths")] public List<string>? Paths { get; set; }
+    }
+
+    private sealed class TranscodeConfigRequest
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("maxParallel")] public int? MaxParallel { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("staggerSeconds")] public int? StaggerSeconds { get; set; }
+    }
+
+    /// <summary>
+    /// GET /api/transcode/config — current queue settings.
+    /// POST /api/transcode/config { maxParallel?, staggerSeconds? } — how many
+    /// conversions run at once (1–8) and the gap between starting them (0–120 s).
+    /// </summary>
+    private void TranscodeConfig(HttpListenerContext ctx, bool write)
+    {
+        var res = ctx.Response;
+        if (_ffmpeg is null) { WriteJson(res, 503, new { error = "ffmpeg is not available" }); return; }
+
+        if (write)
+        {
+            TranscodeConfigRequest? req;
+            try { req = JsonSerializer.Deserialize<TranscodeConfigRequest>(ReadBody(ctx), BodyJson); }
+            catch (Exception ex) { WriteJson(res, 400, new { error = "bad JSON: " + ex.Message }); return; }
+            _ffmpeg.SetQueueSettings(req?.MaxParallel, req?.StaggerSeconds);
+            Log.Info("control", $"transcode queue: {_ffmpeg.MaxConcurrentVod} at a time, "
+                + $"{_ffmpeg.VodStaggerSeconds}s between starts");
+        }
+
+        WriteJson(res, 200, new
+        {
+            maxParallel = _ffmpeg.MaxConcurrentVod,
+            staggerSeconds = _ffmpeg.VodStaggerSeconds,
+            cores = Environment.ProcessorCount,
+        });
     }
 
     /// <summary>

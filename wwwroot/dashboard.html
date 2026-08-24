@@ -805,6 +805,22 @@
     </h2>
     <div id="tc-space" style="font-size:11.5px;color:var(--muted);margin:0 0 6px;border-bottom:1px solid var(--grid);padding-bottom:6px;min-height:15px"></div>
     <div id="tc-path" style="font-size:12px;color:var(--muted);margin:2px 0 6px;word-break:break-all">Drives</div>
+    <div id="tc-opts" class="edit-only" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-bottom:6px">
+      <label>Convert
+        <select id="tc-parallel" class="am-in" style="width:auto" onchange="tcSaveConfig()"
+                title="How many conversions run at the same time">
+          <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+          <option value="4">4</option><option value="5">5</option><option value="6">6</option>
+          <option value="7">7</option><option value="8">8</option>
+        </select> at a time</label>
+      <label>Wait
+        <select id="tc-stagger" class="am-in" style="width:auto" onchange="tcSaveConfig()"
+                title="Gap between starting one conversion and the next — spaces out disk reads">
+          <option value="0">none</option><option value="5">5s</option><option value="10">10s</option>
+          <option value="15">15s</option><option value="30">30s</option><option value="60">1 min</option>
+          <option value="120">2 min</option>
+        </select> between starts</label>
+    </div>
     <div id="tc-msg" style="font-size:12px;min-height:16px;margin-bottom:4px"></div>
     <div id="tc-list" style="max-height:300px;overflow-y:auto;border:1px solid var(--grid);border-radius:10px;
                              background:var(--surface-2);padding:4px"></div>
@@ -1920,6 +1936,7 @@ const TC_FOLDER_KEY = "j0kers-tc-folder";   // last folder browsed, remembered p
 async function tcBoot() {
   if (tcState.booted) return;
   tcState.booted = true;
+  tcLoadConfig();
   let saved = null;
   try { saved = localStorage.getItem(TC_FOLDER_KEY); } catch { /* private mode */ }
   if (saved) {
@@ -1929,6 +1946,38 @@ async function tcBoot() {
   } else {
     tcShowEmpty();
   }
+}
+
+/* How many conversions run at once, and the gap between starting them —
+   mirrors the media conversion tool. Persisted on the server so the choice
+   survives restarts. */
+async function tcLoadConfig() {
+  try {
+    const r = await fetch("/api/transcode/config", { headers: headers() });
+    if (!r.ok) return;
+    const d = await r.json();
+    if ($("tc-parallel")) $("tc-parallel").value = String(d.maxParallel);
+    if ($("tc-stagger")) $("tc-stagger").value = String(d.staggerSeconds);
+  } catch { /* leave the defaults shown */ }
+}
+
+async function tcSaveConfig() {
+  const body = {
+    maxParallel: parseInt($("tc-parallel").value, 10),
+    staggerSeconds: parseInt($("tc-stagger").value, 10),
+  };
+  const msg = $("tc-msg");
+  try {
+    const r = await fetch("/api/transcode/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers() },
+      body: JSON.stringify(body),
+    });
+    if (r.ok && msg) {
+      msg.textContent = "queue: " + body.maxParallel + " at a time"
+        + (body.staggerSeconds ? ", " + body.staggerSeconds + "s between starts" : "");
+    }
+  } catch { if (msg) msg.textContent = "could not save queue settings"; }
 }
 
 /* Jump to any drive or folder through the same browsable picker the media

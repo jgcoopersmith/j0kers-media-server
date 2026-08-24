@@ -79,6 +79,7 @@ public sealed class FfmpegManager : IDisposable
         _mediaRoot = mediaRoot;
         _channelsFile = Path.Combine(baseDirectory, "channels.json");
         _pidFile = Path.Combine(baseDirectory, "ffmpeg-pids.txt");
+        _queueSettingsFile = Path.Combine(baseDirectory, "transcode-queue.json");
         FfmpegPath = config.Path;
         Directory.CreateDirectory(_mediaRoot);
         Detect();
@@ -94,6 +95,7 @@ public sealed class FfmpegManager : IDisposable
         // rather than sharing a channel directory with its replacement
         KillOrphanedJobs();
         LoadChannels();
+        LoadQueueSettings();
     }
 
     /// <summary>Friendly codec names → ffmpeg encoders, in preference order.</summary>
@@ -880,8 +882,64 @@ public sealed class FfmpegManager : IDisposable
 
     private readonly System.Collections.Concurrent.ConcurrentQueue<string> _vodQueue = new();
 
-    /// <summary>How many conversions run at once from a batch; the rest wait.</summary>
+    /// <summary>How many conversions run at once from a batch; the rest wait. 1–8.</summary>
     public int MaxConcurrentVod { get; set; } = 2;
+
+    /// <summary>
+    /// Seconds to leave between starting one batch conversion and the next,
+    /// 0–120. Spacing the starts keeps a mechanical disk from thrashing its
+    /// heads across several files that all began reading at once; it delays
+    /// only the *start* of each job, not the job itself. 0 = start as slots
+    /// free up. Mirrors the media conversion tool's stagger.
+    /// </summary>
+    public int VodStaggerSeconds { get; set; }
+
+    private readonly string _queueSettingsFile;
+    private readonly object _pumpLock = new();
+    private DateTime _lastVodStartUtc = DateTime.MinValue;
+    private System.Threading.Timer? _staggerTimer;
+
+    private sealed class QueueSettings
+    {
+        public int MaxParallel { get; set; } = 2;
+        public int StaggerSeconds { get; set; }
+    }
+
+    private void LoadQueueSettings()
+    {
+        try
+        {
+            if (!File.Exists(_queueSettingsFile)) return;
+            var s = System.Text.Json.JsonSerializer.Deserialize<QueueSettings>(File.ReadAllText(_queueSettingsFile));
+            if (s is null) return;
+            MaxConcurrentVod = Math.Clamp(s.MaxParallel, 1, 8);
+            VodStaggerSeconds = Math.Clamp(s.StaggerSeconds, 0, 120);
+        }
+        catch { /* a bad sidecar is a default, not a failure */ }
+    }
+
+    private void SaveQueueSettings()
+    {
+        try
+        {
+            File.WriteAllText(_queueSettingsFile, System.Text.Json.JsonSerializer.Serialize(
+                new QueueSettings { MaxParallel = MaxConcurrentVod, StaggerSeconds = VodStaggerSeconds }));
+        }
+        catch (Exception ex) { Log.Warn("ffmpeg", $"could not save transcode queue settings: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Sets how many conversions run at once (1–8) and the gap between starting
+    /// them (0–120 s), persists the choice, and pumps the queue so a raised cap
+    /// takes effect immediately. Nulls leave a value unchanged.
+    /// </summary>
+    public void SetQueueSettings(int? maxParallel, int? staggerSeconds)
+    {
+        if (maxParallel is int mp) MaxConcurrentVod = Math.Clamp(mp, 1, 8);
+        if (staggerSeconds is int st) VodStaggerSeconds = Math.Clamp(st, 0, 120);
+        SaveQueueSettings();
+        PumpVodQueue();
+    }
 
     /// <summary>Number of files waiting in the batch conversion queue.</summary>
     public int VodQueueDepth => _vodQueue.Count;
@@ -908,17 +966,38 @@ public sealed class FfmpegManager : IDisposable
     private void PumpVodQueue()
     {
         if (!Available) return;
-        while (ActiveVodStreams.Count < MaxConcurrentVod && _vodQueue.TryDequeue(out var file))
+        lock (_pumpLock)
         {
-            try
+            while (ActiveVodStreams.Count < MaxConcurrentVod && !_vodQueue.IsEmpty)
             {
-                if (VodStatusFor(file) is VodState.Done or VodState.Converting) continue;
-                if (!File.Exists(file)) continue;
-                StartVod(file);   // registers the job; its exit pumps the queue again
-            }
-            catch (Exception ex)
-            {
-                Log.Warn("ffmpeg", $"could not start queued conversion of {Path.GetFileName(file)}: {ex.Message}");
+                // Stagger: leave the configured gap between one start and the
+                // next. If the gap hasn't passed, wake up when it has instead
+                // of starting now — time already elapsed counts towards it.
+                var gap = TimeSpan.FromSeconds(Math.Clamp(VodStaggerSeconds, 0, 120));
+                if (gap > TimeSpan.Zero)
+                {
+                    var wait = gap - (DateTime.UtcNow - _lastVodStartUtc);
+                    if (wait > TimeSpan.Zero)
+                    {
+                        _staggerTimer?.Dispose();
+                        _staggerTimer = new System.Threading.Timer(_ => PumpVodQueue(), null,
+                            wait, System.Threading.Timeout.InfiniteTimeSpan);
+                        return;
+                    }
+                }
+
+                if (!_vodQueue.TryDequeue(out var file)) break;
+                try
+                {
+                    if (VodStatusFor(file) is VodState.Done or VodState.Converting) continue;
+                    if (!File.Exists(file)) continue;
+                    StartVod(file);   // registers the job; its exit pumps the queue again
+                    _lastVodStartUtc = DateTime.UtcNow;
+                }
+                catch (Exception ex)
+                {
+                    Log.Warn("ffmpeg", $"could not start queued conversion of {Path.GetFileName(file)}: {ex.Message}");
+                }
             }
         }
     }
@@ -2037,6 +2116,7 @@ public sealed class FfmpegManager : IDisposable
     public void Dispose()
     {
         _disposed = true;
+        _staggerTimer?.Dispose();
         lock (_lock)
         {
             foreach (var key in _seekJobs.Keys.ToList()) StopSeekJobs(key);
