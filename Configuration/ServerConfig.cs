@@ -458,8 +458,23 @@ public sealed class FfmpegConfig
     /// <summary>Live channel segment length in seconds.</summary>
     [JsonPropertyName("liveSegmentSeconds")] public int LiveSegmentSeconds { get; set; } = 4;
 
-    /// <summary>Sliding window size for live channels.</summary>
-    [JsonPropertyName("liveWindowSegments")] public int LiveWindowSegments { get; set; } = 6;
+    /// <summary>
+    /// Sliding window size for live channels — how many recent segments stay
+    /// live and listed. At 4s each, 15 is a ~60s window.
+    ///
+    /// It was 6 (~24s), which is too short to survive a channel restart. A
+    /// Pluto restream's upstream ffmpeg dies and restarts every few minutes
+    /// (upstream EOF at an ad splice), leaving a 3–6s gap with no new
+    /// segments; meanwhile a television buffers seconds ahead. With only 24s
+    /// live, a device that stalls through the gap finds the segments it was
+    /// mid-playback of already deleted, so it snaps to the live edge — the
+    /// "long pause, then jumps minutes ahead, rejoins mid-advert" a viewer
+    /// sees. A 60s window gives the device runway to ride the gap out and
+    /// keep playing across it. Cost is ~35s more latency behind live and a
+    /// few more segments on disk per channel — both cheap for a channel
+    /// nobody is steering.
+    /// </summary>
+    [JsonPropertyName("liveWindowSegments")] public int LiveWindowSegments { get; set; } = 15;
 
     /// <summary>
     /// "transcode" (default, works for MPEG-2 tuners etc.) or "copy"
