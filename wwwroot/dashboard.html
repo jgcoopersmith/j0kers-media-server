@@ -800,11 +800,21 @@
       <button id="tc-add" onclick="tcAddFolder()" class="edit-only" title="Browse to any drive or folder">➕ Add folder</button>
       <button id="tc-up" onclick="tcUp()" title="Up one folder">↑ Up</button>
       <button id="tc-refresh" onclick="tcRefresh()" title="Re-scan this folder and refresh the conversion list">🔄 Refresh</button>
+      <button id="tc-del" class="edit-only danger" onclick="tcDeleteChecked()" disabled
+              title="Move the ticked files and folders to the Recycle Bin">🗑 Delete checked</button>
       <button id="tc-go" class="primary" onclick="tcTranscode()" disabled
               title="Convert the ticked files and folders">Transcode selected</button>
     </h2>
     <div id="tc-space" style="font-size:11.5px;color:var(--muted);margin:0 0 6px;border-bottom:1px solid var(--grid);padding-bottom:6px;min-height:15px"></div>
     <div id="tc-path" style="font-size:12px;color:var(--muted);margin:2px 0 6px;word-break:break-all">Drives</div>
+    <div style="position:relative;margin-bottom:6px">
+      <input id="tc-search" class="am-in" style="width:100%;padding-right:28px"
+             placeholder="🔍 Search this folder and everything under it — Enter to search"
+             oninput="tcSearchTyped()"
+             onkeydown="if(event.key==='Escape')tcClearSearch();else if(event.key==='Enter')tcSearchNow()">
+      <button id="tc-search-clear" onclick="tcClearSearch()" title="Clear search (Esc)"
+              style="display:none;position:absolute;right:4px;top:50%;transform:translateY(-50%);border:none;background:none;color:var(--muted);cursor:pointer;font-size:14px">✕</button>
+    </div>
     <div id="tc-opts" class="edit-only" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-bottom:6px">
       <label>Convert
         <select id="tc-parallel" class="am-in" style="width:auto" onchange="tcSaveConfig()"
@@ -1803,7 +1813,7 @@ async function tick() {
     // keep the listing live while conversions run, without a full reload
     // wiping a selection the user is building: only re-scan when something
     // is converting and nothing is ticked
-    if (tcState.booted && tcState.converting && tcState.selected.size === 0 && tcState.path)
+    if (tcState.booted && tcState.converting && tcState.selected.size === 0 && tcState.path && !tcState.search)
       tcReload(tcState.path);
   }
   refreshHistory();
@@ -1944,7 +1954,7 @@ function renderSessions(list) {
    Browse the disk, tick files or whole folders, and convert them. Each file
    shows whether a TV needs it converted and whether a conversion exists, is
    running, or has never been made. */
-const tcState = { path: "", parent: null, booted: false, selected: new Set(), converting: false };
+const tcState = { path: "", parent: null, booted: false, selected: new Set(), converting: false, search: "" };
 const TC_FOLDER_KEY = "j0kers-tc-folder";   // last folder browsed, remembered per browser
 
 async function tcBoot() {
@@ -2002,6 +2012,58 @@ async function tcAddFolder() {
   if (p) tcReload(p);
 }
 
+/* Search — recursively finds video files under the current folder by name,
+   like the media library search. Debounced while typing, or Enter to run now. */
+let tcSearchTimer = null;
+function tcSearchTyped() {
+  const q = $("tc-search").value.trim();
+  $("tc-search-clear").style.display = q ? "" : "none";
+  clearTimeout(tcSearchTimer);
+  if (!q) { tcClearSearch(); return; }
+  tcSearchTimer = setTimeout(tcSearchNow, 350);
+}
+function tcSearchNow() {
+  clearTimeout(tcSearchTimer);
+  if (!tcState.path) { $("tc-msg").textContent = "Open a folder first, then search inside it."; return; }
+  tcState.search = $("tc-search").value.trim();
+  $("tc-search-clear").style.display = tcState.search ? "" : "none";
+  tcReload(tcState.path);   // same path → keeps the search set above
+}
+function tcClearSearch() {
+  clearTimeout(tcSearchTimer);
+  $("tc-search").value = "";
+  $("tc-search-clear").style.display = "none";
+  const had = tcState.search;
+  tcState.search = "";
+  if (had && tcState.path) tcReload(tcState.path);
+}
+
+/* Delete the ticked files/folders — moved to the Recycle Bin (undoable), after
+   a confirmation. */
+async function tcDeleteChecked() {
+  const paths = [...tcState.selected];
+  if (!paths.length) return;
+  if (!confirm("Move " + paths.length + " checked item" + (paths.length === 1 ? "" : "s")
+      + " to the Recycle Bin?\n\nThey can be restored from the Recycle Bin if this was a mistake.")) return;
+  const msg = $("tc-msg");
+  $("tc-del").disabled = true;
+  msg.textContent = "deleting…";
+  let result = "";
+  try {
+    const r = await fetch("/api/transcode/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers() },
+      body: JSON.stringify({ paths }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || r.status);
+    result = d.deleted + " item" + (d.deleted === 1 ? "" : "s") + " moved to the Recycle Bin"
+      + (d.errors && d.errors.length ? " · " + d.errors.length + " couldn't be deleted (" + d.errors[0] + ")" : "");
+  } catch (e) { result = "delete failed: " + e.message; }
+  await tcReload(tcState.path);   // refresh the listing (files are gone now)
+  msg.textContent = result;
+}
+
 /* Empty start — no drive list. You add a drive or folder with the ➕ button,
    exactly like the media library. */
 function tcShowEmpty() {
@@ -2020,13 +2082,21 @@ function tcShowEmpty() {
 
 async function tcReload(path) {
   if (!path) { tcShowEmpty(); return; }   // boot, and Up past a drive root
+  // Moving to a different folder ends any search; refreshing the same folder
+  // keeps it (that's how the search stays put while you tick and convert).
+  if (path !== tcState.path) {
+    tcState.search = "";
+    const si = $("tc-search"); if (si) si.value = "";
+    const sc = $("tc-search-clear"); if (sc) sc.style.display = "none";
+  }
   const list = $("tc-list"), msg = $("tc-msg");
   msg.textContent = "";
   tcState.selected.clear();
   tcSyncGo();
   let data;
   try {
-    const url = "/api/transcode/scan" + (path ? "?path=" + encodeURIComponent(path) : "");
+    const url = "/api/transcode/scan?path=" + encodeURIComponent(path)
+      + (tcState.search ? "&q=" + encodeURIComponent(tcState.search) : "");
     const r = await fetch(url, { headers: headers() });
     data = await r.json();
     if (!r.ok) throw new Error(data.error || r.status);
@@ -2035,7 +2105,8 @@ async function tcReload(path) {
   tcState.path = data.path || "";
   tcState.parent = data.parent ?? (data.path ? "" : null);
   try { if (tcState.path) localStorage.setItem(TC_FOLDER_KEY, tcState.path); } catch { /* private mode */ }
-  $("tc-path").textContent = data.path || "Drives";
+  $("tc-path").textContent = (data.search ? "🔍 “" + data.search + "” in " : "") + (data.path || "Drives")
+    + (data.search ? "  ·  " + (data.entries || []).length + " match" + ((data.entries || []).length === 1 ? "" : "es") + (data.capped ? " (first 500)" : "") : "");
   $("tc-up").disabled = !data.path;
   tcRender(data.entries || []);
   tcUpdateSpace(data);
@@ -2069,8 +2140,9 @@ function tcRender(entries) {
     const row = document.createElement("div");
     row.className = "tc-row" + (openable ? " folder" : "");
     // a drive's path is its own name (e.g. "C:\"); folders join onto the
-    // current directory. Same rule the media picker uses, so drives open too.
-    const full = isDrive ? e.name : joinPath(tcState.path, e.name);
+    // current directory. Search results carry their own full path (they can be
+    // anywhere under the folder), so use that when present.
+    const full = e.path || (isDrive ? e.name : joinPath(tcState.path, e.name));
 
     // Drives are navigate-only — open one and tick the files inside, the way
     // the picker works — so a whole drive can't be queued by one checkbox.
@@ -2292,6 +2364,11 @@ function tcSyncGo() {
   const go = $("tc-go");
   go.disabled = tcState.selected.size === 0;
   go.textContent = tcState.selected.size ? "Transcode selected (" + tcState.selected.size + ")" : "Transcode selected";
+  const del = $("tc-del");
+  if (del) {
+    del.disabled = tcState.selected.size === 0;
+    del.textContent = tcState.selected.size ? "🗑 Delete checked (" + tcState.selected.size + ")" : "🗑 Delete checked";
+  }
 }
 
 function tcUp() { if (tcState.parent !== null) tcReload(tcState.parent); }

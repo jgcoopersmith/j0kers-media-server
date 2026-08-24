@@ -537,6 +537,7 @@ public sealed partial class ControlApi : IDisposable
             case "/api/transcode/scan":
             case "/api/transcode/config":
             case "/api/transcode/remove":
+            case "/api/transcode/delete":
                 return AccessLevel.ServerAdmin;
 
             // what an unauthenticated protocol is allowed to see is an
@@ -1058,6 +1059,11 @@ public sealed partial class ControlApi : IDisposable
             if (method == "POST" && path == "/api/transcode/remove")
             {
                 TranscodeRemove(ctx);
+                return;
+            }
+            if (method == "POST" && path == "/api/transcode/delete")
+            {
+                TranscodeDelete(ctx);
                 return;
             }
 
@@ -3323,11 +3329,42 @@ public sealed partial class ControlApi : IDisposable
         ".m2ts", ".webm", ".flv", ".3gp", ".vob", ".divx", ".rm", ".rmvb", ".ogm", ".asf",
     };
 
+    /// <summary>One video file's row for the Transcode panel: name, readable
+    /// title, size, whether a TV needs it converted, and its conversion state.
+    /// <paramref name="cacheOnly"/> reads codecs from the cache only (no probe),
+    /// used by the recursive search so it can't launch hundreds of probes.</summary>
+    private object TranscodeFileEntry(FileInfo f, bool cacheOnly)
+    {
+        var state = _ffmpeg?.VodStatusFor(f.FullName) ?? Media.FfmpegManager.VodState.None;
+        int? percent = null;
+        if (state == Media.FfmpegManager.VodState.Converting)
+        {
+            var stream = _ffmpeg?.VodStreamName(f.FullName);
+            percent = _ffmpeg?.VodProgressSnapshot
+                .FirstOrDefault(p => string.Equals(p.Stream, stream, StringComparison.OrdinalIgnoreCase))?.Percent;
+        }
+        var needs = cacheOnly
+            ? (_tvCodecs?.NeedsConversionCached(f.FullName) == true)
+            : (_tvCodecs?.NeedsConversion(f.FullName) ?? false);
+        return new
+        {
+            name = f.Name,
+            path = f.FullName,   // so search results (and delete) have the real path
+            title = Media.StreamTitle.PrettifyFile(f.Name),
+            type = "file",
+            detail = f.Length >= 1024 * 1024 ? $"{f.Length / (1024.0 * 1024):0.#} MB" : $"{Math.Max(1, f.Length / 1024)} KB",
+            needs,
+            state = state.ToString().ToLowerInvariant(),   // none | converting | done
+            percent,
+        };
+    }
+
     /// <summary>
     /// GET /api/transcode/scan?path=&lt;dir&gt; — a directory listing for the
     /// Transcode panel: sub-folders, plus each video file tagged with whether
     /// a TV needs it converted and whether a conversion exists, is running, or
     /// has never been made. No path lists the drives, same as the picker.
+    /// A <c>q</c> query does a recursive name search under the folder instead.
     /// </summary>
     private void TranscodeScan(HttpListenerContext ctx)
     {
@@ -3355,30 +3392,42 @@ public sealed partial class ControlApi : IDisposable
 
             var dir = new DirectoryInfo(full);
             var entries = new List<object>();
+            var q = ctx.Request.QueryString["q"];
+
+            // Search: recursively find video files under this folder whose name
+            // matches, like the library search. Codecs are read cache-only so a
+            // search never launches a probe; results are capped.
+            if (!string.IsNullOrWhiteSpace(q))
+            {
+                const int searchCap = 500; var searchCapped = false;
+                var sopts = new EnumerationOptions
+                {
+                    RecurseSubdirectories = true,
+                    IgnoreInaccessible = true,
+                    AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System,
+                };
+                try
+                {
+                    foreach (var fp in Directory.EnumerateFiles(full, "*", sopts))
+                    {
+                        if (!TranscodableExt.Contains(Path.GetExtension(fp))) continue;
+                        if (Path.GetFileName(fp).IndexOf(q, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                        if (entries.Count >= searchCap) { searchCapped = true; break; }
+                        entries.Add(TranscodeFileEntry(new FileInfo(fp), cacheOnly: true));
+                    }
+                }
+                catch { /* report whatever matched before the walk failed */ }
+                WriteJson(res, 200, new { path = full, parent = dir.Parent?.FullName, entries, search = q, capped = searchCapped });
+                return;
+            }
+
             foreach (var d in dir.EnumerateDirectories().OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase))
                 entries.Add(new { name = d.Name, type = "folder", summary = FolderMediaSummary(d.FullName) });
 
             foreach (var f in dir.EnumerateFiles().OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase))
             {
                 if (!TranscodableExt.Contains(f.Extension)) continue;
-                var state = _ffmpeg?.VodStatusFor(f.FullName) ?? Media.FfmpegManager.VodState.None;
-                int? percent = null;
-                if (state == Media.FfmpegManager.VodState.Converting)
-                {
-                    var stream = _ffmpeg?.VodStreamName(f.FullName);
-                    percent = _ffmpeg?.VodProgressSnapshot
-                        .FirstOrDefault(p => string.Equals(p.Stream, stream, StringComparison.OrdinalIgnoreCase))?.Percent;
-                }
-                entries.Add(new
-                {
-                    name = f.Name,
-                    title = Media.StreamTitle.PrettifyFile(f.Name),
-                    type = "file",
-                    detail = f.Length >= 1024 * 1024 ? $"{f.Length / (1024.0 * 1024):0.#} MB" : $"{Math.Max(1, f.Length / 1024)} KB",
-                    needs = _tvCodecs?.NeedsConversion(f.FullName) ?? false,
-                    state = state.ToString().ToLowerInvariant(),   // none | converting | done
-                    percent,
-                });
+                entries.Add(TranscodeFileEntry(f, cacheOnly: false));
             }
 
             long? freeBytes = null, totalBytes = null; string? driveName = null;
@@ -3497,6 +3546,37 @@ public sealed partial class ControlApi : IDisposable
     {
         [System.Text.Json.Serialization.JsonPropertyName("maxParallel")] public int? MaxParallel { get; set; }
         [System.Text.Json.Serialization.JsonPropertyName("staggerSeconds")] public int? StaggerSeconds { get; set; }
+    }
+
+    /// <summary>
+    /// POST /api/transcode/delete { paths:[...] } — moves the chosen files and
+    /// folders to the Windows Recycle Bin (an undoable delete). The dashboard
+    /// confirms first. The server's own config/state directory is refused, so a
+    /// stray tick can't recycle the library index or the accounts.
+    /// </summary>
+    private void TranscodeDelete(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        TranscodeRequest? req;
+        try { req = JsonSerializer.Deserialize<TranscodeRequest>(ReadBody(ctx), BodyJson); }
+        catch (Exception ex) { WriteJson(res, 400, new { error = "bad JSON: " + ex.Message }); return; }
+        if (req?.Paths is null || req.Paths.Count == 0) { WriteJson(res, 400, new { error = "no paths given" }); return; }
+
+        var configDir = Path.GetFullPath(_baseDirectory);
+        int deleted = 0; var errors = new List<string>();
+        foreach (var p in req.Paths)
+        {
+            if (string.IsNullOrWhiteSpace(p) || !TryLocalPath(p, out var full)) { errors.Add($"{p}: not a local path"); continue; }
+            var fp = Path.GetFullPath(full);
+            // never let the app recycle its own config/state (users, library, keys)
+            if (fp.Equals(configDir, StringComparison.OrdinalIgnoreCase)
+                || fp.StartsWith(configDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            { errors.Add($"{Path.GetFileName(fp)}: refused (inside the server's own folder)"); continue; }
+            try { Services.RecycleBin.Send(fp); deleted++; }
+            catch (Exception ex) { errors.Add($"{Path.GetFileName(fp)}: {ex.Message}"); }
+        }
+        Log.Info("control", $"delete to recycle bin: {deleted} item(s), {errors.Count} error(s)");
+        WriteJson(res, 200, new { deleted, errors });
     }
 
     private sealed class TranscodeRemoveRequest
