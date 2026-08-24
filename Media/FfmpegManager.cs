@@ -929,6 +929,25 @@ public sealed class FfmpegManager : IDisposable
         }
     }
 
+    /// <summary>How far one conversion has got, or null if it isn't running.</summary>
+    public VodProgress? VodProgressFor(string stream)
+    {
+        lock (_progressLock)
+            return _vodProgress.TryGetValue(stream, out var p) ? p : null;
+    }
+
+    /// <summary>Whether a conversion has written its closing #EXT-X-ENDLIST.</summary>
+    public bool VodComplete(string stream)
+    {
+        try
+        {
+            var playlist = Path.Combine(_mediaRoot, stream, "index.m3u8");
+            return File.Exists(playlist)
+                && File.ReadAllText(playlist).Contains("#EXT-X-ENDLIST", StringComparison.Ordinal);
+        }
+        catch { return false; }
+    }
+
     /// <summary>
     /// Whether a conversion of this stream is running now. The difference
     /// between a directory worth keeping and a part-finished one: unlinking
