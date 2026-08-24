@@ -1649,6 +1649,24 @@ public sealed class FfmpegManager : IDisposable
                 // sense for something like a camera being driven live, which
                 // is not what this path serves.
                 args.AddRange(new[] { "-pix_fmt", "yuv420p" });
+
+                // Normalise a live channel to a standard 1080p frame.
+                //
+                // Some sources send an off-size raster — Pluto's server-side
+                // stitcher hands back 1216x684, not any broadcast resolution —
+                // and a television that scales a clean 1920x1080 to its panel
+                // will show an odd size at 1:1 or overscanned instead, "too
+                // big for the screen". Fitting the picture into 1920x1080 and
+                // padding to it gives every set a resolution it recognises.
+                //
+                // force_original_aspect_ratio=decrease never enlarges past the
+                // frame, so a 16:9 source lands exactly on 1920x1080 and a
+                // 1080p source (a 1920x1080 channel) passes straight through
+                // unchanged — nothing is downscaled, so no channel loses
+                // picture. A smaller source is scaled up, which costs bits but
+                // no detail, and hands the set the standard frame it wants.
+                args.AddRange(new[] { "-vf",
+                    "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:-1:-1,setsar=1" });
             }
             args.AddRange(AudioEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase)
                 ? new[] { "-c:a", "copy" }
