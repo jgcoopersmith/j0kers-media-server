@@ -118,7 +118,18 @@ public sealed class PlutoTvProvider : IChannelProvider, IDisposable
                 ["deviceType"] = "web",
                 ["clientID"] = clientId,
                 ["clientModelNumber"] = "1.0.0",
-                ["serverSideAds"] = "false",
+                // Server-side ad stitching, on purpose. With this false, Pluto
+                // hands back client-side ads: the programme spliced with a pod
+                // of short, separate ad creatives, each a different encode
+                // (its own resolution and SPS/PPS) fenced by
+                // EXT-X-DISCONTINUITY — 110 of them in a two-minute trace. A
+                // restream reading that sees the picture change every few
+                // seconds, and the transcoder, made to re-open its encoder at
+                // every format change, freezes its frame counter and wedges.
+                // True asks Pluto to bake the ads into one continuous,
+                // uniformly-encoded stream — what a television tuner would get
+                // — which is the only form of this that plays smoothly.
+                ["serverSideAds"] = "true",
             };
             var url = BootUrl + "?" + string.Join("&", q.Select(kv =>
                 $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
