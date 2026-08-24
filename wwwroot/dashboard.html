@@ -800,6 +800,8 @@
       <button id="tc-add" onclick="tcAddFolder()" class="edit-only" title="Browse to any drive or folder">➕ Add folder</button>
       <button id="tc-up" onclick="tcUp()" title="Up one folder">↑ Up</button>
       <button id="tc-refresh" onclick="tcRefresh()" title="Re-scan this folder and refresh the conversion list">🔄 Refresh</button>
+      <button id="tc-all" class="edit-only" onclick="tcSelectAll()"
+              title="Tick or clear everything currently listed">☑ Select all</button>
       <button id="tc-del" class="edit-only danger" onclick="tcDeleteChecked()" disabled
               title="Move the ticked files and folders to the Recycle Bin">🗑 Delete checked</button>
       <button id="tc-go" class="primary" onclick="tcTranscode()" disabled
@@ -2133,7 +2135,9 @@ function tcUpdateSpace(data) {
 function tcRender(entries) {
   const list = $("tc-list");
   tcState.converting = false;
-  if (!entries.length) { list.innerHTML = '<div class="tc-row" style="color:var(--muted)">nothing here</div>'; return; }
+  tcState.lastEntries = entries;      // kept so Select all can re-render checkboxes
+  tcState.selectable = [];            // full paths of the rows that have a checkbox
+  if (!entries.length) { list.innerHTML = '<div class="tc-row" style="color:var(--muted)">nothing here</div>'; tcSyncGo(); return; }
   list.innerHTML = "";
   for (const e of entries) {
     const isDrive = e.type === "drive";
@@ -2145,6 +2149,7 @@ function tcRender(entries) {
     // current directory. Search results carry their own full path (they can be
     // anywhere under the folder), so use that when present.
     const full = e.path || (isDrive ? e.name : joinPath(tcState.path, e.name));
+    if (!isDrive) tcState.selectable.push(full);
 
     // Drives are navigate-only — open one and tick the files inside, the way
     // the picker works — so a whole drive can't be queued by one checkbox.
@@ -2205,6 +2210,19 @@ function tcRender(entries) {
     }
     list.appendChild(row);
   }
+  tcSyncGo();
+}
+
+/* Select all / clear — ticks or unticks every checkbox currently listed
+   (files and folders; drives are navigate-only). Toggles based on whether all
+   are already selected. */
+function tcSelectAll() {
+  const all = tcState.selectable || [];
+  if (!all.length) return;
+  const allSelected = all.every(p => tcState.selected.has(p));
+  if (allSelected) all.forEach(p => tcState.selected.delete(p));
+  else all.forEach(p => tcState.selected.add(p));
+  if (tcState.lastEntries) tcRender(tcState.lastEntries);   // re-render to reflect the checkboxes
 }
 
 /* Pills beside a folder — the same idea as the media conversion tool: how
@@ -2372,6 +2390,13 @@ function tcSyncGo() {
   if (del) {
     del.disabled = tcState.selected.size === 0;
     del.textContent = tcState.selected.size ? "🗑 Delete checked (" + tcState.selected.size + ")" : "🗑 Delete checked";
+  }
+  const all = $("tc-all");
+  if (all) {
+    const list = tcState.selectable || [];
+    all.disabled = list.length === 0;
+    const allSelected = list.length > 0 && list.every(p => tcState.selected.has(p));
+    all.textContent = allSelected ? "☐ Clear all" : "☑ Select all";
   }
 }
 
