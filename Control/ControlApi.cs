@@ -3502,14 +3502,15 @@ public sealed partial class ControlApi : IDisposable
     private sealed class TranscodeRemoveRequest
     {
         [System.Text.Json.Serialization.JsonPropertyName("path")] public string? Path { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("stream")] public string? Stream { get; set; }
         [System.Text.Json.Serialization.JsonPropertyName("clear")] public bool Clear { get; set; }
     }
 
     /// <summary>
-    /// POST /api/transcode/remove { path } — drops one waiting file from the
-    /// conversion queue; { clear:true } empties the whole waiting queue. A
-    /// conversion that has already started is not in the queue and is left
-    /// running.
+    /// POST /api/transcode/remove — manage the conversion list:
+    ///   { path }        drop one waiting file from the queue
+    ///   { stream }      cancel one running conversion (its partial is removed)
+    ///   { clear:true }  empty the whole waiting queue (running ones keep going)
     /// </summary>
     private void TranscodeRemove(HttpListenerContext ctx)
     {
@@ -3527,7 +3528,13 @@ public sealed partial class ControlApi : IDisposable
             WriteJson(res, 200, new { cleared });
             return;
         }
-        if (string.IsNullOrWhiteSpace(req?.Path)) { WriteJson(res, 400, new { error = "no path given" }); return; }
+        if (!string.IsNullOrWhiteSpace(req?.Stream))
+        {
+            var cancelled = _ffmpeg.CancelVod(req.Stream);
+            WriteJson(res, 200, new { cancelled });
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(req?.Path)) { WriteJson(res, 400, new { error = "no path or stream given" }); return; }
         var removed = _ffmpeg.RemoveFromVodQueue(req.Path);
         WriteJson(res, 200, new { removed });
     }

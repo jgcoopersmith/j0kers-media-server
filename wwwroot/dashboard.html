@@ -811,7 +811,9 @@
                 title="How many conversions run at the same time">
           <option value="1">1</option><option value="2">2</option><option value="3">3</option>
           <option value="4">4</option><option value="5">5</option><option value="6">6</option>
-          <option value="7">7</option><option value="8">8</option>
+          <option value="7">7</option><option value="8">8</option><option value="9">9</option>
+          <option value="10">10</option><option value="11">11</option><option value="12">12</option>
+          <option value="13">13</option><option value="14">14</option><option value="15">15</option>
         </select> at a time</label>
       <label>Wait
         <select id="tc-stagger" class="am-in" style="width:auto" onchange="tcSaveConfig()"
@@ -2212,7 +2214,7 @@ function renderConversions(running, queued) {
   list.innerHTML = "";
 
   // one flat list of items, tagged by kind, then ordered by the chosen view
-  const items = running.map(r => ({ kind: "running", title: r.title || r.stream, percent: r.percent }))
+  const items = running.map(r => ({ kind: "running", title: r.title || r.stream, percent: r.percent, stream: r.stream }))
     .concat(queued.map(q => ({ kind: "queued", title: q.title || q.path, path: q.path })));
   if (tcConvOrder === "az")
     items.sort((a, b) => (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" }));
@@ -2232,11 +2234,11 @@ function renderConversions(running, queued) {
       badge.className = "tc-badge b-conv";
       badge.textContent = "converting " + (it.percent != null ? it.percent + "%" : "…");
       r.appendChild(badge);
-      const dash = document.createElement("span");
-      dash.style.cssText = "flex:none;width:24px;text-align:center;color:var(--muted)";
-      dash.textContent = "—";
-      dash.title = "A running conversion can't be removed here — it finishes, or stop it from HLS streams";
-      r.appendChild(dash);
+      const cancel = document.createElement("button");
+      cancel.className = "danger"; cancel.style.flex = "none"; cancel.textContent = "✕";
+      cancel.title = "Cancel this conversion (the partial copy is discarded)";
+      cancel.onclick = () => tcCancelRunning(it.stream, it.title);
+      r.appendChild(cancel);
     } else {
       const badge = document.createElement("span");
       badge.className = "tc-badge b-ok"; badge.textContent = "waiting";
@@ -2260,6 +2262,18 @@ async function tcRemoveQueued(path) {
     });
   } catch { /* the next poll will re-render either way */ }
   tick();   // pull a fresh status so the list updates at once
+}
+
+async function tcCancelRunning(stream, title) {
+  if (!confirm("Cancel converting “" + (title || stream) + "”? The half-finished copy is discarded.")) return;
+  try {
+    await fetch("/api/transcode/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers() },
+      body: JSON.stringify({ stream }),
+    });
+  } catch { /* the next poll will re-render either way */ }
+  tick();
 }
 
 async function tcClearQueue() {

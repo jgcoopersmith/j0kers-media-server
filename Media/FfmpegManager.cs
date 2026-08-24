@@ -907,7 +907,7 @@ public sealed class FfmpegManager : IDisposable
 
     private readonly System.Collections.Concurrent.ConcurrentQueue<string> _vodQueue = new();
 
-    /// <summary>How many conversions run at once from a batch; the rest wait. 1–8.</summary>
+    /// <summary>How many conversions run at once from a batch; the rest wait. 1–15.</summary>
     public int MaxConcurrentVod { get; set; } = 2;
 
     /// <summary>
@@ -937,7 +937,7 @@ public sealed class FfmpegManager : IDisposable
             if (!File.Exists(_queueSettingsFile)) return;
             var s = System.Text.Json.JsonSerializer.Deserialize<QueueSettings>(File.ReadAllText(_queueSettingsFile));
             if (s is null) return;
-            MaxConcurrentVod = Math.Clamp(s.MaxParallel, 1, 8);
+            MaxConcurrentVod = Math.Clamp(s.MaxParallel, 1, 15);
             VodStaggerSeconds = Math.Clamp(s.StaggerSeconds, 0, 120);
         }
         catch { /* a bad sidecar is a default, not a failure */ }
@@ -954,13 +954,13 @@ public sealed class FfmpegManager : IDisposable
     }
 
     /// <summary>
-    /// Sets how many conversions run at once (1–8) and the gap between starting
+    /// Sets how many conversions run at once (1–15) and the gap between starting
     /// them (0–120 s), persists the choice, and pumps the queue so a raised cap
     /// takes effect immediately. Nulls leave a value unchanged.
     /// </summary>
     public void SetQueueSettings(int? maxParallel, int? staggerSeconds)
     {
-        if (maxParallel is int mp) MaxConcurrentVod = Math.Clamp(mp, 1, 8);
+        if (maxParallel is int mp) MaxConcurrentVod = Math.Clamp(mp, 1, 15);
         if (staggerSeconds is int st) VodStaggerSeconds = Math.Clamp(st, 0, 120);
         SaveQueueSettings();
         PumpVodQueue();
@@ -1176,14 +1176,22 @@ public sealed class FfmpegManager : IDisposable
     /// <summary>Kills a running conversion (e.g. before deleting its stream). True if one was running.</summary>
     public bool CancelVod(string stream)
     {
+        Process? p;
         lock (_lock)
         {
             StopSeekJobs(stream);
-            if (!_vodJobs.Remove(stream, out var p)) return false;
-            KillAndRelease(p);
-            Log.Info("ffmpeg", $"vod job cancelled: {stream}");
-            return true;
+            if (!_vodJobs.Remove(stream, out p)) return false;
         }
+        // Outside the lock: KillAndRelease waits up to 2s, and PumpVodQueue takes
+        // a different lock — holding _lock across either risks a stall/inversion.
+        KillAndRelease(p);
+        lock (_progressLock) _vodProgress.Remove(stream);
+        // A cancelled conversion never reached EXT-X-ENDLIST, so its directory is
+        // a partial — remove it, the same as a queued one leaves nothing behind.
+        CleanupIfIncomplete(stream, Path.Combine(_mediaRoot, stream));
+        Log.Info("ffmpeg", $"vod job cancelled: {stream}");
+        PumpVodQueue();   // a slot just freed — start the next waiting one
+        return true;
     }
 
     /// <summary>Filename → URL-safe lowercase slug (letters/digits/dashes, ≤48 chars).</summary>
