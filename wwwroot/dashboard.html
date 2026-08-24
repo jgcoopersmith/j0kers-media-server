@@ -1946,26 +1946,48 @@ function tcRender(entries) {
   if (!entries.length) { list.innerHTML = '<div class="tc-row" style="color:var(--muted)">nothing here</div>'; return; }
   list.innerHTML = "";
   for (const e of entries) {
+    const isDrive = e.type === "drive";
+    const isFolder = e.type === "folder";
+    const openable = (isDrive || isFolder) && e.ready !== false;
     const row = document.createElement("div");
-    row.className = "tc-row" + (e.type === "folder" ? " folder" : "");
-    const full = joinPath(tcState.path, e.name);
+    row.className = "tc-row" + (openable ? " folder" : "");
+    // a drive's path is its own name (e.g. "C:\"); folders join onto the
+    // current directory. Same rule the media picker uses, so drives open too.
+    const full = isDrive ? e.name : joinPath(tcState.path, e.name);
 
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.checked = tcState.selected.has(full);
-    cb.onchange = () => { cb.checked ? tcState.selected.add(full) : tcState.selected.delete(full); tcSyncGo(); };
-    row.appendChild(cb);
+    // Drives are navigate-only — open one and tick the files inside, the way
+    // the picker works — so a whole drive can't be queued by one checkbox.
+    if (!isDrive) {
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = tcState.selected.has(full);
+      cb.onchange = () => { cb.checked ? tcState.selected.add(full) : tcState.selected.delete(full); tcSyncGo(); };
+      row.appendChild(cb);
+    } else {
+      const spacer = document.createElement("span");
+      spacer.style.cssText = "flex:none;width:15px";   // keep names aligned with checkboxed rows
+      row.appendChild(spacer);
+    }
 
     const icon = document.createElement("span");
-    icon.textContent = e.type === "folder" ? "📁" : "🎞";
+    icon.textContent = isDrive ? "💾" : isFolder ? "📁" : "🎞";
     icon.style.flex = "none";
     row.appendChild(icon);
 
     const nm = document.createElement("span");
     nm.className = "tc-name";
-    nm.textContent = e.type === "folder" ? e.name : (e.title || e.name);
-    if (e.type === "folder") { nm.title = "Open"; nm.onclick = () => tcReload(full); }
+    nm.textContent = isDrive ? (e.name + (e.label ? " (" + e.label + ")" : ""))
+                   : isFolder ? e.name
+                   : (e.title || e.name);
+    if (openable) { nm.title = "Open"; nm.onclick = () => tcReload(full); }
     row.appendChild(nm);
+
+    if (isDrive) {
+      const det = document.createElement("span");
+      det.className = "tc-det";
+      det.textContent = e.ready === false ? "not ready" : (e.detail || "");
+      row.appendChild(det);
+    }
 
     if (e.type === "file") {
       const det = document.createElement("span");
