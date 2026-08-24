@@ -821,6 +821,16 @@
           <option value="120">2 min</option>
         </select> between starts</label>
     </div>
+
+    <div id="tc-conv-wrap" style="margin:0 0 10px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+        <span style="flex:1;font-weight:600;font-size:12.5px">Conversions <span id="tc-conv-count" style="color:var(--muted);font-weight:400"></span></span>
+        <button id="tc-conv-clear" class="edit-only" onclick="tcClearQueue()" title="Remove everything still waiting (running ones keep going)">🧹 Clear queue</button>
+      </div>
+      <div id="tc-conv-list" style="max-height:200px;overflow-y:auto;border:1px solid var(--grid);border-radius:10px;
+                                    background:var(--surface-2);padding:4px"></div>
+    </div>
+
     <div id="tc-msg" style="font-size:12px;min-height:16px;margin-bottom:4px"></div>
     <div id="tc-list" style="max-height:300px;overflow-y:auto;border:1px solid var(--grid);border-radius:10px;
                              background:var(--surface-2);padding:4px"></div>
@@ -829,15 +839,6 @@
       <span><span class="tc-dot tc-done"></span> converted</span>
       <span><span class="tc-dot tc-conv"></span> converting</span>
       <span><span class="tc-dot tc-ok"></span> plays as-is</span>
-    </div>
-
-    <div id="tc-conv-wrap" style="margin-top:10px;display:none">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-        <span style="flex:1;font-weight:600;font-size:12.5px">Conversions <span id="tc-conv-count" style="color:var(--muted);font-weight:400"></span></span>
-        <button id="tc-conv-clear" onclick="tcClearQueue()" title="Remove everything still waiting (running ones keep going)">🧹 Clear queue</button>
-      </div>
-      <div id="tc-conv-list" style="max-height:220px;overflow-y:auto;border:1px solid var(--grid);border-radius:10px;
-                                    background:var(--surface-2);padding:4px"></div>
     </div>
   </div>
 
@@ -2160,12 +2161,19 @@ function tcFolderPills(s) {
    (with progress, no remove — it's already going) and what's still waiting
    (each with a ✕ to drop it before it starts). */
 function renderConversions(running, queued) {
-  const wrap = $("tc-conv-wrap"), list = $("tc-conv-list"), count = $("tc-conv-count");
+  const wrap = $("tc-conv-wrap"), list = $("tc-conv-list"), count = $("tc-conv-count"), clear = $("tc-conv-clear");
   if (!wrap) return;
   running = running || []; queued = queued || [];
-  if (!running.length && !queued.length) { wrap.style.display = "none"; list.innerHTML = ""; count.textContent = ""; return; }
-  wrap.style.display = "";
+  // Always visible, so it's findable and obviously shows nothing rather than
+  // disappearing. Empty state when idle.
+  if (!running.length && !queued.length) {
+    count.textContent = "";
+    if (clear) clear.style.display = "none";
+    list.innerHTML = '<div class="tc-row" style="color:var(--muted);cursor:default">Nothing converting right now.</div>';
+    return;
+  }
   count.textContent = "· " + running.length + " running, " + queued.length + " waiting";
+  if (clear) clear.style.display = queued.length ? "" : "none";
   list.innerHTML = "";
 
   const row = (title) => {
