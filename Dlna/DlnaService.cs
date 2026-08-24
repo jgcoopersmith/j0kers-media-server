@@ -58,6 +58,24 @@ public sealed class DlnaService
     public Func<string, Transcode?>? FindTranscode { get; set; }
 
     /// <summary>
+    /// The running live channels to show under "Live TV", or null/empty for
+    /// none. Set by ControlApi when dlnaLiveTv is on; each entry is a channel's
+    /// display name and its "ch-…" stream id. Left null, no Live TV folder
+    /// appears and the tree is exactly the library, as before.
+    /// </summary>
+    public Func<IReadOnlyList<(string Name, string Stream)>>? LiveChannels { get; set; }
+
+    /// <summary>The object id of the synthetic "Live TV" container.</summary>
+    private const string LiveRootId = "livetv";
+    private const string LiveItemPrefix = "livech-";
+
+    private IReadOnlyList<(string Name, string Stream)> Channels()
+    {
+        try { return LiveChannels?.Invoke() ?? Array.Empty<(string, string)>(); }
+        catch { return Array.Empty<(string, string)>(); }
+    }
+
+    /// <summary>
     /// The folders DLNA may show — the library, narrowed by what has been
     /// shared. Everything here goes through this rather than the library
     /// directly, so a folder that isn't shared is not merely hidden from the
@@ -193,19 +211,57 @@ public sealed class DlnaService
         var metadata = flag == "BrowseMetadata";
         var sb = new StringBuilder();
 
-        // the root lists the library folders, one container each
+        // the root lists the library folders, one container each — and, when
+        // live channels are being shared, a "Live TV" container ahead of them
+        var channels = Channels();
+        var hasLive = channels.Count > 0;
+
         if (objectId is "0" or "" )
         {
             if (metadata)
             {
-                sb.Append(Container("0", "-1", Escape(_serverName()), Roots().Count));
+                sb.Append(Container("0", "-1", Escape(_serverName()), Roots().Count + (hasLive ? 1 : 0)));
                 return new BrowseResult(Didl(sb.ToString()), 1, 1);
             }
             var roots = Roots().Where(Directory.Exists).ToList();
-            var page = Page(roots, start, count);
-            foreach (var folder in page)
-                sb.Append(Container(Encode(folder), "0", Escape(NameOf(folder)), CountChildren(folder)));
-            return new BrowseResult(Didl(sb.ToString()), page.Count, roots.Count);
+            // Live TV sorts first so it is the top row on the television, where
+            // a channel-flipper expects it — not buried under the film folders.
+            var entries = new List<string?>();
+            if (hasLive) entries.Add(null);              // null marks the Live TV container
+            entries.AddRange(roots);
+            var page = Page(entries, start, count);
+            foreach (var entry in page)
+                sb.Append(entry is null
+                    ? Container(LiveRootId, "0", "Live TV", channels.Count)
+                    : Container(Encode(entry), "0", Escape(NameOf(entry)), CountChildren(entry)));
+            return new BrowseResult(Didl(sb.ToString()), page.Count, entries.Count);
+        }
+
+        // inside "Live TV": one item per running channel, played live
+        if (objectId == LiveRootId)
+        {
+            if (metadata)
+            {
+                sb.Append(Container(LiveRootId, "0", "Live TV", channels.Count));
+                return new BrowseResult(Didl(sb.ToString()), 1, 1);
+            }
+            var page = Page(channels.ToList(), start, count);
+            foreach (var (name, stream) in page)
+                sb.Append(LiveItem(name, stream, baseUrl));
+            return new BrowseResult(Didl(sb.ToString()), page.Count, channels.Count);
+        }
+
+        // a single channel's metadata, asked for by its item id
+        if (objectId.StartsWith(LiveItemPrefix, StringComparison.Ordinal))
+        {
+            var stream = objectId[LiveItemPrefix.Length..];
+            var ch = channels.FirstOrDefault(c => c.Stream == stream);
+            if (ch.Stream is not null)
+            {
+                sb.Append(LiveItem(ch.Name, ch.Stream, baseUrl));
+                return new BrowseResult(Didl(sb.ToString()), 1, 1);
+            }
+            return new BrowseResult(Didl(""), 0, 0);
         }
 
         var path = ResolvePath(objectId);
@@ -301,6 +357,21 @@ public sealed class DlnaService
         // TV scrub through a film instead of only playing it from the start
         var protocolInfo = $"http-get:*:{mime}:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
         return $"""<item id="{Encode(path)}" parentID="{parentId}" restricted="1"><dc:title>{Escape(Media.StreamTitle.PrettifyFile(Path.GetFileName(path)))}</dc:title><upnp:class>{ClassFor(path)}</upnp:class><res protocolInfo="{protocolInfo}" size="{size}">{Escape(url)}</res></item>""";
+    }
+
+    /// <summary>
+    /// A live channel as a DLNA video item. The size advertised is the same
+    /// large placeholder DlnaLive streams against — the television allocates
+    /// buffers and computes seek offsets from it, so the two must agree — and
+    /// OP=01 tells the set it may seek by byte range, which is what makes the
+    /// timeshift buffer usable instead of play-from-live-only.
+    /// </summary>
+    private string LiveItem(string name, string stream, string baseUrl)
+    {
+        var id = LiveItemPrefix + stream;
+        var url = $"{baseUrl}/dlna/live?ch={Uri.EscapeDataString(stream)}";
+        var protocolInfo = "http-get:*:video/mp2t:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
+        return $"""<item id="{Escape(id)}" parentID="{LiveRootId}" restricted="1"><dc:title>{Escape(name)}</dc:title><upnp:class>object.item.videoItem.videoBroadcast</upnp:class><res protocolInfo="{protocolInfo}" size="{DlnaLive.AdvertisedBytes}">{Escape(url)}</res></item>""";
     }
 
     private static string Didl(string body) =>

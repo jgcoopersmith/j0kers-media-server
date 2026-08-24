@@ -158,6 +158,13 @@
     // is still a re-encode, and a re-encode of a file the TV could have
     // played directly is a picture that got slightly worse for no reason.
     // Turn it on if a device refuses to play what is on disk.
-    "dlnaUseTranscode": false
+    "dlnaUseTranscode": false,
+
+    // Show running live channels to DLNA under a "Live TV" folder, each one
+    // playable as a continuous, seekable timeshift stream (a big fixed-size
+    // file whose bytes arrive at real time once you catch the live edge).
+    // Retains a channel's segments on disk while a TV watches (a few GB/hour,
+    // swept when nobody is). On for testing on this network's TVs.
+    "dlnaLiveTv": true
   }
 }

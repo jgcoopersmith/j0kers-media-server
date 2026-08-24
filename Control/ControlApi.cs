@@ -118,8 +118,27 @@ public sealed partial class ControlApi : IDisposable
             _library, _dlnaShare, () => _serverConfig.ServerName,
             Discovery?.Uuid ?? _serverConfig.Discovery.HostName);
         dlna.FindTranscode = FullResTranscodeFor;
+        dlna.LiveChannels = () =>
+        {
+            if (!_serverConfig.Discovery.DlnaLiveTv || _ffmpeg is null)
+                return Array.Empty<(string, string)>();
+            // Only channels actually restreaming: an idle or stopped one has no
+            // segments to serve, so listing it would offer a file that stalls.
+            return _ffmpeg.Channels
+                .Where(c => c.status == "running")
+                .Select(c => (c.def.Name, c.stream))
+                .ToList();
+        };
+        _dlnaLive ??= new Dlna.DlnaLive(MediaRootPath());
         return dlna;
     }
+
+    /// <summary>
+    /// The timeshift buffers behind DLNA "Live TV". Created with the DLNA
+    /// service and kept for the process lifetime — it sweeps its own idle
+    /// buffers, so there is nothing to tear down when DLNA toggles off.
+    /// </summary>
+    private Dlna.DlnaLive? _dlnaLive;
 
     /// <summary>
     /// A finished, full-resolution conversion of a library file, or null.
@@ -2766,6 +2785,46 @@ public sealed partial class ControlApi : IDisposable
                 res.StatusCode = 405;
                 res.Close();
                 return;
+
+            case "/dlna/live":
+            {
+                if (method is not ("GET" or "HEAD")) { res.StatusCode = 405; res.Close(); return; }
+                if (!_serverConfig.Discovery.DlnaLiveTv || _ffmpeg is null || _dlnaLive is null)
+                { res.StatusCode = 404; res.Close(); return; }
+
+                var stream = ctx.Request.QueryString["ch"] ?? "";
+                // Resolve against the live channel list, never the raw query:
+                // the channel must exist, be restreaming, and its "ch-…" name
+                // is the only thing allowed to form the directory path.
+                var ch = _ffmpeg.Channels.FirstOrDefault(c => c.stream == stream && c.status == "running");
+                if (ch.stream is null)
+                {
+                    Log.Debug("dlna", $"live: no such running channel: {stream}");
+                    res.StatusCode = 404;
+                    res.Close();
+                    return;
+                }
+
+                var channelDir = Path.Combine(MediaRootPath(), ch.stream);
+                if (method == "HEAD")
+                {
+                    _dlnaLive.Serve(ctx, ch.stream, channelDir);
+                    return;
+                }
+
+                var liveViewing = _services.Viewers.Note(
+                    ctx, ch.stream, user: null, bytes: 0, create: true, protocol: "dlna", file: ch.def.Name);
+                void LiveSent(long sent)
+                {
+                    _services.Served.Add(sent);
+                    if (!_services.Viewers.Progress(liveViewing, sent))
+                        liveViewing = _services.Viewers.Note(
+                            ctx, ch.stream, user: null, bytes: sent, create: true, protocol: "dlna", file: ch.def.Name);
+                }
+                Log.Info("dlna", $"serving live channel {ch.def.Name} as a timeshift stream");
+                _dlnaLive.Serve(ctx, ch.stream, channelDir, LiveSent);
+                return;
+            }
 
             case "/dlna/file":
             {

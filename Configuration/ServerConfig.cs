@@ -670,4 +670,24 @@ public sealed class DiscoveryConfig
     /// container — and would otherwise get nothing at all.
     /// </summary>
     [JsonPropertyName("dlnaUseTranscode")] public bool DlnaUseTranscode { get; set; }
+
+    /// <summary>
+    /// Show running live channels to DLNA under a "Live TV" folder, each one
+    /// playable as a continuous stream.
+    ///
+    /// A live channel has no end and no fixed size, and DLNA is built around
+    /// files that have both — so this presents each channel as one large,
+    /// byte-range-seekable file whose bytes are delivered at real time once a
+    /// player catches the live edge (a DVR/timeshift shape). It is the same
+    /// fixed-size, seekable response a television already plays for a finished
+    /// conversion, which is the point: an earlier attempt served a chunked
+    /// live stream instead, and at least one television rejected it outright,
+    /// auto-advancing within a second. This keeps a real Content-Length so
+    /// that set has a file to play, not a stream to refuse.
+    ///
+    /// Off by default: it retains segments on disk while a television watches
+    /// (a few GB per hour per channel, swept when nobody is), and whether a
+    /// given set accepts the timeshift shape can only be found by trying it.
+    /// </summary>
+    [JsonPropertyName("dlnaLiveTv")] public bool DlnaLiveTv { get; set; }
 }
