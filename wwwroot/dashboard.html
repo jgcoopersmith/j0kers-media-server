@@ -797,6 +797,7 @@
 
   <div class="card server-admin-only" id="transcodecard">
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Transcode</span>
+      <button id="tc-add" onclick="tcAddFolder()" class="edit-only" title="Browse to any drive or folder">➕ Add folder</button>
       <button id="tc-up" onclick="tcUp()" title="Up one folder">↑ Up</button>
       <button id="tc-refresh" onclick="tcReload(tcState.path)" title="Re-scan this folder">🔄</button>
       <button id="tc-go" class="primary" onclick="tcTranscode()" disabled
@@ -1918,6 +1919,14 @@ async function tcBoot() {
   if (tcState.booted) return;
   tcState.booted = true;
   tcReload("");   // start at the drive list
+}
+
+/* Jump to any drive or folder through the same browsable picker the media
+   library's "➕ Add folder" uses (/api/browse — drives open properly there),
+   then list that folder's files with their conversion status. */
+async function tcAddFolder() {
+  const p = await pickPath({ mode: "folder", title: "Add a folder to transcode", startPath: tcState.path || "" });
+  if (p) tcReload(p);
 }
 
 async function tcReload(path) {
