@@ -3364,7 +3364,19 @@ public sealed partial class ControlApi : IDisposable
                 });
             }
 
-            WriteJson(res, 200, new { path = full, parent = dir.Parent?.FullName, entries });
+            long? freeBytes = null, totalBytes = null; string? driveName = null;
+            try
+            {
+                var root = Path.GetPathRoot(full);
+                if (!string.IsNullOrEmpty(root))
+                {
+                    var di = new DriveInfo(root);
+                    if (di.IsReady) { freeBytes = di.AvailableFreeSpace; totalBytes = di.TotalSize; driveName = di.Name; }
+                }
+            }
+            catch { /* space is a nicety; a drive that won't report it just omits it */ }
+
+            WriteJson(res, 200, new { path = full, parent = dir.Parent?.FullName, entries, driveName, freeBytes, totalBytes });
         }
         catch (UnauthorizedAccessException) { WriteJson(res, 403, new { error = "access denied" }); }
         catch (Exception ex) { WriteJson(res, 400, new { error = ex.Message }); }

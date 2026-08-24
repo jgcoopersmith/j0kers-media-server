@@ -813,6 +813,7 @@
       <span><span class="tc-dot tc-conv"></span> converting</span>
       <span><span class="tc-dot tc-ok"></span> plays as-is</span>
     </div>
+    <div id="tc-space" style="font-size:11.5px;color:var(--muted);margin-top:6px;border-top:1px solid var(--grid);padding-top:6px;min-height:15px"></div>
   </div>
 
   <div class="card">
@@ -1938,6 +1939,7 @@ function tcShowEmpty() {
   tcSyncGo();
   $("tc-path").textContent = "No folder yet";
   $("tc-up").disabled = true;
+  const sp = $("tc-space"); if (sp) sp.textContent = "";
   $("tc-list").innerHTML =
     '<div class="tc-row" style="color:var(--muted);cursor:default">'
     + 'Click <b style="margin:0 4px">➕ Add folder</b> to browse to a drive or folder to convert.</div>';
@@ -1962,6 +1964,23 @@ async function tcReload(path) {
   $("tc-path").textContent = data.path || "Drives";
   $("tc-up").disabled = !data.path;
   tcRender(data.entries || []);
+  tcUpdateSpace(data);
+}
+
+/* Free space on the drive of whatever folder is open — shown at the bottom so
+   you can see whether a conversion will fit before queuing it. */
+function tcUpdateSpace(data) {
+  const el = $("tc-space");
+  if (!el) return;
+  if (data && data.freeBytes != null && data.totalBytes != null && data.totalBytes > 0) {
+    const gb = b => b / 1073741824;
+    const free = gb(data.freeBytes), total = gb(data.totalBytes);
+    const usedPct = Math.round((total - free) / total * 100);
+    el.textContent = "💽 " + (data.driveName || "drive") + " — "
+      + free.toFixed(1) + " GB free of " + total.toFixed(1) + " GB (" + usedPct + "% used)";
+  } else {
+    el.textContent = "";
+  }
 }
 
 function tcRender(entries) {
