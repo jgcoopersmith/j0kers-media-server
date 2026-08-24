@@ -1734,7 +1734,18 @@ async function tick() {
   if (document.body.classList.contains("is-server-admin")) refreshLog();
   refreshHistory();
   refreshMounts();   // cheap, cached-ish
-  refreshHls();
+
+  // The HLS stream list changes only when a conversion starts, a conversion
+  // finishes, or the user deletes/rebuilds one. The first two both show up
+  // here as the set of active transcodes changing between polls; the third
+  // is handled by those actions calling refreshHls() themselves. So fetch
+  // the list once on load and then only when that set changes — instead of
+  // hitting the HLS server every single poll for a directory that is almost
+  // always identical. renderHls() above still runs each tick to animate the
+  // in-progress bars from the fresh status, working off the cached list.
+  const transcodeSig = transcodingNow.map(t => t && t.stream).sort().join("\n");
+  if (lastHls === null || transcodeSig !== lastTranscodeSig) refreshHls();
+  lastTranscodeSig = transcodeSig;
   await refreshChannels(false);
   refreshPlaylists(false);
   refreshFavorites(false);
@@ -2238,6 +2249,7 @@ function interfaceLinks(streamName) {
 }
 
 let lastHls = null;
+let lastTranscodeSig = null;   // set of active transcodes at the last poll; the list is re-fetched only when this changes
 
 /* Conversions running right now, from the last status poll: {stream, title,
    percent, doneSeconds, durationSeconds}. Kept so the HLS card can show a
