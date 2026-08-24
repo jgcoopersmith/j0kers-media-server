@@ -621,6 +621,21 @@
   body:not(.is-admin) [data-act="session-kill"] { display: none !important; }
   /* the log names paths, accounts and client addresses — server admin only */
   body:not(.is-server-admin) .server-admin-only { display: none !important; }
+
+  /* Transcode panel */
+  .tc-row { display:flex; align-items:center; gap:8px; padding:4px 6px; border-radius:8px; cursor:default; }
+  .tc-row:hover { background: var(--surface); }
+  .tc-row .tc-name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .tc-row .tc-det { font-size:11px; color:var(--muted); white-space:nowrap; }
+  .tc-row.folder .tc-name { cursor:pointer; color:var(--ink); }
+  .tc-row input[type=checkbox] { width:15px; height:15px; flex:none; }
+  .tc-badge { font-size:10.5px; padding:1px 7px; border-radius:999px; white-space:nowrap; }
+  .tc-dot { display:inline-block; width:9px; height:9px; border-radius:50%; vertical-align:middle; margin-right:3px; }
+  .tc-need, .b-need { background: color-mix(in srgb, var(--critical) 25%, transparent); color: var(--critical); }
+  .tc-done, .b-done { background: color-mix(in srgb, var(--good) 25%, transparent); color: var(--good); }
+  .tc-conv, .b-conv { background: color-mix(in srgb, #e0a640 30%, transparent); color: #e0a640; }
+  .tc-ok,   .b-ok   { background: color-mix(in srgb, var(--muted) 30%, transparent); color: var(--muted); }
+  span.tc-need, span.tc-done, span.tc-conv, span.tc-ok { color: transparent; }
   body:not(.can-edit) .edit-only,
   body:not(.can-edit) [data-act$="-remove"],
   body:not(.can-edit) [data-act="fav-add"],
@@ -778,6 +793,25 @@
     <div id="log" style="height:220px;overflow-y:auto;border:1px solid var(--grid);border-radius:10px;
                          background:var(--surface-2);padding:8px 10px;font-family:ui-monospace,Consolas,monospace;
                          font-size:11.5px;line-height:1.5"></div>
+  </div>
+
+  <div class="card server-admin-only" id="transcodecard">
+    <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Transcode</span>
+      <button id="tc-up" onclick="tcUp()" title="Up one folder">↑ Up</button>
+      <button id="tc-refresh" onclick="tcReload(tcState.path)" title="Re-scan this folder">🔄</button>
+      <button id="tc-go" class="primary" onclick="tcTranscode()" disabled
+              title="Convert the ticked files and folders">Transcode selected</button>
+    </h2>
+    <div id="tc-path" style="font-size:12px;color:var(--muted);margin:2px 0 6px;word-break:break-all">Drives</div>
+    <div id="tc-msg" style="font-size:12px;min-height:16px;margin-bottom:4px"></div>
+    <div id="tc-list" style="max-height:300px;overflow-y:auto;border:1px solid var(--grid);border-radius:10px;
+                             background:var(--surface-2);padding:4px"></div>
+    <div style="font-size:11px;color:var(--muted);margin-top:6px;display:flex;gap:14px;flex-wrap:wrap">
+      <span><span class="tc-dot tc-need"></span> needs converting</span>
+      <span><span class="tc-dot tc-done"></span> converted</span>
+      <span><span class="tc-dot tc-conv"></span> converting</span>
+      <span><span class="tc-dot tc-ok"></span> plays as-is</span>
+    </div>
   </div>
 
   <div class="card">
@@ -1731,7 +1765,15 @@ async function tick() {
   hadTranscodes = transcodingNow.length > 0;
   renderSessions(sessions.sessions);
   // the card is server-admin-only, and so is the endpoint behind it
-  if (document.body.classList.contains("is-server-admin")) refreshLog();
+  if (document.body.classList.contains("is-server-admin")) {
+    refreshLog();
+    tcBoot();
+    // keep the listing live while conversions run, without a full reload
+    // wiping a selection the user is building: only re-scan when something
+    // is converting and nothing is ticked
+    if (tcState.booted && tcState.converting && tcState.selected.size === 0 && tcState.path)
+      tcReload(tcState.path);
+  }
   refreshHistory();
   refreshMounts();   // cheap, cached-ish
 
@@ -1864,6 +1906,112 @@ function renderSessions(list) {
       + "</td></tr>";
   }
   $("sessions").innerHTML = h + '</table>';
+}
+
+/* ---- the Transcode panel (server admin only) ----
+   Browse the disk, tick files or whole folders, and convert them. Each file
+   shows whether a TV needs it converted and whether a conversion exists, is
+   running, or has never been made. */
+const tcState = { path: "", parent: null, booted: false, selected: new Set(), converting: false };
+
+async function tcBoot() {
+  if (tcState.booted) return;
+  tcState.booted = true;
+  tcReload("");   // start at the drive list
+}
+
+async function tcReload(path) {
+  const list = $("tc-list"), msg = $("tc-msg");
+  msg.textContent = "";
+  tcState.selected.clear();
+  tcSyncGo();
+  let data;
+  try {
+    const url = "/api/transcode/scan" + (path ? "?path=" + encodeURIComponent(path) : "");
+    const r = await fetch(url, { headers: headers() });
+    data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.status);
+  } catch (e) { list.innerHTML = ""; msg.textContent = "cannot open: " + e.message; return; }
+
+  tcState.path = data.path || "";
+  tcState.parent = data.parent ?? (data.path ? "" : null);
+  $("tc-path").textContent = data.path || "Drives";
+  $("tc-up").disabled = !data.path;
+  tcRender(data.entries || []);
+}
+
+function tcRender(entries) {
+  const list = $("tc-list");
+  tcState.converting = false;
+  if (!entries.length) { list.innerHTML = '<div class="tc-row" style="color:var(--muted)">nothing here</div>'; return; }
+  list.innerHTML = "";
+  for (const e of entries) {
+    const row = document.createElement("div");
+    row.className = "tc-row" + (e.type === "folder" ? " folder" : "");
+    const full = joinPath(tcState.path, e.name);
+
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = tcState.selected.has(full);
+    cb.onchange = () => { cb.checked ? tcState.selected.add(full) : tcState.selected.delete(full); tcSyncGo(); };
+    row.appendChild(cb);
+
+    const icon = document.createElement("span");
+    icon.textContent = e.type === "folder" ? "📁" : "🎞";
+    icon.style.flex = "none";
+    row.appendChild(icon);
+
+    const nm = document.createElement("span");
+    nm.className = "tc-name";
+    nm.textContent = e.type === "folder" ? e.name : (e.title || e.name);
+    if (e.type === "folder") { nm.title = "Open"; nm.onclick = () => tcReload(full); }
+    row.appendChild(nm);
+
+    if (e.type === "file") {
+      const det = document.createElement("span");
+      det.className = "tc-det";
+      det.textContent = e.detail || "";
+      row.appendChild(det);
+
+      const badge = document.createElement("span");
+      badge.className = "tc-badge ";
+      if (e.state === "done") { badge.className += "b-done"; badge.textContent = "converted"; }
+      else if (e.state === "converting") { badge.className += "b-conv"; badge.textContent = "converting" + (e.percent != null ? " " + e.percent + "%" : "…"); tcState.converting = true; }
+      else if (e.needs) { badge.className += "b-need"; badge.textContent = "needs converting"; }
+      else { badge.className += "b-ok"; badge.textContent = "plays as-is"; }
+      row.appendChild(badge);
+    }
+    list.appendChild(row);
+  }
+}
+
+function tcSyncGo() {
+  const go = $("tc-go");
+  go.disabled = tcState.selected.size === 0;
+  go.textContent = tcState.selected.size ? "Transcode selected (" + tcState.selected.size + ")" : "Transcode selected";
+}
+
+function tcUp() { if (tcState.parent !== null) tcReload(tcState.parent); }
+
+async function tcTranscode() {
+  const paths = [...tcState.selected];
+  if (!paths.length) return;
+  const msg = $("tc-msg");
+  $("tc-go").disabled = true;
+  msg.textContent = "queuing…";
+  try {
+    const r = await fetch("/api/transcode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers() },
+      body: JSON.stringify({ paths }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || r.status);
+    msg.textContent = d.queued > 0
+      ? d.queued + " file(s) queued for conversion" + (d.found > d.queued ? " (" + (d.found - d.queued) + " already done or in progress)" : "")
+      : "nothing to do — those are already converted or in progress";
+  } catch (e) { msg.textContent = "failed: " + e.message; }
+  tcReload(tcState.path);   // reflect the new states
 }
 
 /* ---- the log panel: what the console window used to show ----

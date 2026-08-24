@@ -531,6 +531,10 @@ public sealed partial class ControlApi : IDisposable
             // revealing thing the server holds, so it belongs to whoever
             // runs the machine rather than to whoever runs the library
             case "/api/log":
+            // batch transcoding runs the machine hard and reaches any path on
+            // disk, the same class of power as the log and the config
+            case "/api/transcode":
+            case "/api/transcode/scan":
                 return AccessLevel.ServerAdmin;
 
             // what an unauthenticated protocol is allowed to see is an
@@ -1026,6 +1030,17 @@ public sealed partial class ControlApi : IDisposable
             if (method == "GET" && path == "/api/browse")
             {
                 Browse(ctx);
+                return;
+            }
+
+            if (method == "GET" && path == "/api/transcode/scan")
+            {
+                TranscodeScan(ctx);
+                return;
+            }
+            if (method == "POST" && path == "/api/transcode")
+            {
+                TranscodeBatch(ctx);
                 return;
             }
 
@@ -3281,6 +3296,125 @@ public sealed partial class ControlApi : IDisposable
         {
             WriteJson(res, 400, new { error = ex.Message });
         }
+    }
+
+    /// Video files worth offering a conversion for. Audio and images are left
+    /// out — the Transcode panel is about films a TV can't decode.
+    private static readonly HashSet<string> TranscodableExt = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".mp4", ".m4v", ".mkv", ".avi", ".mov", ".wmv", ".mpg", ".mpeg", ".ts",
+        ".m2ts", ".webm", ".flv", ".3gp", ".vob", ".divx", ".rm", ".rmvb", ".ogm", ".asf",
+    };
+
+    /// <summary>
+    /// GET /api/transcode/scan?path=&lt;dir&gt; — a directory listing for the
+    /// Transcode panel: sub-folders, plus each video file tagged with whether
+    /// a TV needs it converted and whether a conversion exists, is running, or
+    /// has never been made. No path lists the drives, same as the picker.
+    /// </summary>
+    private void TranscodeScan(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var path = ctx.Request.QueryString["path"];
+
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            Browse(ctx);   // drive list is identical to the picker's
+            return;
+        }
+
+        try
+        {
+            if (!TryLocalPath(path, out var full))
+            {
+                WriteJson(res, 400, new { error = "network paths are not allowed" });
+                return;
+            }
+            if (!Directory.Exists(full))
+            {
+                WriteJson(res, 404, new { error = "directory not found", path = full });
+                return;
+            }
+
+            var dir = new DirectoryInfo(full);
+            var entries = new List<object>();
+            foreach (var d in dir.EnumerateDirectories().OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase))
+                entries.Add(new { name = d.Name, type = "folder" });
+
+            foreach (var f in dir.EnumerateFiles().OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                if (!TranscodableExt.Contains(f.Extension)) continue;
+                var state = _ffmpeg?.VodStatusFor(f.FullName) ?? Media.FfmpegManager.VodState.None;
+                int? percent = null;
+                if (state == Media.FfmpegManager.VodState.Converting)
+                {
+                    var stream = _ffmpeg?.VodStreamName(f.FullName);
+                    percent = _ffmpeg?.VodProgressSnapshot
+                        .FirstOrDefault(p => string.Equals(p.Stream, stream, StringComparison.OrdinalIgnoreCase))?.Percent;
+                }
+                entries.Add(new
+                {
+                    name = f.Name,
+                    title = Media.StreamTitle.PrettifyFile(f.Name),
+                    type = "file",
+                    detail = f.Length >= 1024 * 1024 ? $"{f.Length / (1024.0 * 1024):0.#} MB" : $"{Math.Max(1, f.Length / 1024)} KB",
+                    needs = _tvCodecs?.NeedsConversion(f.FullName) ?? false,
+                    state = state.ToString().ToLowerInvariant(),   // none | converting | done
+                    percent,
+                });
+            }
+
+            WriteJson(res, 200, new { path = full, parent = dir.Parent?.FullName, entries });
+        }
+        catch (UnauthorizedAccessException) { WriteJson(res, 403, new { error = "access denied" }); }
+        catch (Exception ex) { WriteJson(res, 400, new { error = ex.Message }); }
+    }
+
+    /// <summary>
+    /// POST /api/transcode { "paths": [ ... ] } — queues conversions for the
+    /// chosen files and folders. A folder is walked for video files; anything
+    /// already converted or already converting is skipped. The queue runs a
+    /// couple at a time so picking a whole library doesn't launch fifty
+    /// encoders at once.
+    /// </summary>
+    private void TranscodeBatch(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        if (_ffmpeg is null || !_ffmpeg.Available)
+        {
+            WriteJson(res, 503, new { error = "ffmpeg is not available" });
+            return;
+        }
+
+        TranscodeRequest? req;
+        try { req = JsonSerializer.Deserialize<TranscodeRequest>(ReadBody(ctx), BodyJson); }
+        catch (Exception ex) { WriteJson(res, 400, new { error = "bad JSON: " + ex.Message }); return; }
+        if (req?.Paths is null || req.Paths.Count == 0) { WriteJson(res, 400, new { error = "no paths given" }); return; }
+
+        var files = new List<string>();
+        foreach (var p in req.Paths)
+        {
+            if (string.IsNullOrWhiteSpace(p) || !TryLocalPath(p, out var full)) continue;
+            try
+            {
+                if (Directory.Exists(full))
+                    files.AddRange(Directory.EnumerateFiles(full, "*", SearchOption.AllDirectories)
+                        .Where(f => TranscodableExt.Contains(Path.GetExtension(f))));
+                else if (File.Exists(full) && TranscodableExt.Contains(Path.GetExtension(full)))
+                    files.Add(full);
+            }
+            catch (Exception ex) { Log.Warn("control", $"transcode scan of {full} failed: {ex.Message}"); }
+        }
+
+        var unique = files.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var queued = _ffmpeg.QueueVod(unique);
+        Log.Info("control", $"transcode: {queued} file(s) queued from {req.Paths.Count} selection(s) ({unique.Count} video file(s) found)");
+        WriteJson(res, 200, new { queued, found = unique.Count });
+    }
+
+    private sealed class TranscodeRequest
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("paths")] public List<string>? Paths { get; set; }
     }
 
     /// <summary>

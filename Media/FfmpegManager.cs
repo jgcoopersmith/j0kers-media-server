@@ -499,6 +499,8 @@ public sealed class FfmpegManager : IDisposable
                     }
                     lock (_progressLock) _vodProgress.Remove(stream);
                     SweepSupersededSeekSegments(dir);
+                    // a batch conversion just freed a slot — start the next
+                    PumpVodQueue();
                 });
             _vodJobs[stream] = job;
             started = stream;
@@ -850,6 +852,74 @@ public sealed class FfmpegManager : IDisposable
             lock (_lock)
                 return _vodJobs.Where(kv => { try { return !kv.Value.HasExited; } catch { return false; } })
                                .Select(kv => kv.Key).ToList();
+        }
+    }
+
+    public enum VodState { None, Converting, Done }
+
+    /// <summary>
+    /// Whether a full-resolution conversion of this file exists, is running,
+    /// or has never been made — for the Transcode panel's file listing.
+    /// </summary>
+    public VodState VodStatusFor(string file)
+    {
+        var stream = VodStreamName(file);
+        if (stream is null) return VodState.None;
+        lock (_lock)
+            if (_vodJobs.TryGetValue(stream, out var p))
+            { try { if (!p.HasExited) return VodState.Converting; } catch { } }
+        try
+        {
+            var playlist = Path.Combine(_mediaRoot, stream, "index.m3u8");
+            if (File.Exists(playlist) && File.ReadAllText(playlist).Contains("#EXT-X-ENDLIST", StringComparison.Ordinal))
+                return VodState.Done;
+        }
+        catch { }
+        return VodState.None;
+    }
+
+    private readonly System.Collections.Concurrent.ConcurrentQueue<string> _vodQueue = new();
+
+    /// <summary>How many conversions run at once from a batch; the rest wait.</summary>
+    public int MaxConcurrentVod { get; set; } = 2;
+
+    /// <summary>Number of files waiting in the batch conversion queue.</summary>
+    public int VodQueueDepth => _vodQueue.Count;
+
+    /// <summary>
+    /// Queues files for conversion and starts as many as the concurrency cap
+    /// allows, the rest following as slots free up. Files already converted
+    /// or already converting are skipped. Returns how many were newly queued.
+    /// </summary>
+    public int QueueVod(IEnumerable<string> files)
+    {
+        var n = 0;
+        foreach (var f in files)
+        {
+            if (VodStatusFor(f) is VodState.Done or VodState.Converting) continue;
+            if (_vodQueue.Contains(f, StringComparer.OrdinalIgnoreCase)) continue;
+            _vodQueue.Enqueue(f);
+            n++;
+        }
+        PumpVodQueue();
+        return n;
+    }
+
+    private void PumpVodQueue()
+    {
+        if (!Available) return;
+        while (ActiveVodStreams.Count < MaxConcurrentVod && _vodQueue.TryDequeue(out var file))
+        {
+            try
+            {
+                if (VodStatusFor(file) is VodState.Done or VodState.Converting) continue;
+                if (!File.Exists(file)) continue;
+                StartVod(file);   // registers the job; its exit pumps the queue again
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("ffmpeg", $"could not start queued conversion of {Path.GetFileName(file)}: {ex.Message}");
+            }
         }
     }
 
