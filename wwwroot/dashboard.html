@@ -1929,7 +1929,22 @@ async function tcAddFolder() {
   if (p) tcReload(p);
 }
 
+/* Empty start — no drive list. You add a drive or folder with the ➕ button,
+   exactly like the media library. */
+function tcShowEmpty() {
+  tcState.path = "";
+  tcState.parent = null;
+  tcState.selected.clear();
+  tcSyncGo();
+  $("tc-path").textContent = "No folder yet";
+  $("tc-up").disabled = true;
+  $("tc-list").innerHTML =
+    '<div class="tc-row" style="color:var(--muted);cursor:default">'
+    + 'Click <b style="margin:0 4px">➕ Add folder</b> to browse to a drive or folder to convert.</div>';
+}
+
 async function tcReload(path) {
+  if (!path) { tcShowEmpty(); return; }   // boot, and Up past a drive root
   const list = $("tc-list"), msg = $("tc-msg");
   msg.textContent = "";
   tcState.selected.clear();
@@ -5095,15 +5110,22 @@ async function pickerLoad(path) {
       : joinPath(picker.path, e.name);
 
     if (e.ready !== false) {
-      row.onclick = () => {
-        list.querySelectorAll(".pick-row").forEach(r2 => r2.classList.remove("selected"));
-        row.classList.add("selected");
-        picker.selected = full;
-        picker.selectedType = e.type;
-        pickerSync();
-      };
-      if (e.type !== "file")
-        row.ondblclick = () => pickerLoad(full);
+      const canEnter = e.type !== "file";
+      if (picker.mode === "folder" && canEnter) {
+        // A folder picker drills in on a single click — the way an OS
+        // "choose folder" dialog works — so you can reach any depth. The
+        // "Select this folder" button then takes the directory you're in.
+        row.onclick = () => pickerLoad(full);
+      } else {
+        row.onclick = () => {
+          list.querySelectorAll(".pick-row").forEach(r2 => r2.classList.remove("selected"));
+          row.classList.add("selected");
+          picker.selected = full;
+          picker.selectedType = e.type;
+          pickerSync();
+        };
+        if (canEnter) row.ondblclick = () => pickerLoad(full);
+      }
     }
     list.appendChild(row);
   }
