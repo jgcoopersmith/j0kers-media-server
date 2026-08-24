@@ -157,8 +157,8 @@ public sealed partial class ControlApi : IDisposable
             var mediaRoot = Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
                 ? _serverConfig.Hls.MediaRoot
                 : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
+            if (!Directory.Exists(mediaRoot)) return null;
 
-            if (Directory.Exists(mediaRoot))
             foreach (var dir in Directory.EnumerateDirectories(mediaRoot, "vod-*"))
             {
                 // "vod-dune-720p-a1b2c3d4" was scaled; "vod-dune-a1b2c3d4" was not
@@ -170,15 +170,6 @@ public sealed partial class ControlApi : IDisposable
                 catch { continue; }
                 if (!src.Equals(sourceFile, StringComparison.OrdinalIgnoreCase)) continue;
 
-                // DLNA can only serve a conversion the TV will actually play,
-                // which means fMP4 (init.mp4 present) handed over as
-                // video/mp4. A .ts conversion made for the web player would
-                // have to be advertised as video/mp2t, which real TVs refuse
-                // — so it does not count here, and an on-demand fMP4 copy is
-                // made instead.
-                var init = Path.Combine(dir, "init.mp4");
-                if (!File.Exists(init)) continue;
-
                 var playlist = Path.Combine(dir, "index.m3u8");
                 string text;
                 try { text = File.ReadAllText(playlist); }
@@ -189,82 +180,27 @@ public sealed partial class ControlApi : IDisposable
                 long total = 0;
                 // the fMP4 initialisation segment belongs first, or the
                 // fragments after it are not a playable stream
-                { var l = new FileInfo(init).Length; parts.Add((init, l)); total += l; }
+                var init = Path.Combine(dir, "init.mp4");
+                if (File.Exists(init)) { var l = new FileInfo(init).Length; parts.Add((init, l)); total += l; }
 
-                var gap = false;
                 foreach (var line in text.Split('\n'))
                 {
                     var name = line.Trim();
                     if (name.Length == 0 || name[0] == '#') continue;
                     var seg = Path.Combine(dir, name.Split('?')[0]);
-                    if (!File.Exists(seg)) { gap = true; break; }   // a gap would be a corrupt stream
+                    if (!File.Exists(seg)) return null;      // a gap would be a corrupt stream
                     var len = new FileInfo(seg).Length;
                     parts.Add((seg, len));
                     total += len;
                 }
-                if (gap || parts.Count == 0 || total == 0) continue;
+                if (parts.Count == 0 || total == 0) continue;
 
-                return new Dlna.DlnaService.Transcode(parts, total, "video/mp4");
+                var mp4 = parts[^1].Item1.EndsWith(".m4s", StringComparison.OrdinalIgnoreCase) || File.Exists(init);
+                return new Dlna.DlnaService.Transcode(parts, total, mp4 ? "video/mp4" : "video/mp2t");
             }
         }
         catch (Exception ex) { Log.Debug("dlna", $"could not look for a conversion: {ex.Message}"); }
-
-        // Past the early return above, this file genuinely needs converting
-        // and no finished fMP4 conversion of it exists. Hand back the
-        // "Transcoding…" placeholder so the TV shows what is happening; the
-        // GET that plays it is what starts the real conversion (see the
-        // /dlna/file handler). If the placeholder itself can't be made, fall
-        // back to serving the original as before.
-        var ph = _ffmpeg?.TranscodingPlaceholder();
-        if (ph is null) return null;
-        long phLen;
-        try { phLen = new FileInfo(ph).Length; } catch { return null; }
-        return new Dlna.DlnaService.Transcode(
-            new[] { (ph, phLen) }, phLen, "video/mp4", Placeholder: true, SourceFile: sourceFile);
-    }
-
-    private enum DlnaPlay { Placeholder, Stream, Finished }
-
-    /// <summary>
-    /// Holds a play request for a short moment while an on-demand conversion
-    /// gets going, and decides how to satisfy it:
-    ///   Finished — the whole conversion is already done; play it seekable.
-    ///   Stream   — the encoder is comfortably ahead of realtime and has a
-    ///              lead; play it live as it converts, and it will stay ahead
-    ///              to the end (a faster-than-realtime encoder never lets
-    ///              playback catch up).
-    ///   Placeholder — not fast enough yet; show the wait clip rather than a
-    ///              stream that would stall. The conversion keeps running, so
-    ///              a later attempt finds it finished or far enough ahead.
-    /// </summary>
-    private DlnaPlay AwaitDlnaPlayback(string stream, bool alreadyDone)
-    {
-        const double SafeSpeed = 1.25;    // encode must beat realtime with margin
-        const double LeadSeconds = 20;    // content buffered before we release
-        const int HoldMs = 20_000;        // and never hold the TV longer than this
-
-        if (_ffmpeg is null) return DlnaPlay.Placeholder;
-        if (alreadyDone || _ffmpeg.VodComplete(stream)) return DlnaPlay.Finished;
-
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        double? lastDone = null; long lastMs = 0; double speed = 0;
-        while (sw.ElapsedMilliseconds < HoldMs)
-        {
-            if (_ffmpeg.VodComplete(stream)) return DlnaPlay.Finished;
-            var done = _ffmpeg.VodProgressFor(stream)?.DoneSeconds ?? 0;
-            var nowMs = sw.ElapsedMilliseconds;
-            // instantaneous encode speed: seconds of content produced per
-            // second of wall clock. A stalled job reads ~0 and never releases.
-            if (lastDone is double ld && nowMs > lastMs)
-                speed = (done - ld) / ((nowMs - lastMs) / 1000.0);
-            lastDone = done; lastMs = nowMs;
-            if (speed >= SafeSpeed && done >= LeadSeconds) return DlnaPlay.Stream;
-            Thread.Sleep(1000);
-        }
-        if (_ffmpeg.VodComplete(stream)) return DlnaPlay.Finished;
-        if (speed >= SafeSpeed && (_ffmpeg.VodProgressFor(stream)?.DoneSeconds ?? 0) >= LeadSeconds)
-            return DlnaPlay.Stream;
-        return DlnaPlay.Placeholder;
+        return null;
     }
 
     /// <summary>Turns DLNA on or off while the server runs; returns what it now is.</summary>
@@ -2828,84 +2764,10 @@ public sealed partial class ControlApi : IDisposable
                 // before anybody is watching, same reasoning as there, but
                 // it costs nothing to mark early and is one less place a
                 // television's first request could lose the race.
-                if (transcode is not null && !transcode.Placeholder)
+                if (transcode is not null)
                 {
                     try { Directory.SetLastWriteTimeUtc(Path.GetDirectoryName(transcode.Parts[0].Path)!, DateTime.UtcNow); }
                     catch { }
-                }
-
-                // Unplayable file, no finished conversion yet: the TV is shown
-                // the short "Transcoding…" clip so the person at the set knows
-                // what is happening — DLNA has no other way to tell them. The
-                // GET that plays it is what kicks off the real conversion
-                // (browse and HEAD deliberately never do, or a folder full of
-                // files would each start one just from being listed). It is
-                // idempotent — StartVod attaches to a running job rather than
-                // launching a second — so "only for files that do not have a
-                // transcode already" holds even across repeated presses. When
-                // the conversion finishes, reselecting the title on the TV
-                // re-browses, finds the finished fMP4 copy, and plays it.
-                if (transcode is { Placeholder: true })
-                {
-                    // HEAD, or a request we can't tie to a source file, only
-                    // describes the wait clip — it never starts a job, so a
-                    // folder full of unplayable files can't each begin one
-                    // merely by being listed.
-                    if (method != "GET" || transcode.SourceFile is not { } srcToConvert)
-                    {
-                        dlna.ServeTranscode(ctx, transcode);
-                        return;
-                    }
-
-                    string stream; bool alreadyDone;
-                    try { (stream, alreadyDone) = _ffmpeg!.StartVod(srcToConvert, forceFmp4: true); }
-                    catch (Exception ex)
-                    {
-                        Log.Warn("dlna", $"could not start on-demand conversion: {ex.Message}");
-                        dlna.ServeTranscode(ctx, transcode);
-                        return;
-                    }
-
-                    var mediaRoot = Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
-                        ? _serverConfig.Hls.MediaRoot
-                        : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
-                    var streamDir = Path.Combine(mediaRoot, stream);
-                    var name = Path.GetFileName(srcToConvert);
-
-                    // Only ever begin playback when it can run smoothly to the
-                    // end — the whole point of a media server. That means the
-                    // encoder must be far enough ahead that playback can't
-                    // overtake it before the film finishes. If it can't (a
-                    // slow encode on this machine), the TV gets the wait clip
-                    // instead of a stream that would stutter and loop.
-                    var choice = AwaitDlnaPlayback(stream, alreadyDone);
-
-                    var vodViewing = _services.Viewers.Note(
-                        ctx, file, user: null, bytes: 0, create: true, protocol: "dlna", file: file);
-                    void VodSent(long s)
-                    {
-                        _services.Served.Add(s);
-                        if (!_services.Viewers.Progress(vodViewing, s))
-                            vodViewing = _services.Viewers.Note(ctx, file, user: null, bytes: s, create: true, protocol: "dlna", file: file);
-                    }
-
-                    if (choice == DlnaPlay.Finished && FullResTranscodeFor(srcToConvert) is { Placeholder: false } fin)
-                    {
-                        Log.Info("dlna", $"on-demand conversion of {name} is done — playing it seekable");
-                        dlna.ServeTranscode(ctx, fin, VodSent);
-                        return;
-                    }
-                    if (choice == DlnaPlay.Stream)
-                    {
-                        Log.Info("dlna", $"playing {name} as it transcodes — encoder is ahead, streaming live");
-                        dlna.ServeGrowingFmp4(ctx, streamDir, VodSent);
-                        return;
-                    }
-
-                    // not enough lead yet: show the wait clip, keep converting
-                    Log.Info("dlna", $"transcoding {name} — not far enough ahead to play smoothly yet, showing the wait clip");
-                    dlna.ServeTranscode(ctx, transcode);
-                    return;
                 }
 
                 // A HEAD is the TV asking how big the file is and whether it

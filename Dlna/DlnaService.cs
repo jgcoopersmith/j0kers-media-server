@@ -1,6 +1,5 @@
 using System.Net;
 using System.Text;
-using System.Threading;
 using J0kersMediaServer.Logging;
 
 namespace J0kersMediaServer.Dlna;
@@ -48,12 +47,7 @@ public sealed class DlnaService
     /// fMP4 stream. So the parts are handed over back to back, and the sizes
     /// are known in advance, which is what keeps byte-range seeking working.
     /// </summary>
-    public sealed record Transcode(IReadOnlyList<(string Path, long Length)> Parts, long TotalBytes, string ContentType,
-        // A placeholder is the short "Transcoding…" clip served while the
-        // real conversion is still being made — not a finished substitute.
-        // The GET that plays it is what starts the conversion (browse and
-        // HEAD never do); SourceFile is the library file to convert.
-        bool Placeholder = false, string? SourceFile = null);
+    public sealed record Transcode(IReadOnlyList<(string Path, long Length)> Parts, long TotalBytes, string ContentType);
 
     /// <summary>
     /// Finds a finished conversion for a library file, or null. Set by
@@ -583,84 +577,6 @@ public sealed class DlnaService
         catch (HttpListenerException) { /* the TV stopped or seeked away */ }
         catch (IOException) { }
         catch (Exception ex) { Log.Debug("dlna", $"serving a conversion failed: {ex.Message}"); }
-        finally
-        {
-            if (onBytes is not null && pending > 0) { try { onBytes(pending); } catch { } }
-            try { res.Close(); } catch { }
-        }
-    }
-
-    /// <summary>
-    /// Streams a conversion that is still being produced, as one continuous
-    /// fMP4: the init segment, then each fragment in turn, waiting the short
-    /// moment for the next one to be finished before sending it. Sent chunked
-    /// — the final size isn't known yet — so there is no byte-range seeking
-    /// while it plays; the finished, seekable file is served on the next
-    /// play once the conversion is done.
-    ///
-    /// The caller only reaches here once the encoder has a lead that playback
-    /// cannot overtake before the film ends, so "wait for the next fragment"
-    /// is a sub-second pause, not a stall. A fragment is complete once the
-    /// one after it has appeared (ffmpeg has moved on) or the playlist has
-    /// closed with #EXT-X-ENDLIST.
-    /// </summary>
-    public void ServeGrowingFmp4(HttpListenerContext ctx, string dir, Action<long>? onBytes = null)
-    {
-        var res = ctx.Response;
-        res.StatusCode = 200;
-        res.ContentType = "video/mp4";
-        res.SendChunked = true;
-        res.Headers["transferMode.dlna.org"] = "Streaming";
-        // OP=00: no byte-range seeking while it is still being made
-        res.Headers["contentFeatures.dlna.org"] = "DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
-        if (ctx.Request.HttpMethod == "HEAD") { res.Close(); return; }
-
-        bool Ended() { try { var pl = Path.Combine(dir, "index.m3u8"); return File.Exists(pl) && File.ReadAllText(pl).Contains("#EXT-X-ENDLIST", StringComparison.Ordinal); } catch { return false; } }
-        bool WaitFor(string path, int timeoutMs)
-        {
-            var waited = 0;
-            while (!File.Exists(path)) { if (Ended() || waited >= timeoutMs) return File.Exists(path); Thread.Sleep(150); waited += 150; }
-            return true;
-        }
-        // a fragment is safe to send once the next one exists or the playlist closed
-        bool Complete(int index)
-        {
-            var next = Path.Combine(dir, $"seg_{index + 1:00000}.m4s");
-            var waited = 0;
-            while (!File.Exists(next) && !Ended()) { if (waited >= 30_000) break; Thread.Sleep(150); waited += 150; }
-            return true;
-        }
-
-        long pending = 0;
-        void Pump(string path)
-        {
-            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 64 * 1024);
-            var buffer = new byte[64 * 1024];
-            int read;
-            while ((read = fs.Read(buffer, 0, buffer.Length)) > 0)
-            {
-                res.OutputStream.Write(buffer, 0, read);
-                pending += read;
-                if (onBytes is not null && pending >= 1024 * 1024) { onBytes(pending); pending = 0; }
-            }
-        }
-
-        try
-        {
-            var init = Path.Combine(dir, "init.mp4");
-            if (WaitFor(init, 30_000) && File.Exists(init)) Pump(init);
-            for (var i = 0; ; i++)
-            {
-                var seg = Path.Combine(dir, $"seg_{i:00000}.m4s");
-                if (!WaitFor(seg, 30_000)) break;   // none arrived and the playlist closed → done
-                if (!File.Exists(seg)) break;
-                Complete(i);                          // let the fragment finish being written
-                Pump(seg);
-            }
-        }
-        catch (HttpListenerException) { /* the TV stopped */ }
-        catch (IOException) { }
-        catch (Exception ex) { Log.Debug("dlna", $"streaming a live conversion failed: {ex.Message}"); }
         finally
         {
             if (onBytes is not null && pending > 0) { try { onBytes(pending); } catch { } }
