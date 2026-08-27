@@ -1163,13 +1163,21 @@ public sealed class HlsServer : IDisposable
                 }
               }, true);
 
-              // Autoplay with sound. A pasted link has no user gesture, so an
-              // unmuted autoplay is refused; muted autoplay is always allowed,
-              // so start muted and unmute the moment it is playing — it starts
-              // at once and does not stay muted.
-              v.muted = true;
-              v.play().then(() => { v.muted = false; })
-                      .catch(() => { v.muted = false; });
+              // Autoplay, with sound: try unmuted first, and only if the
+              // browser refuses fall back to a muted start (so it still plays)
+              // that unmutes on the first interaction. Never start muted
+              // outright — unmuting a muted autoplay makes the browser pause.
+              v.play().catch(function () {
+                v.muted = true;
+                v.play().catch(function () {});
+                var unmute = function () {
+                  v.muted = false;
+                  document.removeEventListener("pointerdown", unmute);
+                  document.removeEventListener("keydown", unmute);
+                };
+                document.addEventListener("pointerdown", unmute);
+                document.addEventListener("keydown", unmute);
+              });
             </script>
             </body>
             </html>

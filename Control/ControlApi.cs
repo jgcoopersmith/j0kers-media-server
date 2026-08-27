@@ -3923,16 +3923,25 @@ public sealed partial class ControlApi : IDisposable
                 hls.loadSource(src);
                 hls.attachMedia(v);
 
-                // Autoplay with sound. A link pasted into a fresh tab carries
-                // no user gesture, so the browser refuses to start an unmuted
-                // video on its own — which is what left it waiting for a play
-                // click. Muted autoplay is always allowed, so start muted so it
-                // rolls immediately, then unmute the moment it is playing. It
-                // does not sit muted; the sound comes on as it starts.
+                // Autoplay, with sound. Try unmuted first — this is the form
+                // that worked: a browser that allows autoplay-with-sound (this
+                // one does) starts playing with audio at once. Only if it
+                // refuses fall back to a muted start so it still autoplays, and
+                // unmute on the first interaction anywhere on the page. Never
+                // start muted outright: unmuting a muted autoplay makes the
+                // browser pause it, which is what killed autoplay before.
                 hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                  v.muted = true;
-                  v.play().then(() => { v.muted = false; })
-                          .catch(() => { v.muted = false; });
+                  v.play().catch(() => {
+                    v.muted = true;
+                    v.play().catch(() => {});
+                    const unmute = () => {
+                      v.muted = false;
+                      document.removeEventListener("pointerdown", unmute);
+                      document.removeEventListener("keydown", unmute);
+                    };
+                    document.addEventListener("pointerdown", unmute);
+                    document.addEventListener("keydown", unmute);
+                  });
                 });
 
                 hls.on(Hls.Events.LEVEL_LOADED, (_, d) => {
