@@ -1623,7 +1623,7 @@ async function loadUsers() {
     return '<div class="usr">'
       + '<div class="top"><span class="nm">' + esc(u.displayName || u.username) + "</span>" + badges
       + '<span style="flex:1"></span>'
-      + '<button data-act="usr-keys" data-arg="' + esc(u.id) + '">🔑 ' + u.keys.length + "</button>"
+      + '<button data-act="usr-keys" data-arg="' + esc(u.id) + '" title="' + u.keys.length + ' key' + (u.keys.length === 1 ? '' : 's') + '">🔑</button>'
       + '<button data-act="usr-edit" data-arg="' + esc(u.id) + '">Edit</button>'
       + (u.self ? "" : '<button class="danger" data-act="usr-remove" data-arg="' + esc(u.id) + '">Remove</button>')
       + "</div>"
