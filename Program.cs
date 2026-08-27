@@ -345,6 +345,11 @@ try
         // through our own proxy, so it needs the control API to exist.
         ffmpeg.RestoreRunningChannels();
 
+        // Likewise the batch conversion queue: whatever was still owed when
+        // this server last stopped is on disk, and picks up here rather than
+        // being lost with the process that was working through it.
+        ffmpeg.ResumeVodQueue();
+
         // The channel watchdog: a live job that is running but has written
         // nothing for 90 seconds is wedged, and killing it is what revives
         // it (the exit handler restarts crashed channels).

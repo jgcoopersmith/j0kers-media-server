@@ -526,6 +526,11 @@ public sealed class FfmpegManager : IDisposable
                     // disk (and isn't mistaken for a real one). A rerun that took
                     // the slot owns the dir now, so leave that alone.
                     if (!superseded) CleanupIfIncomplete(stream, dir);
+                    // one fewer file owed — write that down before starting the
+                    // next, so a crash cannot resurrect a conversion that is
+                    // already done. Outside the lock above: SaveQueueState
+                    // takes _lock itself, via ActiveVodStreams.
+                    SaveQueueState();
                     // a batch conversion just freed a slot — start the next
                     PumpVodQueue();
                 });
@@ -928,6 +933,13 @@ public sealed class FfmpegManager : IDisposable
     {
         public int MaxParallel { get; set; } = 2;
         public int StaggerSeconds { get; set; }
+
+        /// <summary>
+        /// The batch still to convert. Absent in files written before the
+        /// queue was persisted, which deserializes to an empty list — an old
+        /// sidecar keeps its settings and simply restores nothing.
+        /// </summary>
+        public List<string> Waiting { get; set; } = new();
     }
 
     private void LoadQueueSettings()
@@ -939,18 +951,72 @@ public sealed class FfmpegManager : IDisposable
             if (s is null) return;
             MaxConcurrentVod = Math.Clamp(s.MaxParallel, 1, 15);
             VodStaggerSeconds = Math.Clamp(s.StaggerSeconds, 0, 120);
+
+            foreach (var f in s.Waiting ?? new List<string>())
+                if (!string.IsNullOrWhiteSpace(f)) _vodQueue.Enqueue(f);
+            if (!_vodQueue.IsEmpty)
+                Log.Info("ffmpeg", $"transcode queue restored: {_vodQueue.Count} file(s) still to convert");
         }
         catch { /* a bad sidecar is a default, not a failure */ }
     }
 
-    private void SaveQueueSettings()
+    /// <summary>Serialises the queue file. One writer at a time.</summary>
+    private readonly object _queueFileLock = new();
+
+    /// <summary>
+    /// Writes the queue to disk, so a batch survives the server stopping.
+    ///
+    /// A 418-file overnight run was lost to a crash because the queue lived
+    /// only in memory: the process died and took the remaining ~310 files with
+    /// it, with nothing on disk to resume from.
+    ///
+    /// What is written is everything still owed — waiting *and* in flight. A
+    /// conversion that was running when the server stopped had already been
+    /// dequeued but never finished, so persisting the queue alone would
+    /// quietly drop it. Its source path is in the job's own source.txt, so
+    /// this needs no extra bookkeeping to find; the in-flight ones go first,
+    /// since they were started first. Re-queueing something that did finish is
+    /// harmless — the pump skips anything already converted.
+    /// </summary>
+    private void SaveQueueState()
     {
         try
         {
-            File.WriteAllText(_queueSettingsFile, System.Text.Json.JsonSerializer.Serialize(
-                new QueueSettings { MaxParallel = MaxConcurrentVod, StaggerSeconds = VodStaggerSeconds }));
+            var outstanding = new List<string>();
+            foreach (var stream in ActiveVodStreams)
+            {
+                try
+                {
+                    var src = File.ReadAllText(Path.Combine(_mediaRoot, stream, "source.txt")).Trim();
+                    if (src.Length > 0) outstanding.Add(src);
+                }
+                catch { /* no source.txt: nothing to resume it by */ }
+            }
+            foreach (var f in _vodQueue.ToArray())
+                if (!outstanding.Contains(f, StringComparer.OrdinalIgnoreCase)) outstanding.Add(f);
+
+            var json = System.Text.Json.JsonSerializer.Serialize(new QueueSettings
+            {
+                MaxParallel = MaxConcurrentVod,
+                StaggerSeconds = VodStaggerSeconds,
+                Waiting = outstanding,
+            });
+            lock (_queueFileLock) File.WriteAllText(_queueSettingsFile, json);
         }
-        catch (Exception ex) { Log.Warn("ffmpeg", $"could not save transcode queue settings: {ex.Message}"); }
+        catch (Exception ex) { Log.Warn("ffmpeg", $"could not save the transcode queue: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Picks a restored batch back up, once, at startup. Separate from the
+    /// constructor on purpose: loading reads the file, but starting encoders
+    /// is work that belongs after the server is up — the same split the live
+    /// channels use with RestoreRunningChannels.
+    /// </summary>
+    public void ResumeVodQueue()
+    {
+        if (_vodQueue.IsEmpty) return;
+        Log.Info("ffmpeg", $"resuming batch conversion of {_vodQueue.Count} file(s)");
+        PumpVodQueue();
     }
 
     /// <summary>
@@ -962,7 +1028,7 @@ public sealed class FfmpegManager : IDisposable
     {
         if (maxParallel is int mp) MaxConcurrentVod = Math.Clamp(mp, 1, 15);
         if (staggerSeconds is int st) VodStaggerSeconds = Math.Clamp(st, 0, 120);
-        SaveQueueSettings();
+        SaveQueueState();
         PumpVodQueue();
     }
 
@@ -986,6 +1052,7 @@ public sealed class FfmpegManager : IDisposable
             if (kept.Length == all.Length) return false;   // wasn't waiting
             while (_vodQueue.TryDequeue(out _)) { }
             foreach (var f in kept) _vodQueue.Enqueue(f);
+            SaveQueueState();
             return true;
         }
     }
@@ -997,6 +1064,7 @@ public sealed class FfmpegManager : IDisposable
         {
             var n = 0;
             while (_vodQueue.TryDequeue(out _)) n++;
+            SaveQueueState();
             return n;
         }
     }
@@ -1016,6 +1084,9 @@ public sealed class FfmpegManager : IDisposable
             _vodQueue.Enqueue(f);
             n++;
         }
+        // Persisted before anything starts: a batch is at its most valuable
+        // the moment it is queued and has not been converted yet.
+        if (n > 0) SaveQueueState();
         PumpVodQueue();
         return n;
     }
@@ -1053,6 +1124,9 @@ public sealed class FfmpegManager : IDisposable
                     if (!File.Exists(file)) continue;
                     StartVod(file);   // registers the job; its exit pumps the queue again
                     _lastVodStartUtc = DateTime.UtcNow;
+                    // the file has left the queue and become an in-flight job;
+                    // record the new shape of what is still owed
+                    SaveQueueState();
                 }
                 catch (Exception ex)
                 {
