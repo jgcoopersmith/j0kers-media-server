@@ -1545,10 +1545,35 @@ public sealed class FfmpegManager : IDisposable
                 bool alive; try { alive = !p.HasExited; } catch { alive = false; }
                 if (alive) return false;                    // already running
             }
+            // Fresh tune: the directory still holds segments and a playlist from
+            // the last run. Left there, the player loads that stale content first
+            // and only reaches live once new segments push it out of the window —
+            // the "starts with cached content, then switches to current" a viewer
+            // sees. Clear it so playback begins at the live edge.
+            ClearChannelSegments(stream);
             StartLiveJob(def.Name, def.Url);
-            Log.Info("ffmpeg", $"tune-on-demand: starting channel {def.Name}");
+            Log.Info("ffmpeg", $"tune-on-demand: starting channel {def.Name} (fresh)");
             return true;
         }
+    }
+
+    /// <summary>
+    /// Wipes a channel's on-disk segments and playlist so a fresh restream
+    /// begins at the live edge, not with whatever the last run left behind.
+    /// Only for a channel that is not running — a live job owns these files.
+    /// </summary>
+    private void ClearChannelSegments(string stream)
+    {
+        try
+        {
+            var dir = Path.Combine(_mediaRoot, stream);
+            if (!Directory.Exists(dir)) return;
+            foreach (var f in Directory.EnumerateFiles(dir, "seg_*"))
+                try { File.Delete(f); } catch { }
+            foreach (var name in new[] { "index.m3u8", "index_vtt.m3u8", "init.mp4" })
+                try { var f = Path.Combine(dir, name); if (File.Exists(f)) File.Delete(f); } catch { }
+        }
+        catch { }
     }
 
     /// <summary>Starts a saved channel's restream and remembers that it should be running.</summary>

@@ -51,7 +51,7 @@
     "crf": 23,                        // VOD quality (lower = better)
     "liveSegmentSeconds": 4,
     "liveWindowSegments": 15,          // ~60s live window: rides out channel restart gaps so devices don't jump to the live edge
-    "liveVideoMode": "copy",          // remux H.264/AAC sources bit-for-bit — no re-encode, no quality loss
+    "liveVideoMode": "transcode",     // re-encode to a clean monotonic timeline the browser player can append without skipping
     "videoCodec": "h264",             // h264 | h265/hevc | vp9 | av1 | mpeg2 | mpeg4 | copy | raw encoder name
     "audioCodec": "aac",              // aac | mp3 | opus | vorbis | ac3 | eac3 | flac | alac | pcm | copy | raw name
     "vodCacheMaxGb": 500               // LRU cap for vod-* transcode cache; 0 = keep forever
