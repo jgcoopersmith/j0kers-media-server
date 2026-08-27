@@ -1665,12 +1665,38 @@ public sealed class FfmpegManager : IDisposable
                 // unchanged — nothing is downscaled, so no channel loses
                 // picture. A smaller source is scaled up, which costs bits but
                 // no detail, and hands the set the standard frame it wants.
+                // …then flatten the timeline. An ad-stitched source resets its
+                // clock at every splice — the PTS jumps from 406s back to 1.5s
+                // at each break (seen directly in the output: consecutive
+                // segments running 399→406 then 1.5→6.8). Over HLS that is what
+                // EXT-X-DISCONTINUITY is for and the player rides it; over DLNA
+                // the picture is one continuous file with no way to signal a
+                // reset, so the television's clock lurches every time — the
+                // "jumping around". setpts=N/FRAME_RATE/TB relabels each frame
+                // by its output index instead of its source timestamp, so the
+                // clock only ever climbs, whatever the input does. Unlike
+                // -fps_mode cfr (tried, and it wedged: CFR waits for input time
+                // to climb back past what it wrote, and an ad reset never does)
+                // this drops and duplicates nothing — it renumbers frames that
+                // are already flowing, so it cannot stall.
                 args.AddRange(new[] { "-vf",
-                    "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:-1:-1,setsar=1" });
+                    "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:-1:-1,setsar=1,setpts=N/FRAME_RATE/TB" });
             }
             args.AddRange(AudioEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase)
                 ? new[] { "-c:a", "copy" }
                 : new[] { "-c:a", AudioEncoder, "-b:a", "160k", "-ac", "2" });
+
+            // The audio half of the same flatten: relabel by sample count so
+            // the audio clock climbs monotonically across the same splices, and
+            // aresample=async fills or trims the gap a reset leaves so the track
+            // stays level with the renumbered video. Only when both tracks are
+            // being re-encoded — a copied track keeps its original timestamps
+            // and cannot be relabelled on the way through.
+            var flattenTimeline = !remuxAll
+                && !VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase)
+                && !AudioEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase);
+            if (flattenTimeline)
+                args.AddRange(new[] { "-af", "aresample=async=1,asetpts=N/SR/TB" });
 
             // Tried and reverted: -fps_mode cfr, to force a monotonic output
             // timeline over an input whose timestamps restart at every ad
