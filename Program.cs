@@ -363,6 +363,12 @@ try
         {
             try { ffmpeg.CheckLiveJobs(); }
             catch (Exception ex) { Log.Warn("ffmpeg", $"watchdog: {ex.Message}"); }
+            // The batch queue rides the same tick: it advances only on one-shot
+            // events, so if one is ever dropped this re-arms it. Kept apart from
+            // the channel check above so an exception in one cannot skip the
+            // other — a channel fault must never be what stalls conversion.
+            try { ffmpeg.KickVodQueue(); }
+            catch (Exception ex) { Log.Warn("ffmpeg", $"queue watchdog: {ex.Message}"); }
         }, null, dueTime: 30_000, period: 30_000);
 
         // Announce on the network. Started after the control API is listening,

@@ -1091,6 +1091,30 @@ public sealed class FfmpegManager : IDisposable
         return n;
     }
 
+    /// <summary>
+    /// A periodic safety net for the batch queue, called by the watchdog.
+    ///
+    /// The pump advances only on a one-shot event: a conversion's completion
+    /// handler, or a single stagger timer. Each schedules the next and then is
+    /// gone. If one is ever dropped — a thread-pool starved by a storm of
+    /// channels failing on a lost network, a swallowed callback, any hiccup —
+    /// nothing re-arms it, and a full queue waits for ever with nothing
+    /// running. That is a real failure seen in the field: a network outage
+    /// took the live channels down, and the local conversion queue, which
+    /// needs no network at all, stalled silently alongside them because it
+    /// shared the process the storm had jammed. This kick re-arms the pump
+    /// every watchdog tick, so a stall can never outlive one interval.
+    /// </summary>
+    public void KickVodQueue()
+    {
+        if (!Available || _disposed || _vodQueue.IsEmpty) return;
+        // Waiting files with nothing running is the stall itself — the pump
+        // has no in-flight job whose finish would ever wake it. Worth a line.
+        if (ActiveVodStreams.Count == 0)
+            Log.Info("ffmpeg", $"transcode watchdog: {_vodQueue.Count} file(s) waiting, none running — restarting the queue");
+        PumpVodQueue();
+    }
+
     private void PumpVodQueue()
     {
         if (!Available || _disposed) return;
