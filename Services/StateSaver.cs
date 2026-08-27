@@ -38,8 +38,16 @@ public sealed class StateSaver : IDisposable
         AppDomain.CurrentDomain.ProcessExit += (_, _) => SaveAll("exit");
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
         {
+            // The full exception, not just its Message. A message like
+            // "Collection was modified; enumeration operation may not execute"
+            // names the fault but not the collection or the thread — and this
+            // is the last thing the process logs before it dies, so the stack
+            // trace here is the only record of where it happened. ToString()
+            // carries the trace and any inner exceptions; Message threw one of
+            // these away and left a crash that could not be located.
+            var ex = e.ExceptionObject as Exception;
             Log.Error("state", "crashing — saving what is in memory first: "
-                + (e.ExceptionObject as Exception)?.Message);
+                + (ex?.ToString() ?? e.ExceptionObject?.ToString() ?? "unknown"));
             SaveAll("crash");
         };
     }
