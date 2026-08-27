@@ -3923,14 +3923,13 @@ public sealed partial class ControlApi : IDisposable
                 hls.loadSource(src);
                 hls.attachMedia(v);
 
-                // Autoplay with sound — exactly the way the first build did it.
-                // The <video autoplay> attribute starts playback once hls.js has
-                // the media ready; a browser that permits autoplay-with-sound (a
-                // media server you use constantly earns that standing) begins
-                // with audio. This bare play() is only a nudge for it and never
-                // mutes. Every "fix" that added a muted fallback here is what
-                // regressed it to a silent start; muting is deliberately gone.
-                hls.on(Hls.Events.MANIFEST_PARSED, () => { v.play().catch(() => {}); });
+                // Autoplay with sound — exactly the way the first build did it:
+                // the <video autoplay> attribute alone, with NO programmatic
+                // play() here. A deferred programmatic play() suppresses the
+                // browser's own declarative autoplay, which is what stopped the
+                // auto-start; and a muted fallback is what silenced it. Both are
+                // deliberately absent. hls.js attaches the media above and the
+                // autoplay attribute starts it, with audio, as it always did.
 
                 hls.on(Hls.Events.LEVEL_LOADED, (_, d) => {
                   if (d && d.details) live = !!d.details.live;
