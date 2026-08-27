@@ -1163,7 +1163,13 @@ public sealed class HlsServer : IDisposable
                 }
               }, true);
 
-              v.play().catch(() => {}); // autoplay may need a tap; controls are visible
+              // Autoplay with sound. A pasted link has no user gesture, so an
+              // unmuted autoplay is refused; muted autoplay is always allowed,
+              // so start muted and unmute the moment it is playing — it starts
+              // at once and does not stay muted.
+              v.muted = true;
+              v.play().then(() => { v.muted = false; })
+                      .catch(() => { v.muted = false; });
             </script>
             </body>
             </html>

@@ -3923,12 +3923,17 @@ public sealed partial class ControlApi : IDisposable
                 hls.loadSource(src);
                 hls.attachMedia(v);
 
-                // Start playing once the manifest is in, with sound. The
-                // autoplay attribute alone can leave the video waiting for a
-                // click when this page is opened in a fresh tab, so ask
-                // explicitly. Never muted — that was a testing shim; the
-                // viewer's media starts with its audio.
-                hls.on(Hls.Events.MANIFEST_PARSED, () => { v.play().catch(() => {}); });
+                // Autoplay with sound. A link pasted into a fresh tab carries
+                // no user gesture, so the browser refuses to start an unmuted
+                // video on its own — which is what left it waiting for a play
+                // click. Muted autoplay is always allowed, so start muted so it
+                // rolls immediately, then unmute the moment it is playing. It
+                // does not sit muted; the sound comes on as it starts.
+                hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                  v.muted = true;
+                  v.play().then(() => { v.muted = false; })
+                          .catch(() => { v.muted = false; });
+                });
 
                 hls.on(Hls.Events.LEVEL_LOADED, (_, d) => {
                   if (d && d.details) live = !!d.details.live;
