@@ -3923,6 +3923,31 @@ public sealed partial class ControlApi : IDisposable
                 hls.loadSource(src);
                 hls.attachMedia(v);
 
+                // Autoplay. The autoplay attribute alone is not enough: this
+                // page opens in a new tab, so the click that opened it counted
+                // as a gesture in the dashboard tab, not here, and the browser
+                // refuses to start an unmuted video on its own — which is why
+                // it sat waiting for a play click. Try with sound; if refused,
+                // start muted (the picture moves at once, which is what "it
+                // should just start" means) and offer one tap for sound.
+                function tapForSound() {
+                  if (document.getElementById("unmute")) return;
+                  const b = document.createElement("button");
+                  b.id = "unmute"; b.textContent = "🔊 Tap for sound";
+                  b.style.cssText = "position:fixed;top:12px;left:12px;z-index:9;padding:8px 14px;"
+                    + "font:inherit;font-size:14px;border-radius:10px;border:1px solid #0006;"
+                    + "background:#000b;color:#fff;cursor:pointer";
+                  b.onclick = () => { v.muted = false; v.play().catch(() => {}); b.remove(); };
+                  document.body.appendChild(b);
+                }
+                function kick() {
+                  v.play().catch(() => {                 // unmuted refused
+                    v.muted = true;                      // muted autoplay is always allowed
+                    v.play().then(tapForSound).catch(() => {});
+                  });
+                }
+                hls.on(Hls.Events.MANIFEST_PARSED, kick);
+
                 hls.on(Hls.Events.LEVEL_LOADED, (_, d) => {
                   if (d && d.details) live = !!d.details.live;
                 });
