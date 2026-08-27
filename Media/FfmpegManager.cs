@@ -1700,14 +1700,25 @@ public sealed class FfmpegManager : IDisposable
             // the only recovery that costs the viewer nothing.
             args.AddRange(new[]
             {
-                "-rw_timeout", "6000000",               // µs — 6s
+                // Patience, tuned to match the native app. Watching these same
+                // links in the provider's own player is rock-solid for hours,
+                // which says the source is fine and our ingest was too quick to
+                // give up: a 6-second read timeout killed the pull the moment a
+                // playlist or segment was slow (the -138 deaths), and a 45s
+                // reconnect budget capped in-process recovery short. Every one
+                // of those exits is a process restart, and every restart resets
+                // the timeline — the jumping. So: wait 20s on a read before
+                // calling it dead, and reconnect in place for up to two minutes
+                // rather than exiting. The watchdog window below is widened to
+                // match, so it cannot kill a job that is busy recovering.
+                "-rw_timeout", "20000000",              // µs — 20s
                 "-reconnect", "1",
                 "-reconnect_streamed", "1",
                 "-reconnect_on_network_error", "1",
-                "-reconnect_on_http_error", "5xx",
-                "-reconnect_delay_max", "2",
-                "-reconnect_max_retries", "8",
-                "-reconnect_delay_total_max", "45",
+                "-reconnect_on_http_error", "5xx",     // never 4xx: a 404 is a rotated-out segment to skip, not retry
+                "-reconnect_delay_max", "4",
+                "-reconnect_max_retries", "30",
+                "-reconnect_delay_total_max", "120",
                 // A fresh connection per segment, rather than one kept open.
                 //
                 // "Error reading HTTP response: End of file" is what the log
@@ -2115,12 +2126,16 @@ public sealed class FfmpegManager : IDisposable
                 }
                 catch { continue; }
 
-                // 90s. It was briefly 45s, and wedge reports roughly doubled:
-                // a channel riding out an ad splice can legitimately go
-                // quiet for most of a minute, and killing it then is not a
-                // rescue, it is the interruption. The watchdog is for jobs
-                // that are gone, not jobs that are slow.
-                if (DateTime.UtcNow - newest > TimeSpan.FromSeconds(90))
+                // 210s, wider than the 120s in-process reconnect budget above.
+                // A kill here is itself a restart, and a restart resets the
+                // timeline — the jumping — so the watchdog must fire only when
+                // ffmpeg's own patient reconnect has genuinely given up, never
+                // in the middle of it. It was 90s, back when a read timed out
+                // in 6s and recovery was a 45s affair; now that a read waits
+                // 20s and reconnect runs up to two minutes, 90s would shoot a
+                // job that was busy recovering. The watchdog is for jobs that
+                // are gone, not jobs that are slow.
+                if (DateTime.UtcNow - newest > TimeSpan.FromSeconds(210))
                     stale.Add((stream, _channels.FirstOrDefault(c => ChannelStream(c.Name) == stream)?.Name ?? stream));
             }
         }
