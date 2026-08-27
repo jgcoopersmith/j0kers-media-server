@@ -311,26 +311,16 @@ public sealed class DlnaLive : IDisposable
                 res.StatusCode = partial ? 206 : 200;
                 res.ContentType = "video/mp2t";
                 res.ContentLength64 = to - from + 1;
-                // Advertised as a live, server-paced stream, NOT a seekable file.
-                //
-                // The bug this fixes: with OP=01 (byte-range seek allowed) and a
-                // 32 GB size, the television treated a live channel as a huge
-                // scrubbable video and opened a storm of range requests to seek
-                // and buffer through it — 40 connections, 19 in one second, each
-                // landing somewhere in 32 GB where almost nothing exists. That
-                // was the "jumping around". A live broadcast is not seekable, so
-                // say so: OP=00 (no byte seek), and the sender-paced flag
-                // (0x80000000) that tells the set the server controls the rate
-                // and it should just play what arrives. Content-Length stays, so
-                // the set still accepts it (a plain chunked stream it rejected
-                // outright) — it simply must not seek within it.
-                // Kept as bytes so the set's opening bytes=0- request (many
-                // send one to start playback) is answered; OP=00 above is the
-                // authoritative DLNA signal that it must not seek beyond that.
+                // OP=01 (seekable). This set will NOT start playback without
+                // it — OP=00 gave three bouncing dots for ever, the same as the
+                // chunked stream it rejected. So it must be advertised seekable,
+                // and the seeking that invites is dealt with below by mapping a
+                // range request onto the live buffer rather than fighting the
+                // profile the set demands.
                 res.Headers["Accept-Ranges"] = "bytes";
                 res.Headers["transferMode.dlna.org"] = "Streaming";
                 res.Headers["contentFeatures.dlna.org"] =
-                    "DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=81300000000000000000000000000000";
+                    "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
                 if (partial) res.Headers["Content-Range"] = $"bytes {from}-{to}/{AdvertisedBytes}";
                 if (ctx.Request.HttpMethod == "HEAD") { res.Close(); return; }
 

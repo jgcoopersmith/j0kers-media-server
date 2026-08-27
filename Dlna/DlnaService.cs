@@ -398,11 +398,9 @@ public sealed class DlnaService
     {
         var id = LiveItemPrefix + stream;
         var url = $"{baseUrl}/dlna/live?ch={Uri.EscapeDataString(stream)}";
-        // Live, sender-paced, NOT seekable — must match what DlnaLive serves.
-        // OP=00 stops the set treating the channel as a scrubbable file and
-        // opening a storm of range-seek connections into a mostly-empty 32 GB;
-        // the 0x80000000 flag marks it server-paced live. See DlnaLive.Serve.
-        var protocolInfo = "http-get:*:video/mp2t:DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=81300000000000000000000000000000";
+        // OP=01 (seekable) — this set refuses to start a stream advertised
+        // OP=00 (three bouncing dots for ever). Must match DlnaLive.Serve.
+        var protocolInfo = "http-get:*:video/mp2t:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
         return $"""<item id="{Escape(id)}" parentID="{LiveRootId}" restricted="1"><dc:title>{Escape(name)}</dc:title><upnp:class>object.item.videoItem.videoBroadcast</upnp:class><res protocolInfo="{protocolInfo}" size="{DlnaLive.AdvertisedBytes}">{Escape(url)}</res></item>""";
     }
 
