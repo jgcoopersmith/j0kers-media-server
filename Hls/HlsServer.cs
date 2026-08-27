@@ -278,6 +278,20 @@ public sealed class HlsServer : IDisposable
             }
 
             var streamDir = SafeStreamDirectory(parts[0]);
+            // Tune-on-demand: a request for a channel's playlist starts its
+            // restream if it is not already running, so picking a channel in
+            // any player brings it up like live TV — the reason a channel that
+            // was merely "off" looked broken. Wait briefly for the first
+            // playlist so the player gets a real answer, not a 404 it gives up
+            // on. Transient: it does not persist the channel as auto-start.
+            if (streamDir is not null && parts.Length == 2
+                && (parts[1] is "index.m3u8" or "master.m3u8" or "playlist.m3u8")
+                && Ffmpeg?.EnsureChannelRunning(parts[0]) == true)
+            {
+                var firstPlaylist = Path.Combine(streamDir, "index.m3u8");
+                for (var i = 0; i < 48 && !File.Exists(firstPlaylist); i++)
+                    System.Threading.Thread.Sleep(250);            // up to ~12s for the first playlist
+            }
             if (streamDir is null || !Directory.Exists(streamDir))
             {
                 WriteText(res, 404, "text/plain", "unknown stream");

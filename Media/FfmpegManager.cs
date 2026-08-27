@@ -1524,6 +1524,33 @@ public sealed class FfmpegManager : IDisposable
         return stream;
     }
 
+    /// <summary>
+    /// Tune-on-demand: starts a channel's restream when a player asks for its
+    /// playlist, so picking a channel brings it up like a TV. Transient — it
+    /// does not persist the channel as auto-start, only gets it running now.
+    ///
+    /// Returns true only when it was started just now, so the caller can wait a
+    /// moment for the first segment; false if it is already running or the
+    /// stream is not a known channel (an ordinary media stream, served as-is).
+    /// </summary>
+    public bool EnsureChannelRunning(string stream)
+    {
+        if (!Available) return false;
+        lock (_lock)
+        {
+            var def = _channels.FirstOrDefault(c => ChannelStream(c.Name) == stream);
+            if (def is null) return false;
+            if (_liveJobs.TryGetValue(stream, out var p))
+            {
+                bool alive; try { alive = !p.HasExited; } catch { alive = false; }
+                if (alive) return false;                    // already running
+            }
+            StartLiveJob(def.Name, def.Url);
+            Log.Info("ffmpeg", $"tune-on-demand: starting channel {def.Name}");
+            return true;
+        }
+    }
+
     /// <summary>Starts a saved channel's restream and remembers that it should be running.</summary>
     public bool StartChannel(string name)
     {
