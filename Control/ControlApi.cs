@@ -812,6 +812,23 @@ public sealed partial class ControlApi : IDisposable
                 return;
             }
 
+            // An M3U playlist of the live channels — the transport live TV
+            // actually uses. A TV's IPTV app, or a PVR backend (Plex, Jellyfin,
+            // Channels), consumes this as live TV, where the DLNA file-browser
+            // never could. Authorized by a media token in the URL, the same
+            // signature the stream links carry, so it is one self-contained
+            // link an app can hold; each entry points at the channel's own HLS
+            // output — the full-resolution, remuxed, now-stable restream —
+            // carrying that same token so playback needs no separate sign-in.
+            if (method == "GET" && path == "/api/tv/playlist.m3u")
+            {
+                if (!_mediaLinks.Verify(Auth.MediaLink.AllStreams,
+                        ctx.Request.QueryString["exp"], ctx.Request.QueryString["sig"]))
+                { res.StatusCode = 401; res.Close(); return; }
+                WriteTvPlaylistM3u(ctx);
+                return;
+            }
+
             // Everything else is gated. Administration (configuration, the
             // power button, accounts, the filesystem picker) needs an admin;
             // watching needs any account.
@@ -4222,6 +4239,40 @@ public sealed partial class ControlApi : IDisposable
         res.ContentType = "application/json";
         res.ContentLength64 = bytes.Length;
         res.OutputStream.Write(bytes);
+    }
+
+    private void WriteText(HttpListenerResponse res, int status, string contentType, string text)
+    {
+        var bytes = Encoding.UTF8.GetBytes(text);
+        res.StatusCode = status;
+        res.ContentType = contentType;
+        res.ContentLength64 = bytes.Length;
+        res.OutputStream.Write(bytes);
+    }
+
+    /// <summary>
+    /// The live-channel M3U. Each channel points at its own HLS output on the
+    /// media port, carrying the caller's media token so an app plays it with no
+    /// separate sign-in. Host comes from the request so the links resolve to
+    /// whatever address the app reached the server on.
+    /// </summary>
+    private void WriteTvPlaylistM3u(HttpListenerContext ctx)
+    {
+        var token = $"exp={ctx.Request.QueryString["exp"]}&sig={ctx.Request.QueryString["sig"]}";
+        var host = (ctx.Request.Headers["Host"] ?? ctx.Request.Url?.Host ?? BoundHost).Split(':')[0];
+        var baseUrl = $"{Services.UrlScheme.Prefix}{host}:{_serverConfig.Hls.Port}";
+
+        var sb = new System.Text.StringBuilder();
+        sb.Append("#EXTM3U\n");
+        if (_ffmpeg is not null)
+            foreach (var (def, stream, _) in _ffmpeg.Channels)
+            {
+                var name = def.Name.Replace('"', '\'');
+                var url = $"{baseUrl}/{Uri.EscapeDataString(stream)}/index.m3u8?{token}";
+                sb.Append($"#EXTINF:-1 tvg-name=\"{name}\" group-title=\"Live TV\",{name}\n");
+                sb.Append(url).Append('\n');
+            }
+        WriteText(ctx.Response, 200, "application/x-mpegurl", sb.ToString());
     }
 
     public void Dispose()
