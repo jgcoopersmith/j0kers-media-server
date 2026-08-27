@@ -1096,6 +1096,14 @@ public sealed class FfmpegManager : IDisposable
         if (!Available || _disposed) return;
         lock (_pumpLock)
         {
+            // Whether anything left the queue this pass — a start, but also a
+            // skip. A file that was queued and has since been deleted, or that
+            // some other run already converted, is dequeued and passed over;
+            // saving only on a successful start would leave it listed on disk
+            // for ever, restored and skipped again on every restart.
+            var dequeued = false;
+            try
+            {
             while (ActiveVodStreams.Count < MaxConcurrentVod && !_vodQueue.IsEmpty)
             {
                 // Stagger: leave the configured gap between one start and the
@@ -1118,20 +1126,26 @@ public sealed class FfmpegManager : IDisposable
                 }
 
                 if (!_vodQueue.TryDequeue(out var file)) break;
+                dequeued = true;
                 try
                 {
                     if (VodStatusFor(file) is VodState.Done or VodState.Converting) continue;
                     if (!File.Exists(file)) continue;
                     StartVod(file);   // registers the job; its exit pumps the queue again
                     _lastVodStartUtc = DateTime.UtcNow;
-                    // the file has left the queue and become an in-flight job;
-                    // record the new shape of what is still owed
-                    SaveQueueState();
                 }
                 catch (Exception ex)
                 {
                     Log.Warn("ffmpeg", $"could not start queued conversion of {Path.GetFileName(file)}: {ex.Message}");
                 }
+            }
+            }
+            finally
+            {
+                // Once per pass, and on every way out of it — including the
+                // stagger's early return — so what is on disk matches what is
+                // actually still owed.
+                if (dequeued) SaveQueueState();
             }
         }
     }
