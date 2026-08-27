@@ -782,6 +782,9 @@
 
   <div class="card server-admin-only" id="logcard">
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Log</span>
+      <select id="log-file" class="am-in" style="width:auto;max-width:230px" onchange="onLogFileChange()" onfocus="loadLogFiles()" title="Live view, or an earlier log file from disk (last night, a crash, a previous run)">
+        <option value="">🔴 Live</option>
+      </select>
       <select id="log-filter" class="am-in" style="width:auto" onchange="onLogFilterChange()" title="Sets what the server actually logs, not just what's shown here">
         <option value="TRACE">Everything</option>
         <option value="DEBUG">Debug and up</option>
@@ -2451,6 +2454,7 @@ const LOG_LEVELS = { TRACE: 0, DEBUG: 1, INFO: 2, WARN: 3, ERROR: 4 };
 const LOG_KEEP = 500;              // matches the server's ring
 let logLines = [], logSeq = 0, logFollow = true, logMissed = false;
 let logLevelSynced = false;
+let logViewFile = "";              // "" = live ring; otherwise a rotated file on disk
 
 async function refreshLog() {
   // the dropdown on the log card IS the server's real logging level, not
@@ -2462,7 +2466,11 @@ async function refreshLog() {
       const s = await api("/api/settings");
       if (s.logLevel) $("log-filter").value = s.logLevel.toUpperCase();
     } catch { /* keep the dropdown's default */ }
+    loadLogFiles();               // fill the history picker once, at startup
   }
+  // Reviewing a file from disk: the live poll must not overwrite it. It resumes
+  // the moment the picker is set back to Live.
+  if (logViewFile) return;
   let data;
   try { data = await api("/api/log?since=" + logSeq); }
   catch { return; }               // not an admin, or the server blinked
@@ -2487,6 +2495,49 @@ async function onLogFilterChange() {
     });
     if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || "could not change the log level"); }
   } catch { alert("could not reach the server to change the log level"); }
+}
+
+// The rotated log files on disk, so earlier sessions (last night, a crash) can
+// be reviewed here — the live view above is only ever the current run.
+async function loadLogFiles() {
+  try {
+    const d = await api("/api/log/files");
+    const sel = $("log-file");
+    const keep = sel.value;
+    let h = '<option value="">🔴 Live</option>';
+    for (const f of d.files) {
+      const when = new Date(f.modified).toLocaleString();
+      const mb = f.bytes < 1048576 ? (f.bytes / 1024).toFixed(0) + " KB"
+                                   : (f.bytes / 1048576).toFixed(1) + " MB";
+      const label = (f.active ? "● current · " : "") + when + " · " + mb;
+      h += '<option value="' + esc(f.name) + '">' + esc(label) + "</option>";
+    }
+    sel.innerHTML = h;
+    sel.value = keep;             // keep the current selection across a refresh
+  } catch { /* not an admin, or the server blinked */ }
+}
+
+async function onLogFileChange() {
+  logViewFile = $("log-file").value;
+  const box = $("log");
+  if (!logViewFile) {            // back to the live ring
+    logLines = []; logSeq = 0; logMissed = false; logFollow = true; paintLogFollow();
+    box.innerHTML = '<div style="color:var(--muted)">resuming live…</div>';
+    refreshLog();
+    return;
+  }
+  box.innerHTML = '<div style="color:var(--muted)">loading ' + esc(logViewFile) + "…</div>";
+  try {
+    const d = await api("/api/log/file?name=" + encodeURIComponent(logViewFile));
+    const note = d.truncated
+      ? '<div style="color:var(--muted)">… showing the last ' + d.shown + " lines of " + esc(d.name) + "</div>\n"
+      : "";
+    box.innerHTML = note
+      + '<div style="white-space:pre-wrap;word-break:break-word;color:var(--ink-2)">' + esc(d.text) + "</div>";
+    box.scrollTop = box.scrollHeight;
+  } catch {
+    box.innerHTML = '<div style="color:var(--critical)">could not load ' + esc(logViewFile) + "</div>";
+  }
 }
 
 function renderLog() {

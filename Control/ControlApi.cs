@@ -550,6 +550,8 @@ public sealed partial class ControlApi : IDisposable
             // revealing thing the server holds, so it belongs to whoever
             // runs the machine rather than to whoever runs the library
             case "/api/log":
+            case "/api/log/files":   // listing the rotated history
+            case "/api/log/file":    // reading one rotated file
             // batch transcoding runs the machine hard and reaches any path on
             // disk, the same class of power as the log and the config
             case "/api/transcode":
@@ -1214,6 +1216,77 @@ public sealed partial class ControlApi : IDisposable
                     missed,
                     level = _serverConfig.Logging.Level,
                     file = Log.FilePath,
+                });
+                return;
+            }
+
+            // The rotated history on disk, so the log window can review earlier
+            // sessions — the crash last night, say — not only the live ring
+            // buffer, which starts empty on every restart. Newest first; the
+            // active file is flagged so the UI can label it "current".
+            if (method == "GET" && path == "/api/log/files")
+            {
+                var dir = _serverConfig.Logging.ResolveDirectory(_baseDirectory);
+                var activeName = Log.FilePath is null ? null : Path.GetFileName(Log.FilePath);
+                WriteJson(res, 200, new
+                {
+                    dir,
+                    files = Log.Files(dir).Select(f => new
+                    {
+                        name = f.Name,
+                        bytes = f.Bytes,
+                        modified = f.Modified,
+                        active = f.Name.Equals(activeName, StringComparison.OrdinalIgnoreCase),
+                    }),
+                });
+                return;
+            }
+
+            // One rotated file's tail, as raw text. Raw, not parsed into
+            // entries: a crash's stack trace spans many lines and is the whole
+            // reason to read history, so it is shown exactly as written rather
+            // than flattened into one message per line.
+            if (method == "GET" && path == "/api/log/file")
+            {
+                var name = ctx.Request.QueryString["name"] ?? "";
+                var take = int.TryParse(ctx.Request.QueryString["max"], out var mx) ? Math.Clamp(mx, 50, 5000) : 2000;
+                var dir = _serverConfig.Logging.ResolveDirectory(_baseDirectory);
+
+                // Only a file the listing actually offers — no path the caller
+                // typed. This blocks "../" and any name that is not a real log
+                // file in the log directory.
+                var known = Log.Files(dir).FirstOrDefault(f =>
+                    f.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+                if (known.Name is null)
+                {
+                    WriteJson(res, 404, new { error = "no such log file" });
+                    return;
+                }
+
+                var full = Path.Combine(dir, known.Name);
+                string[] lines;
+                try
+                {
+                    // shared read: the active file is being written to right now
+                    using var fs = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    using var sr = new StreamReader(fs);
+                    lines = sr.ReadToEnd().Split('\n');
+                }
+                catch (Exception ex)
+                {
+                    WriteJson(res, 500, new { error = "could not read: " + ex.Message });
+                    return;
+                }
+
+                var truncated = lines.Length > take;
+                var tail = truncated ? lines[^take..] : lines;
+                WriteJson(res, 200, new
+                {
+                    name = known.Name,
+                    bytes = known.Bytes,
+                    truncated,
+                    shown = tail.Length,
+                    text = string.Join("\n", tail),
                 });
                 return;
             }
