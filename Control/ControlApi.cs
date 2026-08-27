@@ -3923,26 +3923,14 @@ public sealed partial class ControlApi : IDisposable
                 hls.loadSource(src);
                 hls.attachMedia(v);
 
-                // Autoplay, with sound. Try unmuted first — this is the form
-                // that worked: a browser that allows autoplay-with-sound (this
-                // one does) starts playing with audio at once. Only if it
-                // refuses fall back to a muted start so it still autoplays, and
-                // unmute on the first interaction anywhere on the page. Never
-                // start muted outright: unmuting a muted autoplay makes the
-                // browser pause it, which is what killed autoplay before.
-                hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                  v.play().catch(() => {
-                    v.muted = true;
-                    v.play().catch(() => {});
-                    const unmute = () => {
-                      v.muted = false;
-                      document.removeEventListener("pointerdown", unmute);
-                      document.removeEventListener("keydown", unmute);
-                    };
-                    document.addEventListener("pointerdown", unmute);
-                    document.addEventListener("keydown", unmute);
-                  });
-                });
+                // Autoplay with sound — exactly the way the first build did it.
+                // The <video autoplay> attribute starts playback once hls.js has
+                // the media ready; a browser that permits autoplay-with-sound (a
+                // media server you use constantly earns that standing) begins
+                // with audio. This bare play() is only a nudge for it and never
+                // mutes. Every "fix" that added a muted fallback here is what
+                // regressed it to a silent start; muting is deliberately gone.
+                hls.on(Hls.Events.MANIFEST_PARSED, () => { v.play().catch(() => {}); });
 
                 hls.on(Hls.Events.LEVEL_LOADED, (_, d) => {
                   if (d && d.details) live = !!d.details.live;
