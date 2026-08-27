@@ -1094,7 +1094,9 @@
       <b>Admin</b> — full access, including the Config dialog, the power button, and these accounts.<br>
       <b>Edit</b> — adds and removes library folders, channels, mounts, playlists and streams, but can't
       reach the Config dialog or accounts.<br>
-      <b>Read</b> — watches what's been shared, and nothing else.
+      <b>Read</b> — watches what's been shared, and nothing else.<br>
+      <b>Passwordless</b> — a Read account that signs in with its username alone, no password. For letting
+      family or guests watch without a shared credential; anyone who knows the username can watch.
     </div>
     <div id="users-list" style="margin-top:12px"></div>
 
@@ -1110,6 +1112,7 @@
       </select>
       <button class="go" onclick="createUser()">Add</button>
     </div>
+    <label class="chk" style="margin-top:6px"><input type="checkbox" id="nu-guest" onchange="syncGuest('nu')"><span>Passwordless (read-only) — signs in with the username alone, no password</span></label>
     <div id="users-msg" class="msg"></div>
     <div class="row"><button onclick="closeOverlay('users-overlay')">Close</button></div>
   </div>
@@ -1614,7 +1617,8 @@ async function loadUsers() {
   $("users-list").innerHTML = data.users.map(u => {
     const badges = '<span class="badge ' + esc(u.role) + '">' + esc(u.roleLabel || u.role) + "</span>"
       + (u.enabled ? "" : '<span class="badge off">disabled</span>')
-      + (u.hasPassword ? "" : '<span class="badge">key only</span>')
+      + (u.passwordless ? '<span class="badge">passwordless</span>'
+                        : u.hasPassword ? "" : '<span class="badge">key only</span>')
       + (u.self ? '<span class="badge">you</span>' : "");
     return '<div class="usr">'
       + '<div class="top"><span class="nm">' + esc(u.displayName || u.username) + "</span>" + badges
@@ -1632,6 +1636,24 @@ async function loadUsers() {
   }).join("") || '<div class="empty">No accounts yet.</div>';
 }
 
+/* Passwordless is read-only, so its password and role controls have nothing
+   to say — grey them out (and pin the role to read) whenever it is ticked.
+   Works for both the add row (prefix "nu") and an edit panel (prefix "ue"). */
+function syncGuest(prefix, id) {
+  const s = id ? "-" + id : "";
+  const cb = $(prefix + "-guest" + s);
+  if (!cb) return;
+  const on = cb.checked;
+  const pass = $(prefix + "-pass" + s), role = $(prefix + "-role" + s);
+  if (pass) {
+    if (pass.dataset.ph === undefined) pass.dataset.ph = pass.placeholder;
+    pass.disabled = on;
+    if (on) pass.value = "";
+    pass.placeholder = on ? "no password — signs in by username" : pass.dataset.ph;
+  }
+  if (role) { role.disabled = on; if (on) role.value = "read"; }
+}
+
 async function createUser() {
   const msg = $("users-msg");
   msg.className = "msg";
@@ -1639,9 +1661,11 @@ async function createUser() {
     username: $("nu-name").value.trim(),
     password: $("nu-pass").value,
     role: $("nu-role").value,
+    passwordless: $("nu-guest").checked,
   });
   if (!ok) { msg.textContent = data.error || "could not create the account"; return; }
   $("nu-name").value = $("nu-pass").value = "";
+  $("nu-guest").checked = false; syncGuest("nu");
   msg.className = "msg ok";
   msg.textContent = "Account created.";
   loadUsers();
@@ -1669,12 +1693,14 @@ async function toggleUserEdit(id) {
         '<option value="' + r + '"' + (u.role === r ? " selected" : "") + ">" + label + "</option>").join("")
     + "</select>"
     + '<label class="chk" style="margin:0"><input type="checkbox" id="ue-on-' + id + '"' + (u.enabled ? " checked" : "") + "><span>enabled</span></label>"
+    + '<label class="chk" style="margin:0"><input type="checkbox" id="ue-guest-' + id + '"' + (u.passwordless ? " checked" : "") + ' onchange="syncGuest(\'ue\',\'' + id + '\')"><span>passwordless (read-only)</span></label>'
     + "</div>"
     + '<div style="display:flex;gap:8px;margin-top:8px">'
     + '<input class="am-in" type="password" id="ue-pass-' + id + '" placeholder="set a new password (optional)" style="flex:1" autocomplete="new-password">'
     + '<button class="go" data-act="usr-save" data-arg="' + id + '">Save</button></div>'
     + '<div class="msg" id="ue-msg-' + id + '"></div>';
   decoratePasswords(box);   // the box was just built, so its field has no eye yet
+  syncGuest("ue", id);      // grey out password/role if it is already passwordless
 }
 
 async function saveUser(id) {
@@ -1685,9 +1711,10 @@ async function saveUser(id) {
     displayName: $("ue-disp-" + id).value.trim(),
     role: $("ue-role-" + id).value,
     enabled: $("ue-on-" + id).checked,
+    passwordless: $("ue-guest-" + id).checked,
   };
   const pass = $("ue-pass-" + id).value;
-  if (pass) body.password = pass;
+  if (pass && !body.passwordless) body.password = pass;
   const [ok, data] = await send("PUT", "/api/users?id=" + encodeURIComponent(id), body);
   if (!ok) { msg.textContent = data.error || "could not save"; return; }
   userPanel(id).style.display = "none";

@@ -355,6 +355,20 @@ public sealed class AuthService
             return new LoginOutcome(false, null, null, "too many failed attempts — try again shortly", b);
         }
 
+        // A deliberately-open, read-only account signs in on its username alone.
+        // No password to verify, so nothing to throttle or brute-force; the
+        // account is Read-only and was marked open on purpose in the Users
+        // dialog. A password sent along with it is simply ignored.
+        if (_users.FindPasswordless(username) is UserAccount open)
+        {
+            _throttles.TryRemove(nameKey, out _);
+            _throttles.TryRemove(addrKey, out _);
+            if (ReadSessionCookie(ctx) is string prior0) _sessions.TryRemove(Digest(prior0), out _);
+            _users.TouchLogin(open);
+            Log.Info("auth", $"passwordless login: {open.Username} ({open.Role}) from {client}");
+            return new LoginOutcome(true, open, OpenSession(open, ctx), null);
+        }
+
         var user = _users.VerifyPassword(username, password);
         if (user is null)
         {

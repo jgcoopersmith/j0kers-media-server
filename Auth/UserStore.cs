@@ -32,6 +32,13 @@ public sealed class UserAccount
     /// <summary>"admin" (full configuration rights) or "user" (watch only).</summary>
     [JsonPropertyName("role")] public string Role { get; set; } = UserStore.RoleRead;
     [JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
+    /// <summary>
+    /// A deliberately open, read-only account: it signs in with its username
+    /// alone, no password, and is pinned to the Read role. For letting family
+    /// or guests watch without handing out a credential. Set on purpose from
+    /// the Users dialog; never a side effect of an empty password.
+    /// </summary>
+    [JsonPropertyName("passwordless")] public bool Passwordless { get; set; }
     /// <summary>PHC-ish string, or empty for a key-only account.</summary>
     [JsonPropertyName("passwordHash")] public string PasswordHash { get; set; } = "";
     [JsonPropertyName("keys")] public List<ApiKeyRecord> Keys { get; set; } = new();
@@ -42,6 +49,8 @@ public sealed class UserAccount
     [JsonIgnore] public bool IsAdmin => UserStore.LevelOf(Role) >= AccessLevel.Admin;
     [JsonIgnore] public bool IsServerAdmin => UserStore.LevelOf(Role) >= AccessLevel.ServerAdmin;
     [JsonIgnore] public bool HasPassword => PasswordHash.Length > 0;
+    /// <summary>Signs in on username alone: enabled, and marked passwordless.</summary>
+    [JsonIgnore] public bool CanSignInWithoutPassword => Passwordless && Enabled;
 }
 
 /// <summary>
@@ -251,7 +260,8 @@ public sealed class UserStore
 
     // ---- accounts ----
 
-    public UserAccount Create(string username, string? password, string? role, string? displayName, bool enabled)
+    public UserAccount Create(string username, string? password, string? role, string? displayName, bool enabled,
+                              bool passwordless = false)
     {
         lock (_lock)
         {
@@ -263,15 +273,51 @@ public sealed class UserStore
                 Id = NewId(),
                 Username = username.Trim(),
                 DisplayName = string.IsNullOrWhiteSpace(displayName) ? username.Trim() : displayName.Trim(),
-                Role = NormalizeRole(role),
+                // passwordless is read-only by definition, and carries no password
+                Role = passwordless ? RoleRead : NormalizeRole(role),
                 Enabled = enabled,
-                PasswordHash = string.IsNullOrEmpty(password) ? "" : HashPassword(password),
+                Passwordless = passwordless,
+                PasswordHash = passwordless || string.IsNullOrEmpty(password) ? "" : HashPassword(password),
             };
             _users.Add(user);
             Save();
-            Log.Info("auth", $"user created: {user.Username} ({user.Role})");
+            Log.Info("auth", $"user created: {user.Username} ({user.Role}"
+                             + (passwordless ? ", passwordless" : "") + ")");
             return user;
         }
+    }
+
+    /// <summary>
+    /// Turns the deliberately-open, username-only sign-in on or off. Turning it
+    /// on drops any password and pins the account to Read; turning it off leaves
+    /// it key-only until an administrator sets a password.
+    /// </summary>
+    public void SetPasswordless(UserAccount user, bool value)
+    {
+        lock (_lock)
+        {
+            user.Passwordless = value;
+            if (value)
+            {
+                user.PasswordHash = "";
+                user.Role = RoleRead;
+            }
+            Save();
+            Log.Info("auth", $"passwordless {(value ? "enabled" : "disabled")} for {user.Username}");
+        }
+    }
+
+    /// <summary>The enabled, passwordless account by that name, or null.</summary>
+    public UserAccount? FindPasswordless(string? username)
+    {
+        var user = FindByName(username);
+        return user is { Enabled: true, Passwordless: true } ? user : null;
+    }
+
+    /// <summary>Records a successful sign-in time (used by the passwordless path).</summary>
+    public void TouchLogin(UserAccount user)
+    {
+        lock (_lock) { user.LastLoginUtc = DateTime.UtcNow; Save(); }
     }
 
     /// <summary>
@@ -314,7 +360,9 @@ public sealed class UserStore
     {
         lock (_lock)
         {
-            var newRole = role is null ? user.Role : NormalizeRole(role);
+            // a passwordless account is read-only, whatever role was asked for
+            var newRole = user.Passwordless ? RoleRead
+                        : role is null ? user.Role : NormalizeRole(role);
             var newEnabled = enabled ?? user.Enabled;
             var stillAdmin = newEnabled && LevelOf(newRole) >= AccessLevel.Admin;
             if (!stillAdmin && user.IsAdmin && user.Enabled && !_users.Any(u =>

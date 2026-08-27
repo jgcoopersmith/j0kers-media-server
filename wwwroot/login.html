@@ -263,9 +263,9 @@
   <label for="user">Username</label>
   <input id="user" name="username" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" required>
 
-  <label for="pass">Password</label>
+  <label for="pass">Password <span id="pass-opt" hidden style="font-weight:400;opacity:.6;font-size:.85em">· leave blank for a passwordless account</span></label>
   <div class="pw">
-    <input id="pass" name="password" type="password" autocomplete="current-password" required>
+    <input id="pass" name="password" type="password" autocomplete="current-password">
     <button type="button" class="pw-eye" data-pw="pass" title="Show password" aria-label="Show password">👁</button>
   </div>
 
@@ -338,7 +338,9 @@ async function tryRememberedKey() {
     : "Sign in to reach the dashboard.";
   $("confirm-row").hidden = !setup;
   $("pass").setAttribute("autocomplete", setup ? "new-password" : "current-password");
-  if (setup) $("pass2").required = true;
+  if (setup) { $("pass").required = true; $("pass2").required = true; }
+  // signing in (not setup): a passwordless account leaves this blank
+  else $("pass-opt").hidden = false;
 
   // a plain-HTTP bind beyond loopback means the password crosses the wire
   // in the clear — say so rather than let it pass unnoticed
@@ -357,7 +359,11 @@ $("form").addEventListener("submit", async e => {
   msg.textContent = "";
   const username = $("user").value.trim();
   const password = $("pass").value;
-  if (!username || !password) { msg.textContent = "username and password are required"; return; }
+  // A password is required to sign in normally and to set the server up, but a
+  // passwordless account signs in on its username alone — so the server, which
+  // knows which accounts are passwordless, is the one to reject a blank here.
+  if (!username) { msg.textContent = "username is required"; return; }
+  if (setup && !password) { msg.textContent = "a password is required"; return; }
   if (setup && password !== $("pass2").value) { msg.textContent = "the two passwords don't match"; return; }
 
   $("go").disabled = true;

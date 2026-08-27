@@ -30,7 +30,7 @@ public sealed partial class ControlApi
     private sealed record LoginRequest(string? username, string? password, bool? remember);
     private sealed record PasswordRequest(string? currentPassword, string? newPassword);
     private sealed record KeyRequest(string? label, int? days);
-    private sealed record UserRequest(string? username, string? password, string? displayName, string? role, bool? enabled);
+    private sealed record UserRequest(string? username, string? password, string? displayName, string? role, bool? enabled, bool? passwordless);
 
     /// <summary>
     /// Handles every /api/auth/* path. Returns false when the path isn't
@@ -340,9 +340,11 @@ public sealed partial class ControlApi
             WriteJson(res, 400, new { error = nameError });
             return;
         }
+        var passwordless = req.passwordless == true;
         // a key-only account is legitimate (a device, a script) — but an
-        // account with neither a password nor, later, a key can never sign in
-        if (!string.IsNullOrEmpty(req.password) && UserStore.ValidatePassword(req.password) is string passwordError)
+        // account with neither a password nor, later, a key can never sign in.
+        // A passwordless account carries no password at all, so skip the check.
+        if (!passwordless && !string.IsNullOrEmpty(req.password) && UserStore.ValidatePassword(req.password) is string passwordError)
         {
             WriteJson(res, 400, new { error = passwordError });
             return;
@@ -350,8 +352,9 @@ public sealed partial class ControlApi
 
         // Only a server admin may make one. Otherwise an ordinary admin
         // could mint an account above their own level and sign into it,
-        // which makes the tier decorative.
-        if (UserStore.LevelOf(req.role) >= AccessLevel.ServerAdmin && !auth.IsServerAdmin)
+        // which makes the tier decorative. (A passwordless account is Read,
+        // so this never bites it.)
+        if (!passwordless && UserStore.LevelOf(req.role) >= AccessLevel.ServerAdmin && !auth.IsServerAdmin)
         {
             WriteJson(res, 403, new { error = "only a Server Admin can create a Server Admin" });
             return;
@@ -359,7 +362,7 @@ public sealed partial class ControlApi
 
         try
         {
-            var user = _auth.Users.Create(req.username!, req.password, req.role, req.displayName, req.enabled ?? true);
+            var user = _auth.Users.Create(req.username!, req.password, req.role, req.displayName, req.enabled ?? true, passwordless);
             WriteJson(res, 200, new { user = DescribeUser(user, null) });
         }
         catch (InvalidOperationException ex)
@@ -388,11 +391,17 @@ public sealed partial class ControlApi
         // another admin exists
         var self = auth.User is not null && auth.User.Id == user.Id;
         if (self && (req.enabled == false
+                     || req.passwordless == true
                      || (req.role is not null && UserStore.LevelOf(req.role) < AccessLevel.Admin)))
         {
             WriteJson(res, 400, new { error = "you cannot remove your own administrator rights" });
             return;
         }
+
+        // passwordless is read-only; force the role so Update applies the same
+        // last-admin safety it would for any demotion to Read
+        var finalGuest = req.passwordless ?? user.Passwordless;
+        var effectiveRole = finalGuest ? UserStore.RoleRead : req.role;
 
         // Granting the top tier, or taking it away, is a server admin's
         // alone — including demoting one, which an ordinary admin doing it
@@ -406,7 +415,7 @@ public sealed partial class ControlApi
 
         try
         {
-            _auth.Users.Update(user, req.username, req.displayName, req.role, req.enabled);
+            _auth.Users.Update(user, req.username, req.displayName, effectiveRole, req.enabled);
         }
         catch (InvalidOperationException ex)
         {
@@ -414,7 +423,17 @@ public sealed partial class ControlApi
             return;
         }
 
-        if (!string.IsNullOrEmpty(req.password))
+        // Apply the passwordless change itself. Turning it on drops the
+        // password and ends any live sessions signed in with it.
+        if (req.passwordless is bool wantGuest && wantGuest != user.Passwordless)
+        {
+            _auth.Users.SetPasswordless(user, wantGuest);
+            if (wantGuest) _auth.RevokeSessionsFor(user.Id);
+        }
+
+        // A password only makes sense on a normal account; ignore one sent
+        // alongside a passwordless account.
+        if (!finalGuest && !string.IsNullOrEmpty(req.password))
         {
             if (UserStore.ValidatePassword(req.password) is string passwordError)
             {
@@ -491,6 +510,7 @@ public sealed partial class ControlApi
         roleLabel = UserStore.RoleLabel(u.Role),
         enabled = u.Enabled,
         hasPassword = u.HasPassword,
+        passwordless = u.Passwordless,
         createdUtc = u.CreatedUtc,
         lastLoginUtc = u.LastLoginUtc,
         sessions = _auth.SessionCountFor(u.Id),
