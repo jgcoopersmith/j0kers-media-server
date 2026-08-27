@@ -1163,29 +1163,7 @@ public sealed class HlsServer : IDisposable
                 }
               }, true);
 
-              // Autoplay. A browser only lets a page start video on its own
-              // when it is muted: the click that opened this tab was a gesture
-              // in the dashboard tab, not in this one, so it does not count
-              // here. Try with sound first; if the browser refuses, start muted
-              // — the picture moves at once, which is what "it should just
-              // start" means — and show a one-tap control that turns sound on.
-              function showUnmute() {
-                if (document.getElementById("unmute")) return;
-                const b = document.createElement("button");
-                b.id = "unmute";
-                b.textContent = "🔊 Tap for sound";
-                b.style.cssText = "position:fixed;top:12px;left:12px;z-index:9;padding:8px 14px;"
-                  + "font:inherit;font-size:14px;border-radius:10px;border:1px solid var(--line);"
-                  + "background:var(--surface);color:var(--ink);cursor:pointer;opacity:.95";
-                b.addEventListener("click", function () {
-                  v.muted = false; v.play().catch(function () {}); b.remove();
-                });
-                document.body.appendChild(b);
-              }
-              v.play().catch(function () {
-                v.muted = true;                       // muted autoplay is always allowed
-                v.play().then(showUnmute).catch(function () {}); // controls remain if even this is refused
-              });
+              v.play().catch(() => {}); // autoplay may need a tap; controls are visible
             </script>
             </body>
             </html>
