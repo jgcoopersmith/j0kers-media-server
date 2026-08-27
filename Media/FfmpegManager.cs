@@ -1812,6 +1812,19 @@ public sealed class FfmpegManager : IDisposable
             {
                 args.AddRange(new[] { "-c:v", VideoEncoder });
                 args.AddRange(VideoQualityArgs());
+                // Force a keyframe every segment. Without this the encoder
+                // keyframes on its own schedule and the HLS muxer — which can
+                // only cut a segment at a keyframe — produces wildly uneven
+                // lengths (seen live: a 1.33s segment next to an 8.34s one
+                // against a 4s target). Uneven segments make the live edge
+                // lurch, and the browser player seeks forward to re-sync — the
+                // small skips inside one programme. A keyframe exactly every
+                // LiveSegmentSeconds makes every segment that length. t is the
+                // post-setpts output time, so it holds whatever the source's
+                // own timing does. No quality cost at a fixed CRF beyond the
+                // few keyframe bits regular streaming already spends.
+                args.AddRange(new[] { "-force_key_frames",
+                    $"expr:gte(t,n_forced*{Inv(_config.LiveSegmentSeconds)})" });
                 // No -tune zerolatency. It was here from the day this engine
                 // was written and it costs picture: it turns off B-frames and
                 // lookahead, so at the same preset and CRF the encoder has
