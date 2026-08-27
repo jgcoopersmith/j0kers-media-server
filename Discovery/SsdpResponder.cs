@@ -312,8 +312,12 @@ public sealed class SsdpResponder : IDisposable
         try { _socket?.Close(); } catch { }
         try { _socket?.Dispose(); } catch { }
         _socket = null;
-        _locals.Clear();
-        _localMasks.Clear();
+        // Deliberately not clearing _locals/_localMasks: the receive loop and
+        // the alive-loop may still be enumerating them (BestLocalFor, and the
+        // _locals.ToList() in NotifyAsync), and closing the socket ends them
+        // but is not awaited here. This responder is discarded on Restart, so
+        // clearing achieves nothing and is the only structural mutation that
+        // could race a reader mid-walk — "Collection was modified". Drop it.
         _cts.Dispose();
     }
 }

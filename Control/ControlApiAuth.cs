@@ -104,7 +104,7 @@ public sealed partial class ControlApi
             case ("GET", "/api/auth/keys"):
             {
                 if (RequireUser(ctx, auth) is not UserAccount me) return true;
-                WriteJson(res, 200, new { keys = me.Keys.Select(DescribeKey) });
+                WriteJson(res, 200, new { keys = _auth.Users.KeysOf(me).Select(DescribeKey) });
                 return true;
             }
 
@@ -495,7 +495,7 @@ public sealed partial class ControlApi
         lastLoginUtc = u.LastLoginUtc,
         sessions = _auth.SessionCountFor(u.Id),
         self = auth?.User is not null && auth.User.Id == u.Id,
-        keys = u.Keys.Select(DescribeKey),
+        keys = _auth.Users.KeysOf(u).Select(DescribeKey),
     };
 
     private static object DescribeKey(ApiKeyRecord k) => new

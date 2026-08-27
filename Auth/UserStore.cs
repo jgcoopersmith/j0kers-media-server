@@ -142,6 +142,23 @@ public sealed class UserStore
     /// <summary>Snapshot copy — callers enumerate outside the lock.</summary>
     public IReadOnlyList<UserAccount> All { get { lock (_lock) return _users.ToArray(); } }
 
+    /// <summary>
+    /// A snapshot of one account's API keys, taken under the lock.
+    ///
+    /// The account objects themselves escape the lock — <see cref="All"/>,
+    /// <see cref="FindById"/> and the auth result all hand out live references
+    /// — and <c>Keys</c> is a plain mutable list. Enumerating it directly (the
+    /// key-listing endpoints serialize <c>user.Keys.Select(...)</c>, which
+    /// defers the actual walk to JSON serialization with no lock held) while
+    /// CreateKey/RevokeKey add or remove on another request thread is exactly
+    /// "Collection was modified; enumeration operation may not execute". A copy
+    /// taken here is safe to enumerate afterwards, whatever those do next.
+    /// </summary>
+    public IReadOnlyList<ApiKeyRecord> KeysOf(UserAccount user)
+    {
+        lock (_lock) return user.Keys.ToArray();
+    }
+
     public bool Any { get { lock (_lock) return _users.Count > 0; } }
 
     public bool HasEnabledAdmin { get { lock (_lock) return _users.Any(u => u.Enabled && u.IsAdmin); } }

@@ -324,7 +324,12 @@ public sealed class MdnsResponder : IDisposable
         try { _socket?.Close(); } catch { }
         try { _socket?.Dispose(); } catch { }
         _socket = null;
-        _locals.Clear();
+        // Deliberately not _locals.Clear(): the receive loop may still be
+        // inside BestLocalFor enumerating this list, and closing the socket
+        // ends it but is not awaited here. Clearing a list on an object that
+        // is being discarded (Restart makes a fresh responder) buys nothing
+        // and is the one structural mutation that could race a reader mid-walk
+        // — "Collection was modified". Let it fall away with the object.
         _cts.Dispose();
     }
 }
