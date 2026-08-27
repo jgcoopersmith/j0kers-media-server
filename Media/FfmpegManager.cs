@@ -348,6 +348,11 @@ public sealed class FfmpegManager : IDisposable
     {
         yield return _config.Path;
 
+        // A copy shipped next to our own executable — what a self-contained
+        // install carries so a machine with no ffmpeg on PATH still works.
+        var beside = Path.Combine(AppContext.BaseDirectory, "ffmpeg.exe");
+        if (File.Exists(beside)) yield return beside;
+
         var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         var links = Path.Combine(local, "Microsoft", "WinGet", "Links", "ffmpeg.exe");
         if (File.Exists(links)) yield return links;
