@@ -341,10 +341,19 @@ public sealed class AuthService
         var nameKey = "user:" + (username?.Trim().ToLowerInvariant() ?? "");
         var addrKey = "addr:" + client;
 
+        // Log the lockout-blocked attempts too, or "any attempt" isn't true:
+        // once an account or address is locked, these returned before reaching
+        // the failed-login line below, and the attempts vanished silently.
         if (LockedFor(nameKey) is int a && a > 0)
+        {
+            Log.Warn("auth", $"login attempt for '{username}' from {client} refused — account locked ({a}s left)");
             return new LoginOutcome(false, null, null, "too many failed attempts — try again shortly", a);
+        }
         if (LockedFor(addrKey) is int b && b > 0)
+        {
+            Log.Warn("auth", $"login attempt for '{username}' from {client} refused — address locked ({b}s left)");
             return new LoginOutcome(false, null, null, "too many failed attempts — try again shortly", b);
+        }
 
         var user = _users.VerifyPassword(username, password);
         if (user is null)
