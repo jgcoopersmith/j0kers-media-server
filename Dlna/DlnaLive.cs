@@ -91,6 +91,12 @@ public sealed class DlnaLive : IDisposable
         buf.Serve(ctx, onBytes);
     }
 
+    /// <summary>The real bytes recorded for a channel so far, or 0 if none.</summary>
+    public long CurrentSizeFor(string stream)
+    {
+        lock (_lock) return _buffers.TryGetValue(stream, out var b) ? b.CurrentSize : 0;
+    }
+
     private void Sweep()
     {
         List<Buffer> dead = new();
@@ -124,31 +130,23 @@ public sealed class DlnaLive : IDisposable
         try { if (Directory.Exists(_bufferRoot)) Directory.Delete(_bufferRoot, true); } catch { }
     }
 
-    // ---- one channel's shared, growing, offset-stable copy ----------------
-
-    private sealed class Segment
-    {
-        public required string Path;
-        public long Start;      // byte offset of this segment in the virtual file
-        public long Length;
-        public long End => Start + Length;
-    }
+    // ---- one channel recorded to a single real, growing MPEG-TS file ------
 
     private sealed class Buffer : IDisposable
     {
         public string Stream { get; }
         private readonly string _channelDir;
         private readonly string _bufDir;
+        private readonly string _filePath;               // the real growing recording
 
-        private readonly object _gate = new();          // guards _segs/_end/_lastSrc/_dead
-        private readonly List<Segment> _segs = new();
-        private long _end;                               // virtual size produced so far
-        private int _lastSrc = int.MinValue;             // highest source index copied
+        private readonly object _gate = new();           // guards _size/_lastSrc/_dead
+        private long _size;                               // real bytes recorded so far
+        private int _lastSrc = int.MinValue;
         private bool _seeded;
         private volatile bool _channelDead;
         private DateTime _lastAppend = DateTime.UtcNow;
+        private FileStream? _writer;
 
-        private readonly ConcurrentDictionary<object, long> _cursors = new();
         private volatile int _refs;
         private DateTime _idleSince = DateTime.UtcNow;
 
@@ -160,6 +158,7 @@ public sealed class DlnaLive : IDisposable
             Stream = stream;
             _channelDir = channelDir;
             _bufDir = bufDir;
+            _filePath = Path.Combine(bufDir, "dlna.ts");
         }
 
         public TimeSpan IdleFor => _refs > 0 ? TimeSpan.Zero : DateTime.UtcNow - _idleSince;
@@ -167,30 +166,35 @@ public sealed class DlnaLive : IDisposable
         public void Start()
         {
             try { Directory.CreateDirectory(_bufDir); } catch { }
+            try { if (File.Exists(_filePath)) File.Delete(_filePath); } catch { }
             _cts = new CancellationTokenSource();
             _pump = Task.Run(() => Pump(_cts.Token));
         }
 
-        // ---- the copier: source segments → offset-stable buffer -----------
+        // ---- the recorder: source segments → one real .ts file ------------
 
         private void Pump(CancellationToken ct)
         {
             while (!ct.IsCancellationRequested)
             {
-                try { CopyFinalised(); }
-                catch (Exception ex) { Log.Debug("dlna", $"live pump {Stream}: {ex.Message}"); }
+                try { AppendFinalised(); }
+                catch (Exception ex) { Log.Debug("dlna", $"live recorder {Stream}: {ex.Message}"); }
 
                 lock (_gate)
                 {
                     _channelDead = DateTime.UtcNow - _lastAppend > DeadAfter;
-                    System.Threading.Monitor.PulseAll(_gate);   // wake edge-waiters to re-check
+                    System.Threading.Monitor.PulseAll(_gate);
                 }
-                Trim();
                 try { Task.Delay(250, ct).Wait(ct); } catch { break; }
             }
+            try { _writer?.Dispose(); } catch { }
         }
 
-        private void CopyFinalised()
+        // Append every newly finalised segment to the one real recording file,
+        // in order. MPEG-TS concatenates on the wire, so the result is a single
+        // valid, growing stream — a real file with real bytes at every offset,
+        // which is the whole point: the set plays it like it plays a film.
+        private void AppendFinalised()
         {
             List<(int idx, string path)> onDisk;
             try
@@ -204,42 +208,29 @@ public sealed class DlnaLive : IDisposable
             catch { return; }
             if (onDisk.Count == 0) return;
 
-            // A segment is safe to copy only once a higher-numbered one exists:
-            // the newest file on disk may still be open in ffmpeg, half-written.
-            var maxIdx = onDisk[^1].idx;
-
+            var maxIdx = onDisk[^1].idx;                  // newest may still be half-written
             lock (_gate)
             {
-                if (!_seeded)
-                {
-                    // Byte 0 is the oldest segment still on disk, so a player
-                    // starts with the whole live window in hand and then rides
-                    // the edge. Anything already deleted is simply not offered.
-                    _lastSrc = onDisk[0].idx - 1;
-                    _seeded = true;
-                }
+                if (!_seeded) { _lastSrc = onDisk[0].idx - 1; _seeded = true; }
             }
+
+            _writer ??= new FileStream(_filePath, FileMode.Append, FileAccess.Write, FileShare.Read, 1 << 16);
 
             foreach (var (idx, path) in onDisk)
             {
-                if (idx >= maxIdx) break;                 // newest: not finalised yet
-                if (idx <= _lastSrc) continue;            // already have it
-
-                var dst = Path.Combine(_bufDir, $"seg_{idx:D5}.ts");
-                long len;
-                try
-                {
-                    if (!File.Exists(dst)) File.Copy(path, dst);
-                    len = new FileInfo(dst).Length;
-                }
-                catch (FileNotFoundException) { continue; }  // deleted from under us; skip
+                if (idx >= maxIdx) break;
+                if (idx <= _lastSrc) continue;
+                byte[] bytes;
+                try { bytes = File.ReadAllBytes(path); }
+                catch (FileNotFoundException) { continue; }
                 catch (IOException) { continue; }
-                if (len <= 0) continue;
+                if (bytes.Length == 0) continue;
 
+                _writer.Write(bytes, 0, bytes.Length);
+                _writer.Flush();
                 lock (_gate)
                 {
-                    _segs.Add(new Segment { Path = dst, Start = _end, Length = len });
-                    _end += len;
+                    _size += bytes.Length;
                     _lastSrc = idx;
                     _lastAppend = DateTime.UtcNow;
                     System.Threading.Monitor.PulseAll(_gate);
@@ -247,131 +238,90 @@ public sealed class DlnaLive : IDisposable
             }
         }
 
-        private void Trim()
-        {
-            long floor;
-            var minCursor = _cursors.IsEmpty ? _end : _cursors.Values.Min();
-            floor = minCursor - RewindBytes;
-            if (floor <= 0) return;
+        /// <summary>The real bytes recorded so far.</summary>
+        public long CurrentSize { get { lock (_gate) return _size; } }
 
-            List<Segment> drop = new();
-            lock (_gate)
-            {
-                foreach (var s in _segs)
-                {
-                    if (s.End > floor) break;             // keep from here on (list is ordered)
-                    drop.Add(s);
-                }
-                // Keep the entries (offsets must stay valid); only the files go.
-            }
-            foreach (var s in drop)
-                try { File.Delete(s.Path); } catch { }
-        }
-
-        // ---- the reader: virtual file → HTTP response ---------------------
+        // ---- the reader: the real recording file → HTTP response ----------
 
         public void Serve(HttpListenerContext ctx, Action<long>? onBytes)
         {
             System.Threading.Interlocked.Increment(ref _refs);
-            var key = new object();
             var res = ctx.Response;
+            long served = 0, from = 0;
             try
             {
-                long from = 0, to = AdvertisedBytes - 1;
-                var partial = false;
+                long size;
+                lock (_gate)
+                {
+                    // On a cold tune the file is still empty; wait briefly for
+                    // the first real content so the first answer is not a zero.
+                    for (var i = 0; i < 40 && _size == 0 && !_channelDead; i++)
+                        System.Threading.Monitor.Wait(_gate, 250);
+                    size = _size;
+                }
 
+                long to = size - 1;
+                var partial = false;
                 var range = ctx.Request.Headers["Range"];
                 if (!string.IsNullOrEmpty(range) && range.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase))
                 {
                     var span = range["bytes=".Length..].Split(',')[0].Split('-');
                     if (span.Length == 2)
                     {
-                        var hasFrom = long.TryParse(span[0], out var f);
-                        var hasTo = long.TryParse(span[1], out var t);
-                        if (hasFrom) { from = f; if (hasTo) to = t; }
-                        else if (hasTo) { from = Math.Max(0, AdvertisedBytes - t); }
-                        partial = hasFrom || hasTo;
+                        if (long.TryParse(span[0], out var f)) { from = f; if (long.TryParse(span[1], out var t)) to = t; }
+                        else if (long.TryParse(span[1], out var t)) from = Math.Max(0, size - t);
+                        partial = true;
                     }
-                    // A seek to somewhere past what the channel has produced —
-                    // most often a set probing near the end for an index that a
-                    // raw TS stream does not have — cannot be answered honestly.
-                    // Reject it rather than block the connection forever.
-                    long produced;
-                    lock (_gate) produced = _end;
-                    if (from < 0 || from > produced + 16L * 1024 * 1024 || to < from)
+                }
+
+                // A read at (or past) the current end is the player asking for
+                // the next of a growing file: wait for the recorder to append
+                // more rather than answering empty — that is what keeps a live
+                // channel playing across successive range requests.
+                if (from >= size)
+                {
+                    lock (_gate)
+                    {
+                        for (var i = 0; i < 240 && _size <= from && !_channelDead; i++)
+                            System.Threading.Monitor.Wait(_gate, 250);
+                        size = _size;
+                    }
+                    if (from >= size)
                     {
                         res.StatusCode = 416;
-                        res.Headers["Content-Range"] = $"bytes */{AdvertisedBytes}";
+                        res.Headers["Content-Range"] = $"bytes */{Math.Max(size, 1)}";
                         res.Close();
                         return;
                     }
-                    if (to > AdvertisedBytes - 1) to = AdvertisedBytes - 1;
+                    to = size - 1;
                 }
+                if (from < 0) from = 0;
+                if (to > size - 1 || to < from) to = size - 1;
 
+                var count = to - from + 1;
                 res.StatusCode = partial ? 206 : 200;
                 res.ContentType = "video/mp2t";
-                res.ContentLength64 = to - from + 1;
-                // OP=01 (seekable). This set will NOT start playback without
-                // it — OP=00 gave three bouncing dots for ever, the same as the
-                // chunked stream it rejected. So it must be advertised seekable,
-                // and the seeking that invites is dealt with below by mapping a
-                // range request onto the live buffer rather than fighting the
-                // profile the set demands.
+                res.ContentLength64 = count;
                 res.Headers["Accept-Ranges"] = "bytes";
                 res.Headers["transferMode.dlna.org"] = "Streaming";
                 res.Headers["contentFeatures.dlna.org"] =
                     "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
-                if (partial) res.Headers["Content-Range"] = $"bytes {from}-{to}/{AdvertisedBytes}";
+                if (partial) res.Headers["Content-Range"] = $"bytes {from}-{to}/{size}";
+                Log.Info("dlnalive", $"{ctx.Request.HttpMethod} {Stream} range='{range ?? "-"}' from={from} to={to} size={size} -> {res.StatusCode}");
                 if (ctx.Request.HttpMethod == "HEAD") { res.Close(); return; }
 
+                using var fs = new FileStream(_filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16);
+                fs.Seek(from, SeekOrigin.Begin);
                 var buffer = new byte[64 * 1024];
-                long pending = 0;
-                var cursor = from;
-                _cursors[key] = cursor;
-
-                while (cursor <= to)
+                long remaining = count, pending = 0;
+                while (remaining > 0)
                 {
-                    Segment? seg;
-                    long produced;
-                    lock (_gate)
-                    {
-                        produced = _end;
-                        seg = FindLocked(cursor);
-                        if (seg is null && cursor >= produced)
-                        {
-                            // At the live edge. Either the channel is gone —
-                            // stop — or the next segment is still on its way;
-                            // wait to be woken when the pump appends one.
-                            if (_channelDead) break;
-                            System.Threading.Monitor.Wait(_gate, 1000);
-                            continue;
-                        }
-                    }
-                    if (seg is null) continue;             // raced past a trim; re-resolve
-
-                    var offInSeg = cursor - seg.Start;
-                    var wantHere = Math.Min(seg.Length - offInSeg, to - cursor + 1);
-                    FileStream fs;
-                    try { fs = new FileStream(seg.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024); }
-                    catch { break; }                       // trimmed away beneath a deep seek
-                    try
-                    {
-                        if (offInSeg > 0) fs.Seek(offInSeg, SeekOrigin.Begin);
-                        while (wantHere > 0)
-                        {
-                            var read = fs.Read(buffer, 0, (int)Math.Min(buffer.Length, wantHere));
-                            if (read <= 0) break;
-                            res.OutputStream.Write(buffer, 0, read);
-                            cursor += read;
-                            wantHere -= read;
-                            pending += read;
-                            _cursors[key] = cursor;
-                            if (onBytes is not null && pending >= 1024 * 1024) { onBytes(pending); pending = 0; }
-                        }
-                    }
-                    finally { fs.Dispose(); }
+                    var read = fs.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
+                    if (read <= 0) break;
+                    res.OutputStream.Write(buffer, 0, read);
+                    remaining -= read; served += read; pending += read;
+                    if (onBytes is not null && pending >= 1024 * 1024) { onBytes(pending); pending = 0; }
                 }
-
                 if (onBytes is not null && pending > 0) { try { onBytes(pending); } catch { } }
             }
             catch (HttpListenerException) { /* the set stopped or seeked away */ }
@@ -379,22 +329,11 @@ public sealed class DlnaLive : IDisposable
             catch (Exception ex) { Log.Debug("dlna", $"serving live {Stream} failed: {ex.Message}"); }
             finally
             {
-                _cursors.TryRemove(key, out _);
+                if (ctx.Request.HttpMethod != "HEAD")
+                    Log.Info("dlnalive", $"END {Stream} from={from} served={served}");
                 if (System.Threading.Interlocked.Decrement(ref _refs) == 0) _idleSince = DateTime.UtcNow;
                 try { res.Close(); } catch { }
             }
-        }
-
-        private Segment? FindLocked(long offset)
-        {
-            // ordered, contiguous — a small linear scan from the back is fine
-            for (var i = _segs.Count - 1; i >= 0; i--)
-            {
-                var s = _segs[i];
-                if (offset >= s.Start && offset < s.End) return s;
-                if (offset >= s.End) return null;          // at or past the live edge
-            }
-            return _segs.Count > 0 && offset < _segs[0].Start ? _segs[0] : null;
         }
 
         private static int ParseIndex(string name)

@@ -65,6 +65,10 @@ public sealed class DlnaService
     /// </summary>
     public Func<IReadOnlyList<(string Name, string Stream)>>? LiveChannels { get; set; }
 
+    /// <summary>The real recorded size of a live channel, for an honest DIDL
+    /// size instead of a fake placeholder. Set by ControlApi to DlnaLive.</summary>
+    public Func<string, long>? LiveSizeOf { get; set; }
+
     /// <summary>The object id of the synthetic "Live TV" container.</summary>
     private const string LiveRootId = "livetv";
     private const string LiveItemPrefix = "livech-";
@@ -401,7 +405,12 @@ public sealed class DlnaService
         // OP=01 (seekable) — this set refuses to start a stream advertised
         // OP=00 (three bouncing dots for ever). Must match DlnaLive.Serve.
         var protocolInfo = "http-get:*:video/mp2t:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
-        return $"""<item id="{Escape(id)}" parentID="{LiveRootId}" restricted="1"><dc:title>{Escape(name)}</dc:title><upnp:class>object.item.videoItem.videoBroadcast</upnp:class><res protocolInfo="{protocolInfo}" size="{DlnaLive.AdvertisedBytes}">{Escape(url)}</res></item>""";
+        // The real recorded size when there is one, so the listing agrees with
+        // the honest size the file itself serves; a small floor before recording
+        // has begun — never the huge placeholder that made the set probe out
+        // into bytes that did not exist.
+        var size = Math.Max(LiveSizeOf?.Invoke(stream) ?? 0, 64L * 1024 * 1024);
+        return $"""<item id="{Escape(id)}" parentID="{LiveRootId}" restricted="1"><dc:title>{Escape(name)}</dc:title><upnp:class>object.item.videoItem.videoBroadcast</upnp:class><res protocolInfo="{protocolInfo}" size="{size}">{Escape(url)}</res></item>""";
     }
 
     private static string Didl(string body) =>

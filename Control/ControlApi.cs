@@ -130,6 +130,7 @@ public sealed partial class ControlApi : IDisposable
                 .ToList();
         };
         _dlnaLive ??= new Dlna.DlnaLive(MediaRootPath());
+        dlna.LiveSizeOf = s => _dlnaLive?.CurrentSizeFor(s) ?? 0;
         return dlna;
     }
 
@@ -2883,13 +2884,16 @@ public sealed partial class ControlApi : IDisposable
                 { res.StatusCode = 404; res.Close(); return; }
 
                 var stream = ctx.Request.QueryString["ch"] ?? "";
-                // Resolve against the live channel list, never the raw query:
-                // the channel must exist, be restreaming, and its "ch-…" name
-                // is the only thing allowed to form the directory path.
-                var ch = _ffmpeg.Channels.FirstOrDefault(c => c.stream == stream && c.status == "running");
+                // Tune-on-demand: picking a channel on the TV starts its
+                // restream if it is not already running, so it comes up like
+                // live TV. Resolve against the channel list, never the raw
+                // query — its "ch-…" name is the only thing allowed to form the
+                // directory path.
+                _ffmpeg.EnsureChannelRunning(stream);
+                var ch = _ffmpeg.Channels.FirstOrDefault(c => c.stream == stream);
                 if (ch.stream is null)
                 {
-                    Log.Debug("dlna", $"live: no such running channel: {stream}");
+                    Log.Debug("dlna", $"live: no such channel: {stream}");
                     res.StatusCode = 404;
                     res.Close();
                     return;
