@@ -46,6 +46,23 @@ public sealed class StreamLinks
     }
 
     /// <summary>
+    /// The same for a batch, written once.
+    ///
+    /// Queueing a folder of conversions hides every one of them, and calling
+    /// Hide per file rewrote this whole file per file - seven hundred writes
+    /// for a seven-hundred-file batch, each serialising the growing list.
+    /// </summary>
+    public void HideMany(IEnumerable<string> streams)
+    {
+        lock (_lock)
+        {
+            var added = false;
+            foreach (var s in streams) added |= _hidden.Add(s);
+            if (added) Persist();
+        }
+    }
+
+    /// <summary>
     /// Puts it back — what playing the media again means. Called on every
     /// prepare, so re-linking needs no separate action: ask for the film and
     /// it is in the list again, with its conversion already done.

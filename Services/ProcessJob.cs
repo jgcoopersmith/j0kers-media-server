@@ -43,6 +43,10 @@ public static class ProcessJob
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
     private const int ExtendedLimitInformation = 9;
     private const uint LimitKillOnJobClose = 0x2000;
 
@@ -102,6 +106,7 @@ public static class ProcessJob
                     if (!SetInformationJobObject(job, ExtendedLimitInformation, ptr, (uint)size))
                     {
                         Log.Debug("main", $"could not configure the process job ({Marshal.GetLastWin32Error()})");
+                        CloseHandle(job);   // otherwise the handle is leaked for the life of the process
                         return;
                     }
                 }

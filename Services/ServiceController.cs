@@ -72,6 +72,12 @@ public sealed class ServiceController : IDisposable
         lock (_lock)
         {
             if (Running) return;
+            // If the second listener fails to bind, the first is already up and
+            // Running is still false - so StopServices would decline to touch
+            // it and the next Start would build a second one beside it. Undo
+            // the half that succeeded instead.
+            try
+            {
             if (_config.Rtsp.Enabled)
             {
                 Rtsp = new RtspServer(_config, _baseDirectory) { Accounts = Sessions, Served = Served };
@@ -93,6 +99,14 @@ public sealed class ServiceController : IDisposable
                 Hls.Start();
             }
             Running = true;
+            }
+            catch
+            {
+                Rtsp?.Dispose(); Rtsp = null;
+                Hls?.Dispose();  Hls = null;
+                Running = false;
+                throw;
+            }
             Log.Info("services", "streaming services started");
         }
     }

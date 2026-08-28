@@ -242,6 +242,7 @@ public sealed partial class ControlApi : IDisposable
     /// would burn sockets for nothing.
     /// </summary>
     private readonly HttpClient _providerHttp;
+    private readonly HttpClient _proxyHttp;
     private readonly Media.Providers.ProviderRegistry _providers;
     private readonly Media.Providers.HlsProxy _tvProxy;
     private readonly HashSet<string> _relayProviders;
@@ -333,7 +334,20 @@ public sealed partial class ControlApi : IDisposable
         { Timeout = TimeSpan.FromSeconds(20) };
         _providers = Media.Providers.ProviderStore.Load(baseDirectory, _providerHttp);
         _relayProviders = Media.Providers.ProviderStore.RelaySet(baseDirectory);
-        _tvProxy = new Media.Providers.HlsProxy(_providerHttp, mediaLinks);
+        // The proxy gets its own client because it must not follow redirects
+        // by itself: it hands upstream bytes straight back to the caller, so
+        // each hop has to face the private-address check rather than being
+        // obeyed silently. The providers keep the shared client and its
+        // ordinary redirect handling - they fetch known vendor endpoints,
+        // and GitHub-hosted playlists genuinely do redirect.
+        _proxyHttp = new HttpClient(new SocketsHttpHandler
+        {
+            AutomaticDecompression = System.Net.DecompressionMethods.All,
+            PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+            AllowAutoRedirect = false,
+        })
+        { Timeout = TimeSpan.FromSeconds(20) };
+        _tvProxy = new Media.Providers.HlsProxy(_proxyHttp, mediaLinks);
     }
 
     /// <summary>The host the listener actually bound (may differ from config after the Windows ACL fallback).</summary>
@@ -4000,7 +4014,7 @@ public sealed partial class ControlApi : IDisposable
 
         var needsConv = head.Where(f => _tvCodecs?.NeedsConversion(f) ?? true).ToList();
         var queued = _ffmpeg.QueueVod(needsConv);
-        foreach (var f in needsConv) HideConversion(f);
+        HideConversions(needsConv);
 
         // The rest, off the request thread. Queued in small groups so the
         // panel fills in steadily instead of in one lump at the end, and so a
@@ -4019,13 +4033,13 @@ public sealed partial class ControlApi : IDisposable
                         if (_tvCodecs?.NeedsConversion(f) ?? true) group.Add(f);
                         if (group.Count < 10) continue;
                         added += ffmpeg.QueueVod(group);
-                        foreach (var g in group) HideConversion(g);
+                        HideConversions(group);
                         group.Clear();
                     }
                     if (group.Count > 0)
                     {
                         added += ffmpeg.QueueVod(group);
-                        foreach (var g in group) HideConversion(g);
+                        HideConversions(group);
                     }
                 }
                 catch (Exception ex) { Log.Warn("control", $"transcode: queueing the rest failed: {ex.Message}"); }
@@ -4058,10 +4072,13 @@ public sealed partial class ControlApi : IDisposable
     /// so adding it from the media library - the action that means "publish
     /// this" - brings the row back with the conversion already finished.
     /// </summary>
-    private void HideConversion(string file)
+    private void HideConversions(IEnumerable<string> files)
     {
-        var name = _ffmpeg?.VodStreamName(file);
-        if (name is not null) _links.Hide(name);
+        if (_ffmpeg is null) return;
+        var names = new List<string>();
+        foreach (var f in files)
+            if (_ffmpeg.VodStreamName(f) is string name) names.Add(name);
+        if (names.Count > 0) _links.HideMany(names);
     }
 
     private sealed class TranscodeRequest
@@ -4677,6 +4694,7 @@ public sealed partial class ControlApi : IDisposable
         try { StopDlnaListener(); } catch { }
         try { _providers.Dispose(); } catch { }
         try { _providerHttp.Dispose(); } catch { }
+        try { _proxyHttp.Dispose(); } catch { }
     }
 }
 

@@ -47,6 +47,55 @@ public sealed class HlsProxy
     public sealed record Result(int Status, string ContentType, byte[] Body);
 
     /// <summary>
+    /// Sends the request, following redirects ourselves so every hop is
+    /// checked.
+    ///
+    /// The guard above vets the URL that was asked for; HttpClient follows a
+    /// redirect on its own and never asks again. A playlist that points at a
+    /// public address which answers 302 to 127.0.0.1:9090 or to the cloud
+    /// metadata address would therefore be fetched and handed straight back -
+    /// exactly the thing refusing private addresses is meant to prevent.
+    /// Following the chain here means each destination faces the same test as
+    /// the first, and a redirect somewhere private is refused rather than
+    /// obeyed.
+    /// </summary>
+    private async Task<HttpResponseMessage> SendFollowingAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        const int maxHops = 5;
+        var current = request;
+        for (var hop = 0; ; hop++)
+        {
+            var response = await _http.SendAsync(current, HttpCompletionOption.ResponseContentRead, ct)
+                                      .ConfigureAwait(false);
+            var status = (int)response.StatusCode;
+            var location = response.Headers.Location;
+            if (status is not (301 or 302 or 303 or 307 or 308) || location is null) return response;
+            if (hop >= maxHops)
+            {
+                Log.Warn("tv", $"too many redirects from {Trim(current.RequestUri?.ToString() ?? "")}");
+                return response;
+            }
+
+            var next = location.IsAbsoluteUri ? location : new Uri(current.RequestUri!, location);
+            if (!Services.PrivateNetwork.MayFetch(next.ToString(), out var why))
+            {
+                Log.Warn("tv", $"refused to follow a redirect to {Trim(next.ToString())}: {why}");
+                response.Dispose();
+                return new HttpResponseMessage(System.Net.HttpStatusCode.Forbidden)
+                {
+                    Content = new StringContent("refused: that address is not fetchable from here"),
+                };
+            }
+
+            var follow = new HttpRequestMessage(HttpMethod.Get, next);
+            foreach (var h in current.Headers) follow.Headers.TryAddWithoutValidation(h.Key, h.Value);
+            if (!ReferenceEquals(current, request)) current.Dispose();
+            response.Dispose();
+            current = follow;
+        }
+    }
+
+    /// <summary>
     /// Fetches <paramref name="url"/>. A playlist comes back rewritten so its
     /// children point here; anything else is passed through untouched.
     /// </summary>
@@ -80,7 +129,7 @@ public sealed class HlsProxy
         req.Headers.TryAddWithoutValidation("Origin", "http://pluto.tv");
         req.Headers.TryAddWithoutValidation("Referer", "http://pluto.tv/");
 
-        using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseContentRead, ct);
+        using var resp = await SendFollowingAsync(req, ct);
         var contentType = resp.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
         var bytes = await resp.Content.ReadAsByteArrayAsync(ct);
 

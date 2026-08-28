@@ -91,7 +91,12 @@ public static class WindowsUrlAcl
         // once a certificate is bound to a port, http.sys treats the port as
         // claimed, and an unprivileged https registration on it — even
         // loopback — is refused without a reservation of its own.
-        var tls = certificate is not null;
+        // What this run will actually serve - not whether there is setup work
+        // left to do. "certificate" is deliberately cleared above when TLS is
+        // already imported and bound, so reading it here would call a properly
+        // configured HTTPS server "http" and tear down the very reservations
+        // that are making it work.
+        var tls = UrlScheme.Https;
         var aclPorts = new List<int>();
         if (config.Hls.Enabled && (tls || config.Hls.BindAddress == "0.0.0.0")) aclPorts.Add(config.Hls.Port);
         if (config.Control.Enabled && (tls || config.Control.BindAddress == "0.0.0.0")) aclPorts.Add(config.Control.Port);

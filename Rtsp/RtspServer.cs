@@ -53,7 +53,11 @@ public sealed class RtspServer : IDisposable
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
+                // A listener that keeps refusing would otherwise spin this
+                // loop as fast as the CPU allows, filling the log with the
+                // same line; pause before trying again.
                 Log.Warn("rtsp", $"accept failed: {ex.Message}");
+                try { await Task.Delay(500, ct); } catch { break; }
             }
         }
     }
