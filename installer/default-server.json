@@ -1,0 +1,20 @@
+﻿{
+  // j0kers Media Server - default configuration. Edit and restart.
+  "serverName": "j0kers Media Server",
+  "rtsp":    { "enabled": true, "bindAddress": "0.0.0.0", "port": 8554 },
+  "hls":     { "enabled": true, "bindAddress": "0.0.0.0", "port": 8080, "mediaRoot": "media" },
+  "control": { "enabled": true, "bindAddress": "0.0.0.0", "port": 9090,
+               "openDashboardOnStart": true, "shutdownOnClose": true },
+  // ffmpeg is found on PATH, via winget, or beside this exe (bundled here)
+  "ffmpeg": { "path": "ffmpeg", "preset": "veryfast", "crf": 23,
+              "liveSegmentSeconds": 4, "liveWindowSegments": 15,
+              "liveVideoMode": "transcode", "videoCodec": "h264", "audioCodec": "aac" },
+  "minimizeToTray": false,
+  // off by default so the first run has no certificate warning
+  "https": { "enabled": false, "certificate": "", "password": "" },
+  "logging": { "level": "info", "toFile": true, "directory": "logs",
+               "rotateSizeMb": 10, "rotatePeriod": "daily", "maxFiles": 7 },
+  "discovery": { "enabled": true, "hostName": "j0kers", "mdns": true, "ssdp": true,
+                 "udpProbe": true, "udpProbePort": 7359, "dlna": false, "dlnaPort": 0,
+                 "dlnaUseTranscode": false, "dlnaLiveTv": false }
+}
