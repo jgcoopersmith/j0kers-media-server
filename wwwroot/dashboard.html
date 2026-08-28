@@ -767,7 +767,7 @@
       <div class="sub"><span class="dot" id="livedot"></span><span id="livetext">connecting…</span></div>
     </div>
     <div class="spacer"></div>
-    <button class="pill admin-only" id="powerbtn" onclick="togglePower()" title="Start or stop the streaming services">⏻ …</button>
+    <button class="pill admin-only" id="powerbtn" onclick="togglePower()" title="Start or stop the streaming ports (RTSP and HLS). The server itself keeps running so you can start them again from here - to exit it, close this page.">⏻ …</button>
     <button class="pill admin-only" id="cfgbtn" onclick="openConfig()" title="Configure hostname and ports">⚙ Config</button>
     <button class="pill admin-only" id="usersbtn" onclick="openUsers()" title="Add, edit, and remove user accounts">👥 Users</button>
     <button class="pill" id="acctbtn" onclick="openAccount()" title="Your account, password, and keys">👤 <span id="acct-pill">…</span></button>
@@ -1853,8 +1853,15 @@ async function tick() {
   $("t-sessions-d").textContent = viewers
     ? status.rtsp.sessions + " rtsp · " + viewers + " watching"
     : "of " + status.rtsp.maxSessions + " max";
+  /* Uptime is the server process's, and Stop does not end the process - it
+     closes the streaming ports and leaves the dashboard up, which is what
+     lets you start them again from here. A clock still counting under a
+     button that says Stop reads as "it did not work", so when the services
+     are stopped the tile says so instead of naming the server. */
   $("t-uptime").textContent = fmtUptime(status.uptimeSeconds);
-  $("t-uptime-d").textContent = status.server;
+  $("t-uptime-d").textContent = (status.running === false)
+    ? "streaming stopped - server still running"
+    : status.server;
 
   // Everything the server is pushing out right now — RTP and HLS together —
   // from the server's own monotonic byte counter, so a viewer leaving can't
