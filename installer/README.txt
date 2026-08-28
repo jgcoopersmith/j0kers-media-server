@@ -1,4 +1,4 @@
-j0kers Media Server — Setup
+j0kers Media Server - Setup
 ===========================
 
 TO INSTALL OR UPGRADE
@@ -26,7 +26,7 @@ UPGRADING AN EXISTING INSTALL
   every other edit survive the upgrade.
 
 WHAT'S INSTALLED
-  j0kers-media-server.exe   the server — the .NET runtime is bundled, so
+  j0kers-media-server.exe   the server - the .NET runtime is bundled, so
                             nothing has to be installed first
   ffmpeg.exe, ffprobe.exe   media engine for transcoding and live TV
   server.json               settings (first install only; yours is kept)
@@ -42,7 +42,7 @@ FIRST RUN
 
 PORTS (change in server.json, or in the dashboard's Config dialog)
   9090  dashboard      8080  media / HLS      8554  RTSP
-  Windows may ask once to allow the server through the firewall — that is what
+  Windows may ask once to allow the server through the firewall - that is what
   lets other devices on your network reach it.
 
 REQUIREMENTS

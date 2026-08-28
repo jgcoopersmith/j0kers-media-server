@@ -1,4 +1,4 @@
-# j0kers Media Server — installer.
+# j0kers Media Server - installer.
 #
 # Installs, or upgrades in place. The point of the upgrade path is that a
 # machine already running this server keeps everything it has: accounts, the
@@ -23,7 +23,7 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $payload = Join-Path $here 'payload'
 
-# Files the server owns once it is running. An upgrade never touches these —
+# Files the server owns once it is running. An upgrade never touches these -
 # they are the difference between "upgraded" and "wiped". Anything not on this
 # list that ships in the payload is program material and is replaced.
 $KeepOnUpgrade = @(
@@ -50,7 +50,7 @@ $KeepOnUpgrade = @(
 function Write-Step($text) { Write-Host "  $text" }
 
 Write-Host ''
-Write-Host 'j0kers Media Server — install' -ForegroundColor Cyan
+Write-Host 'j0kers Media Server - install' -ForegroundColor Cyan
 Write-Host ''
 
 if (-not (Test-Path -LiteralPath $payload)) {
@@ -62,7 +62,7 @@ $exeName  = 'j0kers-media-server.exe'
 # Find a copy already on this machine when the default target has none. An
 # earlier portable build was unpacked wherever the user chose, so installing
 # blindly into the default would make a second, empty install beside the real
-# one — new program, none of the accounts, channels or media. Prefer the
+# one - new program, none of the accounts, channels or media. Prefer the
 # install that is actually here. Only when -TargetDir was not given: an
 # explicit target is an instruction, not a guess.
 if (-not $PSBoundParameters.ContainsKey('TargetDir') -and
@@ -98,12 +98,12 @@ if (-not $PSBoundParameters.ContainsKey('TargetDir') -and
         }
     }
     elseif ($found.Count -gt 1) {
-        # More than one copy on this machine — a build directory beside a real
+        # More than one copy on this machine - a build directory beside a real
         # install, say. Picking one unprompted upgrades something the user did
         # not mean to touch, so choose deliberately or not at all.
         Write-Host 'More than one installation was found:' -ForegroundColor Yellow
         for ($i = 0; $i -lt $found.Count; $i++) { Write-Host ("  [{0}] {1}" -f ($i + 1), $found[$i]) }
-        Write-Host ("  [0] none of these — install to {0}" -f $TargetDir)
+        Write-Host ("  [0] none of these - install to {0}" -f $TargetDir)
         Write-Host ''
         if ($Quiet) {
             Write-Host 'Ambiguous, and running unattended: none chosen. Re-run with'
@@ -123,7 +123,7 @@ $targetExe = Join-Path $TargetDir $exeName
 $upgrade  = Test-Path -LiteralPath $targetExe
 
 Write-Host ("Target:  " + $TargetDir)
-Write-Host ("Mode:    " + $(if ($upgrade) { 'upgrade — existing settings and data are kept' } else { 'new install' }))
+Write-Host ("Mode:    " + $(if ($upgrade) { 'upgrade - existing settings and data are kept' } else { 'new install' }))
 Write-Host ''
 
 if (-not $Quiet) {
@@ -132,12 +132,12 @@ if (-not $Quiet) {
 }
 
 # A running server holds its own exe open, so it has to stop before the file
-# can be replaced. Only instances running from *this* target are touched — a
+# can be replaced. Only instances running from *this* target are touched - a
 # server installed elsewhere on the same machine is left alone.
 $running = @(Get-CimInstance Win32_Process -Filter "Name='$exeName'" -ErrorAction SilentlyContinue |
              Where-Object { $_.ExecutablePath -and (Split-Path -Parent $_.ExecutablePath) -eq $TargetDir.TrimEnd('\') })
 if ($running.Count -gt 0) {
-    Write-Step ("Stopping the running server ({0} instance(s))…" -f $running.Count)
+    Write-Step ("Stopping the running server ({0} instance(s))..." -f $running.Count)
     foreach ($p in $running) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 1200
 }
