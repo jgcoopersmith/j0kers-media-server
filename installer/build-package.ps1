@@ -65,7 +65,16 @@ foreach ($f in 'Install.cmd', 'Install.ps1', 'README.txt') {
 if (-not $KeepOld) {
     Get-ChildItem -LiteralPath $OutputRoot -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -like 'j0kers Media Server Setup*' -and $_.Name -ne $name } |
-        ForEach-Object { Write-Host ("  removing older package: " + $_.Name); Remove-Item -LiteralPath $_.FullName -Recurse -Force }
+        ForEach-Object {
+            # Tidying up must never fail the build: an old folder can be held
+            # open by Explorer, by OneDrive syncing it, or by a server being
+            # run from it, and losing the finished package over that is absurd.
+            try {
+                Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop
+                Write-Host ("  removed older package: " + $_.Name)
+            }
+            catch { Write-Host ("  could not remove " + $_.Name + " (in use) - left in place") }
+        }
 }
 
 
@@ -105,7 +114,13 @@ Get-ChildItem -LiteralPath $OutputRoot -File -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -like 'j0kers Media Server Setup*' -and
                    $_.Extension -in '.rar', '.zip' -and
                    $_.Name -ne (Split-Path -Leaf $archive) } |
-    ForEach-Object { Write-Host ("  removing older archive: " + $_.Name); Remove-Item -LiteralPath $_.FullName -Force }
+    ForEach-Object {
+        try {
+            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
+            Write-Host ("  removed older archive: " + $_.Name)
+        }
+        catch { Write-Host ("  could not remove " + $_.Name + " (in use) - left in place") }
+    }
 
 if (Test-Path -LiteralPath $archive) {
     $amb = [math]::Round(((Get-Item -LiteralPath $archive).Length / 1MB), 0)
