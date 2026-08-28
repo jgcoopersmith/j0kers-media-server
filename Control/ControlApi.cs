@@ -3490,14 +3490,6 @@ public sealed partial class ControlApi : IDisposable
                 return;
             }
 
-            // Probe what is being looked at. The prefetch sweep walks the media
-            // library, but this panel browses anywhere on the machine - the
-            // folder on screen is often not a library folder at all, and its
-            // pills would then say "checking..." for good. Asking for a
-            // listing is the signal that these are the files someone wants
-            // answers about, so put the directory at the front of the queue.
-            RequestCodecProbe(full);
-
             var dir = new DirectoryInfo(full);
             var entries = new List<object>();
             foreach (var d in dir.EnumerateDirectories().OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase))
@@ -3602,6 +3594,17 @@ public sealed partial class ControlApi : IDisposable
                 return;
             }
 
+
+            // Probe what is being looked at, in the background.
+            //
+            // This is the transcode panel's own listing - the one whose folder
+            // pills say "checking..." until the codecs behind them are known.
+            // The prefetch sweep covers the media library, but this panel
+            // browses anywhere on the machine, and a folder it is showing is
+            // the clearest possible signal that these are the files somebody
+            // wants an answer about. Queue the directory; the listing itself
+            // never waits on a probe.
+            RequestCodecProbe(full);
             var dir = new DirectoryInfo(full);
             var entries = new List<object>();
             var q = ctx.Request.QueryString["q"];
