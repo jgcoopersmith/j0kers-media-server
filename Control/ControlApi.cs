@@ -291,6 +291,16 @@ public sealed partial class ControlApi : IDisposable
             _tvCodecs = new Media.TvCodecs(baseDirectory, ffmpeg.FfprobePath);
 
         if (serverConfig.Discovery.Dlna) _dlna = NewDlna();
+
+        // Fill the codec cache in the background so the transcode panel stops
+        // saying "checking...". The folder summary reads the cache only, on
+        // purpose - probing a whole library while somebody opens a directory
+        // would turn a click into an hour of ffprobe launches. That was fine on
+        // a server whose cache had filled in over months of browsing, and wrong
+        // on a fresh install, where nothing is cached and every folder reads as
+        // unknown until each one is visited by hand. So walk the library slowly
+        // instead, well behind whatever else the machine is doing.
+        StartCodecPrefetch();
         // The moment somebody starts watching anything — dashboard, phone,
         // VLC, a shared link — it goes in the history. Preparing a file
         // through /api/play records it too, but most playback never touches
@@ -3668,6 +3678,74 @@ public sealed partial class ControlApi : IDisposable
         }
         catch { /* report whatever was counted before the walk failed */ }
         return new { media, needs, done, ready, unknown, capped };
+    }
+
+    /// <summary>
+    /// Walks the library in the background and probes what the codec cache
+    /// doesn't know yet, so the transcode panel's "checking..." pills settle
+    /// into real counts on their own.
+    ///
+    /// Deliberately unhurried. Probing is an ffprobe launch per file, and the
+    /// point of this is a library nobody has browsed yet - possibly thousands
+    /// of files - on a machine that is also serving video. So it takes one file
+    /// at a time with a pause between, skips anything already cached (the check
+    /// is a dictionary hit, not a probe), and saves the cache as it goes so the
+    /// work survives a restart rather than starting over.
+    /// </summary>
+    private void StartCodecPrefetch()
+    {
+        if (_tvCodecs is null) return;
+        _ = Task.Run(async () =>
+        {
+            // Let startup finish first: the dashboard opening, channels being
+            // restored and the library being read all want the disk more than
+            // this does.
+            await Task.Delay(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+
+            var opts = new EnumerationOptions
+            {
+                RecurseSubdirectories = true,
+                IgnoreInaccessible = true,
+                AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System,
+            };
+
+            while (true)
+            {
+                var probed = 0;
+                try
+                {
+                    foreach (var root in _library.All)
+                    {
+                        if (!Directory.Exists(root)) continue;
+                        foreach (var file in Directory.EnumerateFiles(root, "*", opts))
+                        {
+                            if (!TranscodableExt.Contains(Path.GetExtension(file))) continue;
+                            // already known - no probe, no wait
+                            if (_tvCodecs.NeedsConversionCached(file) is not null) continue;
+
+                            _tvCodecs.Codecs(file);      // probes, and caches the answer
+                            probed++;
+                            if (probed % 25 == 0) _tvCodecs.Save();
+                            await Task.Delay(250).ConfigureAwait(false);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Warn("probe", $"codec prefetch stopped early: {ex.Message}");
+                }
+
+                if (probed > 0)
+                {
+                    _tvCodecs.Save();
+                    Log.Info("probe", $"codec prefetch: read {probed} file(s) the transcode list was unsure about");
+                }
+
+                // Round again later for whatever has been added since. Nothing
+                // to do is cheap: the second pass is dictionary lookups.
+                await Task.Delay(TimeSpan.FromMinutes(30)).ConfigureAwait(false);
+            }
+        });
     }
 
     /// <summary>
