@@ -42,6 +42,13 @@ public sealed class FfmpegManager : IDisposable
     private readonly object _lock = new();
     private readonly Dictionary<string, Process> _vodJobs = new(StringComparer.OrdinalIgnoreCase);
 
+    /// How many conversions are on the books, readable without the lock.
+    /// The folder pills ask about every file they count, and taking the
+    /// manager's lock per file put a listing of a few thousand files in
+    /// contention with the thing that actually starts and stops encoders.
+    /// Nothing converting is the common case, and this answers it for free.
+    private volatile int _vodJobCount;
+
     /// <summary>
     /// How far each running conversion has got, from ffmpeg's own -progress
     /// stream. DurationSeconds is 0 when the source length couldn't be
@@ -519,7 +526,10 @@ public sealed class FfmpegManager : IDisposable
                     lock (_lock)
                     {
                         if (_vodJobs.TryGetValue(stream, out var q) && ReferenceEquals(q, p))
+                        {
                             _vodJobs.Remove(stream);
+                            _vodJobCount = _vodJobs.Count;
+                        }
                         else
                             superseded = true;   // a rerun already owns this stream+dir
                     }
@@ -540,6 +550,7 @@ public sealed class FfmpegManager : IDisposable
                     PumpVodQueue();
                 });
             _vodJobs[stream] = job;
+            _vodJobCount = _vodJobs.Count;
             started = stream;
         }
 
@@ -898,18 +909,43 @@ public sealed class FfmpegManager : IDisposable
     /// Whether a full-resolution conversion of this file exists, is running,
     /// or has never been made — for the Transcode panel's file listing.
     /// </summary>
+    /// Conversions already known to be finished.
+    ///
+    /// The folder pills ask this for every file they count, and the answer
+    /// used to cost a stat, this lock, and reading the whole playlist looking
+    /// for its end marker - for every file, on every listing, and the panel
+    /// re-lists itself every few seconds. A finished conversion does not
+    /// become unfinished, so it is worth remembering; DiscardVod forgets it
+    /// when the files actually go.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _vodDone =
+        new(StringComparer.OrdinalIgnoreCase);
+
     public VodState VodStatusFor(string file)
     {
         var stream = VodStreamName(file);
         if (stream is null) return VodState.None;
-        lock (_lock)
-            if (_vodJobs.TryGetValue(stream, out var p))
-            { try { if (!p.HasExited) return VodState.Converting; } catch { } }
+        // Known finished: confirm it is still on disk, which is one cheap check
+        // rather than the lock and the whole-playlist read below, and stays
+        // right whichever of the several delete paths removed it.
+        if (_vodDone.ContainsKey(stream))
+        {
+            if (File.Exists(Path.Combine(_mediaRoot, stream, "index.m3u8"))) return VodState.Done;
+            _vodDone.TryRemove(stream, out _);
+        }
+        // Nothing is converting: no need for the lock at all, which matters
+        // because this is asked once per file while a folder is being listed.
+        if (_vodJobCount > 0)
+            lock (_lock)
+                if (_vodJobs.TryGetValue(stream, out var p))
+                { try { if (!p.HasExited) return VodState.Converting; } catch { } }
         try
         {
             var playlist = Path.Combine(_mediaRoot, stream, "index.m3u8");
             if (File.Exists(playlist) && File.ReadAllText(playlist).Contains("#EXT-X-ENDLIST", StringComparison.Ordinal))
+            {
+                _vodDone[stream] = 0;
                 return VodState.Done;
+            }
         }
         catch { }
         return VodState.None;
@@ -1254,12 +1290,14 @@ public sealed class FfmpegManager : IDisposable
     /// </summary>
     public bool DiscardVod(string stream)
     {
+        _vodDone.TryRemove(stream, out _);   // it is about to stop being done
         lock (_lock)
         {
             if (_vodJobs.TryGetValue(stream, out var p))
             {
                 try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
                 _vodJobs.Remove(stream);
+                _vodJobCount = _vodJobs.Count;
             }
             StopSeekJobs(stream);
         }
@@ -1298,6 +1336,7 @@ public sealed class FfmpegManager : IDisposable
         {
             StopSeekJobs(stream);
             if (!_vodJobs.Remove(stream, out p)) return false;
+            _vodJobCount = _vodJobs.Count;
         }
         // Outside the lock: KillAndRelease waits up to 2s, and PumpVodQueue takes
         // a different lock — holding _lock across either risks a stall/inversion.

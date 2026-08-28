@@ -383,6 +383,8 @@ public sealed partial class ControlApi : IDisposable
         if (_requestShutdown is null) return;
         _idleShutdownTimer = new Timer(_ =>
         {
+          try
+          {
             if (!_config.ShutdownOnClose || !_sawDashboard) return;
             if (DateTime.UtcNow - _lastSeenUtc < TimeSpan.FromSeconds(30)) return;
             if (_services.Viewers.Count > 0) return;       // somebody is watching
@@ -390,6 +392,8 @@ public sealed partial class ControlApi : IDisposable
             _idleShutdownTimer = null;
             Log.Info("control", "no dashboard for 30 s and nothing streaming - shutting down");
             _requestShutdown();
+          }
+          catch (Exception ex) { Log.Warn("control", "idle check failed: " + ex.Message); }
         }, null, dueTime: 10_000, period: 10_000);
     }
     /// <summary>
@@ -3769,6 +3773,11 @@ public sealed partial class ControlApi : IDisposable
         if (_probeQueued.Count > 500) return;                 // already plenty to do
         // walked recently: nothing has changed in the seconds since
         if (_probeDone.TryGetValue(dir, out var done) && DateTime.UtcNow - done < TimeSpan.FromSeconds(45)) return;
+        // this only exists to suppress repeats, so old entries are worthless;
+        // left alone it grows for as long as the server runs
+        if (_probeDone.Count > 2000)
+            foreach (var stale in _probeDone.Where(e => DateTime.UtcNow - e.Value > TimeSpan.FromMinutes(10)).Select(e => e.Key).ToList())
+                _probeDone.TryRemove(stale, out _);
         if (!_probeQueued.TryAdd(dir, 0)) return;             // asked for already
         _probeWanted.Enqueue(dir);
     }
@@ -3843,7 +3852,11 @@ public sealed partial class ControlApi : IDisposable
                     await Task.WhenAll(work.Select(f => Task.Run(() => _tvCodecs.Codecs(f)))).ConfigureAwait(false);
                     done += work.Length;
                     probed += work.Length;
-                    _tvCodecs.Save();
+                    // No Save here. It serialises the entire cache and rewrites
+                    // the file - on a settled install that is hundreds of KB,
+                    // and once per batch of sixteen meant hundreds of full
+                    // rewrites for one sweep. Codecs() already flushes every
+                    // 200 files, and the caller saves when the folder is done.
                 }
 
                 foreach (var file in files)
@@ -4651,6 +4664,15 @@ public sealed partial class ControlApi : IDisposable
     public void Dispose()
     {
         _cts.Cancel();
+        // Timers outlive the object otherwise, and one of them calls back into
+        // services that are being torn down: an exception on a timer thread
+        // takes the process with it rather than being caught anywhere.
+        try { _idleShutdownTimer?.Dispose(); _idleShutdownTimer = null; } catch { }
+        lock (_shutdownLock)
+        {
+            try { _closeShutdownTimer?.Dispose(); _closeShutdownTimer = null; } catch { }
+            try { _closedNoticeTimer?.Dispose(); _closedNoticeTimer = null; } catch { }
+        }
         try { _listener?.Stop(); } catch { }
         try { StopDlnaListener(); } catch { }
         try { _providers.Dispose(); } catch { }
