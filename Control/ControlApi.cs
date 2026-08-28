@@ -3792,6 +3792,24 @@ public sealed partial class ControlApi : IDisposable
         var needsConv = unique.Where(f => _tvCodecs?.NeedsConversion(f) ?? true).ToList();
         var alreadyGood = unique.Count - needsConv.Count;
         var queued = _ffmpeg.QueueVod(needsConv);
+
+        // A conversion started from the Transcode panel is not a stream the
+        // user asked to publish. It writes its output into the media root like
+        // any other, and the HLS list shows every directory there, so batch
+        // converting a library filled that list with rows nobody added - one
+        // per file, each with a link. Unlink them as they are queued: the
+        // conversion is kept and does all its work, it simply is not listed.
+        //
+        // Nothing is lost by this. Preparing or playing the media calls
+        // StreamLinks.Show, so adding it from the media library - the one
+        // action that means "publish this" - brings the row back with the
+        // conversion already finished.
+        foreach (var f in needsConv)
+        {
+            var name = _ffmpeg.VodStreamName(f);
+            if (name is not null) _links.Hide(name);
+        }
+
         Log.Info("control", $"transcode: {queued} file(s) queued from {req.Paths.Count} selection(s) "
             + $"({unique.Count} video file(s) found, {alreadyGood} already play on a TV)");
         WriteJson(res, 200, new { queued, found = unique.Count, needs = needsConv.Count, alreadyGood });
