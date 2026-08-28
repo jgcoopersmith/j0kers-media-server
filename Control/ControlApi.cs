@@ -276,6 +276,10 @@ public sealed partial class ControlApi : IDisposable
         _playlists = new Media.PlaylistStore(baseDirectory);
         _library = new Media.LibraryStore(baseDirectory);
         _links = new Media.StreamLinks(baseDirectory);
+        // Conversions made before unlinking existed are still listed; take them
+        // out once so the list holds what was published rather than everything
+        // that was ever converted.
+        _links.HideExistingConversionsOnce(MediaRootPath());
         _favorites = new Media.FavoritesStore(baseDirectory);
         _history = new Media.WatchHistory(baseDirectory);
         _dlnaShare = new Dlna.DlnaShare(baseDirectory);

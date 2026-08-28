@@ -1,3 +1,5 @@
+using J0kersMediaServer.Logging;
+
 namespace J0kersMediaServer.Media;
 
 /// <summary>
@@ -83,6 +85,58 @@ public sealed class StreamLinks
     /// </summary>
     public void Forget(string stream) => Show(stream);
 
+
+    /// <summary>
+    /// Hides conversions that were made before the server started hiding them,
+    /// once.
+    ///
+    /// Converting from the Transcode panel is not the same as publishing a
+    /// stream, and since 2.0.157 a batch conversion is unlinked as it is
+    /// queued. Everything converted before that was listed, and stayed listed:
+    /// a library's worth of rows nobody added, which is exactly the complaint
+    /// the change was meant to answer. Nothing ever went back for the backlog.
+    ///
+    /// So do it once. Nothing is deleted - the conversions stay on disk and
+    /// keep working - and anything genuinely wanted in the list comes back by
+    /// playing it, which is what publishes a stream in the first place. The
+    /// marker file is what makes it once rather than every start, so a row put
+    /// back deliberately is not hidden again on the next launch.
+    /// </summary>
+    public void HideExistingConversionsOnce(string mediaRoot)
+    {
+        var marker = Path.Combine(Path.GetDirectoryName(_file)!, "unlinked-migrated");
+        if (File.Exists(marker)) return;
+
+        var hidden = 0;
+        try
+        {
+            if (Directory.Exists(mediaRoot))
+            {
+                var names = Directory.EnumerateDirectories(mediaRoot, "vod-*")
+                                     .Select(Path.GetFileName)
+                                     .Where(n => n is { Length: > 0 })
+                                     .Select(n => n!)
+                                     .ToList();
+                lock (_lock)
+                {
+                    foreach (var n in names) if (_hidden.Add(n)) hidden++;
+                    if (hidden > 0) Persist();
+                }
+            }
+            File.WriteAllText(marker, "conversions made before unlinking existed were hidden once");
+        }
+        catch (Exception ex)
+        {
+            // Not being able to do this is not a reason to refuse to start; the
+            // list is merely longer than it should be until next time.
+            Log.Warn("links", $"could not tidy the stream list: {ex.Message}");
+            return;
+        }
+
+        if (hidden > 0)
+            Log.Info("links", $"{hidden} existing conversion(s) taken out of the HLS list - " +
+                              "they are still on disk, and playing one puts it back");
+    }
     public IReadOnlyCollection<string> All
     {
         get { lock (_lock) return _hidden.ToList(); }
