@@ -110,7 +110,28 @@ public static class WindowsUrlAcl
         }
         else
         {
-            aclPorts = aclPorts.Where(NeedsAcl).ToList();
+            // The mirror of the case above, and the one that was missing.
+            //
+            // A reservation belongs to a scheme and holds the port against the
+            // other one. A machine that has ever run with TLS therefore keeps
+            // an https reservation that refuses the plain-http bind outright:
+            // "failed to listen on prefix http://+:8080/ because it conflicts
+            // with an existing registration on the machine". Switching back to
+            // http has to clear it, exactly as switching to TLS clears the
+            // http one.
+            //
+            // Those ports then need their http reservation adding whether or
+            // not the probe says so: NeedsAcl only recognises access-denied,
+            // and a conflict is a different error it reads as "nothing
+            // needed" - and in any case the conflicting reservation is still
+            // there while the probe runs.
+            var existing = ShowUrlAcls();
+            var freed = aclPorts
+                .Where(p => existing.Contains($"https://+:{p}/", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            foreach (var p in freed)
+                commands.Add($"netsh http delete urlacl url=https://+:{p}/");
+            aclPorts = aclPorts.Where(p => freed.Contains(p) || NeedsAcl(p)).ToList();
         }
         // sddl WD = Everyone, locale-independent (user=Everyone breaks on non-English Windows).
         // The reservation is per scheme, so switching to TLS needs its own.

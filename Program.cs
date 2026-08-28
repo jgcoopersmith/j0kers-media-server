@@ -478,16 +478,41 @@ try
 }
 catch (Exception ex)
 {
-    // Far and away the most common startup failure is the server already
-    // running: double-clicking the icon a second time. "Access is denied" or
-    // "address already in use" is a true but unhelpful way to say that, so
-    // say the likely thing and name the port.
-    var inUse = ex is System.Net.HttpListenerException or System.Net.Sockets.SocketException
-                || ex.Message.Contains("in use", StringComparison.OrdinalIgnoreCase)
-                || ex.Message.Contains("Access is denied", StringComparison.OrdinalIgnoreCase);
-    J0kersMediaServer.Services.ConsoleWindow.Fatal(inUse
+    // The likeliest startup failure is the server already running - somebody
+    // double-clicked the icon twice - and "access is denied" is a true but
+    // unhelpful way to say so. But the message must not name a port that was
+    // never the problem: this used to report the control port whatever had
+    // actually failed, so a clash on the media port sent people to look at
+    // the dashboard port instead. Take the prefix out of the error when it
+    // names one.
+    var failedOn = System.Text.RegularExpressions.Regex.Match(
+        ex.Message, @"prefix '([a-z]+)://[^:]*:(\d+)/'");
+    var port = failedOn.Success ? failedOn.Groups[2].Value : config.Control.Port.ToString();
+    var scheme = failedOn.Success ? failedOn.Groups[1].Value : "http";
+
+    // A conflicting *registration* is not a port in use. It is a reservation
+    // for the other scheme on the same port, left behind by a run that used
+    // TLS, and it refuses the bind even with nothing listening - so telling
+    // someone to close the running copy is advice for a different fault.
+    var conflicting = ex.Message.Contains("conflicts with an existing registration",
+                                          StringComparison.OrdinalIgnoreCase);
+    var inUse = !conflicting
+                && (ex is System.Net.HttpListenerException or System.Net.Sockets.SocketException
+                    || ex.Message.Contains("in use", StringComparison.OrdinalIgnoreCase)
+                    || ex.Message.Contains("Access is denied", StringComparison.OrdinalIgnoreCase));
+
+    J0kersMediaServer.Services.ConsoleWindow.Fatal(
+        conflicting
+        ? $"Port {port} is reserved on this machine for a different protocol, so this copy has stopped.\n\n" +
+          $"Something - most likely this server from when it ran with HTTPS on - holds a Windows URL\n" +
+          $"reservation for that port under the other scheme, and it refuses the {scheme} listener even\n" +
+          $"with nothing running. Starting again should clear it, since the server now removes the\n" +
+          $"leftover itself. If it persists, run as administrator:\n\n" +
+          $"    netsh http delete urlacl url=https://+:{port}/\n\n" +
+          $"or give the server a different port in server.json.\n\n({ex.Message})"
+        : inUse
         ? $"j0kers Media Server looks like it is already running.\n\n" +
-          $"Port {config.Control.Port} is taken, so this copy has stopped. Open the dashboard at " +
+          $"Port {port} is taken, so this copy has stopped. Open the dashboard at " +
           $"http://localhost:{config.Control.Port}/ — or exit the running copy first.\n\n({ex.Message})"
         : $"Startup failed: {ex.Message}");
     tray?.Dispose(); discovery?.Dispose(); services?.Dispose(); control?.Dispose(); ffmpeg?.Dispose();
