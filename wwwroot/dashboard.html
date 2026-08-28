@@ -1180,6 +1180,20 @@
       drive with room to spare. Takes effect after the server restarts.
     </div>
 
+
+    <label class="sect" style="margin-top:12px">Removing a stream link</label>
+    <div style="color:var(--muted);font-size:11.5px;margin-bottom:4px">
+      When a stream is removed from the HLS list and a conversion of it already
+      exists. Leave both unticked to be asked each time.
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;color:var(--ink);font-size:13px;cursor:pointer;margin:0">
+      <input id="cfg-rm-keep" type="checkbox" style="width:16px;height:16px" onchange="syncRemoveAction('keep')">
+      <span>Always save the converted files</span>
+    </label>
+    <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;color:var(--ink);font-size:13px;cursor:pointer;margin:4px 0 0">
+      <input id="cfg-rm-delete" type="checkbox" style="width:16px;height:16px" onchange="syncRemoveAction('delete')">
+      <span>Always delete them</span>
+    </label>
     <label class="sect" style="margin-top:12px">Logging</label>
     <div style="display:flex;gap:10px;align-items:flex-end">
       <div style="flex:1">
@@ -2503,6 +2517,7 @@ async function refreshLog() {
     logLevelSynced = true;
     try {
       const s = await api("/api/settings");
+      if (s && s.streamRemoveAction) streamRemoveAction = String(s.streamRemoveAction).toLowerCase();
       if (s.logLevel) $("log-filter").value = s.logLevel.toUpperCase();
     } catch { /* keep the dropdown's default */ }
     loadLogFiles();               // fill the history picker once, at startup
@@ -3745,6 +3760,7 @@ async function togglePower() {
 
 /* ---- config dialog: hostname (bind address) and ports ---- */
 let cfgLoaded = null; // values as loaded, so Save only sends what changed
+let streamRemoveAction = "ask";   // keep|delete once settled; "ask" prompts each time
 
 let cfgInterfaces = [];
 
@@ -3809,6 +3825,9 @@ async function openConfig() {
     // make the "what changed?" baseline that same path so an untouched save
     // doesn't look like a directory change
     $("cfg-mediaroot").value = s.mediaRootResolved || s.mediaRoot || "media";
+    var rmAct = (s.streamRemoveAction || "ask").toLowerCase();
+    $("cfg-rm-keep").checked = rmAct === "keep";
+    $("cfg-rm-delete").checked = rmAct === "delete";
     cfgMediaResolved = s.mediaRootResolved || "";
     s.mediaRoot = $("cfg-mediaroot").value;
   } catch (e) {
@@ -4073,6 +4092,20 @@ async function browseLogDir() {
   if (p) { $("cfg-logdir").value = p; renderLogging(); }
 }
 
+
+/* The two "always" boxes are one setting with three states, shown as a pair
+   because that is how it was asked for: ticking one clears the other, and
+   neither ticked means ask each time. */
+function syncRemoveAction(which) {
+  if (which === "keep" && $("cfg-rm-keep").checked) $("cfg-rm-delete").checked = false;
+  if (which === "delete" && $("cfg-rm-delete").checked) $("cfg-rm-keep").checked = false;
+}
+
+function removeActionFromBoxes() {
+  if ($("cfg-rm-keep").checked) return "keep";
+  if ($("cfg-rm-delete").checked) return "delete";
+  return "ask";
+}
 async function browseMediaDir() {
   const start = $("cfg-mediaroot").value.trim() || cfgMediaResolved;
   const p = await pickPath({ mode: "folder", title: "Choose the transcodes directory", startPath: start });
@@ -4119,6 +4152,7 @@ async function saveConfig() {
     logRotatePeriod: $("cfg-logperiod").value,
     logMaxFiles: parseInt($("cfg-logkeep").value, 10) || 0,
     mediaRoot: $("cfg-mediaroot").value.trim() || "media",
+    streamRemoveAction: removeActionFromBoxes(),
   };
   // only send fields the user actually changed, so untouched settings
   // keep following server.json instead of being frozen in settings.json
@@ -5458,14 +5492,32 @@ async function removeHlsStream(name, at) {
   // Two outcomes, because they are genuinely different decisions: keeping
   // the conversion saves rebuilding it, and deleting it is the only thing
   // that gives the disk back. Keeping is offered first and is the safe one.
-  const choice = await choiceAt(at, "Remove '" + name + "' from the list?"
-      + "\n\nKeeping the conversion means playing this media again brings it back"
-      + "\nwithout converting it a second time. Deleting frees the disk space.",
-      [{ label: "Keep files", value: "keep" },
-       { label: "Delete files", value: "purge", danger: true }]);
-  if (!choice) return;
+  //
+  // Unless the answer has already been settled once and for all, from the
+  // tick below or the Config dialog: then it is simply done, with no prompt.
+  let choice = (cfgLoaded && cfgLoaded.streamRemoveAction) || streamRemoveAction || "ask";
+  if (choice !== "keep" && choice !== "delete") {
+    const remember = { label: "Always do this - don't ask again" };
+    choice = await choiceAt(at, "Remove '" + name + "' from the list?"
+        + "\n\nKeeping the conversion means playing this media again brings it back"
+        + "\nwithout converting it a second time. Deleting frees the disk space.",
+        [{ label: "Keep files", value: "keep" },
+         { label: "Delete files", value: "purge", danger: true }],
+        remember);
+    if (!choice) return;
+    // Ticked: save it as the server's setting, so it holds for this browser,
+    // the next one, and shows in Config where it can be changed back.
+    if (remember.checked) {
+      const pick = choice === "purge" ? "delete" : "keep";
+      streamRemoveAction = pick;
+      if (cfgLoaded) cfgLoaded.streamRemoveAction = pick;
+      send("POST", "/api/settings", { streamRemoveAction: pick })
+        .catch(() => { /* the removal itself still goes ahead */ });
+    }
+  }
+  const purge = (choice === "purge" || choice === "delete");
   const r = await fetch("/api/hls?stream=" + encodeURIComponent(name)
-      + (choice === "purge" ? "&purge=1" : ""), { method: "DELETE", headers: headers() });
+      + (purge ? "&purge=1" : ""), { method: "DELETE", headers: headers() });
   if (!r.ok) {
     const data = await r.json().catch(() => ({}));
     alert(data.error || "delete failed");
@@ -5666,11 +5718,11 @@ let openPopconfirm = null;
    Some questions are not yes-or-no: removing a conversion can keep the
    files or delete them, and those are different decisions rather than a
    confirmation and an afterthought. Resolves the chosen value, or null. */
-function choiceAt(anchor, text, options) {
-  return confirmAt(anchor, text, null, options);
+function choiceAt(anchor, text, options, remember) {
+  return confirmAt(anchor, text, null, options, remember);
 }
 
-function confirmAt(anchor, text, okLabel, options) {
+function confirmAt(anchor, text, okLabel, options, remember) {
   if (!anchor || !anchor.getBoundingClientRect) {
     // no anchor: fall back to confirm(), taking the first option as "yes"
     if (options) return Promise.resolve(confirm(text) ? options[0].value : null);
@@ -5703,7 +5755,25 @@ function confirmAt(anchor, text, okLabel, options) {
       row.append(b);
       yes.push(b);
     }
-    pop.append(body, row);
+    let rememberEl = null;
+    // An optional "always do this" tick. The caller passes an object and
+    // reads its .checked afterwards, so adding this changed no existing
+    // call site or return value.
+    if (remember) {
+      const wrap = document.createElement("label");
+      wrap.className = "pc-remember";
+      wrap.style.cssText = "display:flex;align-items:center;gap:6px;margin:8px 0 0;font-size:12px;cursor:pointer";
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      const cap = document.createElement("span");
+      cap.textContent = remember.label || "Always do this";
+      wrap.append(box, cap);
+      remember.box = box;
+      rememberEl = wrap;
+    }
+    pop.append(body);
+    if (rememberEl) pop.append(rememberEl);
+    pop.append(row);
     document.body.appendChild(pop);
 
     // a flag, not an identity check against openPopconfirm: that holds the
@@ -5713,6 +5783,8 @@ function confirmAt(anchor, text, okLabel, options) {
     const close = answer => {
       if (settled) return;
       settled = true;
+      // read the tick while the element still exists
+      if (remember && remember.box) remember.checked = remember.box.checked;
       if (openPopconfirm === cancel) openPopconfirm = null;
       removeEventListener("keydown", onKey, true);
       removeEventListener("mousedown", onOutside, true);

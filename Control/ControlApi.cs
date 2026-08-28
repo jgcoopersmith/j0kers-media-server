@@ -1181,6 +1181,8 @@ public sealed partial class ControlApi : IDisposable
                     // resolved path is what Browse opens at and what the box shows
                     mediaRoot = _serverConfig.Hls.MediaRoot,
                     mediaRootResolved = MediaRootPath(),
+                    // what removing a stream link does with an existing conversion
+                    streamRemoveAction = _serverConfig.StreamRemoveAction,
                     // the tray lives in the Windows notification area
                     traySupported = OperatingSystem.IsWindows(),
                     // network announcement, and the name it publishes, so the
@@ -1948,6 +1950,13 @@ public sealed partial class ControlApi : IDisposable
                 return;
             }
         }
+        if (s.StreamRemoveAction is { Length: > 0 } sra &&
+            sra.ToLowerInvariant() is not ("ask" or "keep" or "delete"))
+        {
+            WriteJson(res, 400, new { error = "stream remove action must be ask, keep, or delete" });
+            return;
+        }
+
         // computed before UpdateSettings swaps the value in: a real change, so
         // the dialog can say the new directory needs a restart to take effect
         var mediaRootChanged = s.MediaRoot is { Length: > 0 }

@@ -51,6 +51,16 @@ public sealed class ServerConfig
     [JsonPropertyName("minimizeToTray")]
     public bool MinimizeToTray { get; set; }
 
+    /// <summary>
+    /// What removing an HLS stream link should do with a conversion that
+    /// already exists: "ask" (the default - the dashboard offers both),
+    /// "keep" to always leave the files, or "delete" to always free the disk.
+    /// Set from the Config dialog, so the choice is the server's rather than
+    /// one browser's.
+    /// </summary>
+    [JsonPropertyName("streamRemoveAction")]
+    public string StreamRemoveAction { get; set; } = "ask";
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         ReadCommentHandling = JsonCommentHandling.Skip,
@@ -133,6 +143,7 @@ public sealed class ServerConfig
         [JsonPropertyName("logRotatePeriod")] public string? LogRotatePeriod { get; set; }
         [JsonPropertyName("logMaxFiles")] public int? LogMaxFiles { get; set; }
         [JsonPropertyName("mediaRoot")] public string? MediaRoot { get; set; }
+        [JsonPropertyName("streamRemoveAction")] public string? StreamRemoveAction { get; set; }
     }
 
     private SettingsOverrides _persistedSettings = new();
@@ -178,6 +189,7 @@ public sealed class ServerConfig
         if (s.LogRotatePeriod is not null) _persistedSettings.LogRotatePeriod = s.LogRotatePeriod;
         if (s.LogMaxFiles is not null) _persistedSettings.LogMaxFiles = s.LogMaxFiles;
         if (s.MediaRoot is not null) _persistedSettings.MediaRoot = s.MediaRoot;
+        if (s.StreamRemoveAction is not null) _persistedSettings.StreamRemoveAction = s.StreamRemoveAction;
         WriteAtomic(SettingsFile, JsonSerializer.Serialize(_persistedSettings, JsonOpts), "settings");
     }
 
@@ -211,6 +223,7 @@ public sealed class ServerConfig
         // takes effect at the next start: the media root is read once, when the
         // transcoder and HLS server are constructed
         if (!string.IsNullOrWhiteSpace(s.MediaRoot)) Hls.MediaRoot = s.MediaRoot;
+        if (!string.IsNullOrWhiteSpace(s.StreamRemoveAction)) StreamRemoveAction = s.StreamRemoveAction;
     }
 
     private sealed class MountSidecar
