@@ -187,7 +187,8 @@ public sealed class HlsServer : IDisposable
             res.Headers["Cache-Control"] = "no-cache";
 
             var path = ctx.Request.Url?.AbsolutePath ?? "/";
-            Log.Debug("hls", $"{ctx.Request.RemoteEndPoint} GET {path}");
+            if (Log.Enabled(LogLevel.Debug))
+                Log.Debug("hls", $"{ctx.Request.RemoteEndPoint} GET {path}");
 
             var parts = path.Trim('/').Split('/');
 

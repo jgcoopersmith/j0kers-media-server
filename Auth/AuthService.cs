@@ -578,6 +578,16 @@ public sealed class AuthService
         foreach (var (id, s) in _sessions)
             if (now - s.LastSeenUtc > SessionIdle || now - s.CreatedUtc > SessionMax)
                 _sessions.TryRemove(id, out _);
+
+        // Failed-login counters were only cleared by a *successful* login for
+        // that same name or address. A wrong username, or an address that
+        // never gets in, therefore left an entry for the life of the process -
+        // and this server listens on the network, so anyone can add as many as
+        // they like. An hour after the last failure the counter has done its
+        // job and the lockout has long expired.
+        foreach (var (key, t) in _throttles)
+            if (now - t.LastFailureUtc > TimeSpan.FromHours(1) && now > t.LockedUntilUtc)
+                _throttles.TryRemove(key, out _);
     }
 
     private static string Digest(string value) =>

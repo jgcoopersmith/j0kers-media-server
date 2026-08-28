@@ -12,6 +12,14 @@ public static class Log
 {
     public static LogLevel Level { get; set; } = LogLevel.Info;
 
+    /// <summary>
+    /// Whether a line at this level would be kept. Write() checks the level
+    /// too, but the caller has already built the message by then - and on a
+    /// request path that is a formatted string and a remote-endpoint lookup
+    /// per request, per viewer, thrown away unread.
+    /// </summary>
+    public static bool Enabled(LogLevel level) => level >= Level;
+
     public static void SetLevel(string name) => Level = Parse(name);
 
     public static LogLevel Parse(string name) => name.ToLowerInvariant() switch

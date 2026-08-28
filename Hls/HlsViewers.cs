@@ -216,7 +216,20 @@ public sealed class HlsViewers
         now - e.LastSeenUtc <= Fresh ? "playing" : "buffered",
         e.Protocol, e.File);
 
-    public int Count => Active.Count;
+    /// How many are watching. Deliberately not Active.Count: that filters,
+    /// sorts and projects the whole table into new objects, and this is asked
+    /// on every dashboard poll and by the idle-shutdown check.
+    public int Count
+    {
+        get
+        {
+            var now = DateTime.UtcNow;
+            var n = 0;
+            foreach (var e in _entries.Values)
+                if (now - e.LastSeenUtc <= Window) n++;
+            return n;
+        }
+    }
 
     private void Prune()
     {
