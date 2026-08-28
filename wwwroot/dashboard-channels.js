@@ -178,7 +178,6 @@ async function refreshChannels(force) {
     // else — VLC, a phone, another PC — and a localhost URL pasted there
     // points at that device instead. shareUrl picks an address the server
     // actually answers on. Same reasoning, same helper, as HLS Streams.
-    const copyUrl = shareUrl("/" + c.stream + leaf);
     // What Play actually opens: the channel's own source, not the re-encode.
     //
     // A pinned channel stores the proxy URL it came from, and that proxy passes
@@ -193,6 +192,14 @@ async function refreshChannels(force) {
     // proxy URL behind it.
     const viaProxy = (c.url || "").match(/\/api\/tv\/(?:watch|r)\?.*/);
     const playUrl = viaProxy ? viaProxy[0] : url;
+    // Copy hands the link to somewhere else - VLC, a phone, another PC - so it
+    // gets the same source Play does, on an address that machine can reach.
+    // The proxy lives on the control port rather than the media port, which is
+    // why this is built here instead of through shareUrl.
+    const sharePort = location.port || (location.protocol === "https:" ? "443" : "80");
+    const copyUrl = viaProxy
+      ? location.protocol + "//" + shareHost() + ":" + sharePort + viaProxy[0]
+      : shareUrl("/" + c.stream + leaf);
     const live = c.status === "running";
     // idle = saved but never started (a fresh pin). It has no playlist on
     // disk yet, so offering Play would just fail — offer Start instead.

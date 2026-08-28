@@ -212,9 +212,30 @@ public static class StreamTitle
         return sb.ToString();
     }
 
+    /// <summary>
+    /// Season and episode codes. Not words, and title-casing them produces
+    /// "S01e03", which is how the episode of a series ends up looking wrong
+    /// in the transcode list. Every naming convention that produces one
+    /// writes it as a single token, so recognising it is enough.
+    /// </summary>
+    private static readonly Regex Episode =
+        new(@"^s\d{1,3}e\d{1,3}$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// Tokens that are an abbreviation rather than a word, and read wrongly
+    /// in sentence case. Deliberately short: "us" and "uk" are left out
+    /// because they are also ordinary words and a film really can be called
+    /// Us, which matters more than a resolution tag reading tidily.
+    /// </summary>
+    private static readonly HashSet<string> Abbreviations = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "4k", "3d", "uhd",
+    };
+
     private static string TitleCase(string word, bool first)
     {
         if (word.Length == 0) return word;
+        if (Episode.IsMatch(word) || Abbreviations.Contains(word)) return word.ToUpperInvariant();
         if (!first && Minor.Contains(word)) return word.ToLowerInvariant();
         return char.ToUpperInvariant(word[0]) + word[1..].ToLowerInvariant();
     }

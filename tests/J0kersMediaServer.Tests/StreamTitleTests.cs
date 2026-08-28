@@ -83,4 +83,23 @@ public class StreamTitleTests
     [InlineData("   ")]
     public void PrettifyFile_returns_blank_input_untouched(string fileName) =>
         Assert.Equal(fileName, StreamTitle.PrettifyFile(fileName));
+
+    [Theory]
+    // A season/episode code is one token and is not a word: title-casing it
+    // gave "S01e03", which is how an episode looked in the transcode list.
+    [InlineData("Some Show - S01E03 - Pilot.mkv", "Some Show S01E03 Pilot")]
+    [InlineData("some.show.s01e03.pilot.mkv", "Some Show S01E03 Pilot")]
+    [InlineData("Series S1E2.mp4", "Series S1E2")]
+    [InlineData("Show S100E200.mp4", "Show S100E200")]
+    public void Episode_codes_keep_their_case(string file, string expected) =>
+        Assert.Equal(expected, StreamTitle.PrettifyFile(file));
+
+    [Theory]
+    // Abbreviations that are not words. "us" and "uk" are deliberately absent:
+    // a film really can be called Us.
+    [InlineData("Some Film 4k.mp4", "Some Film 4K")]
+    [InlineData("Some Film 3d.mp4", "Some Film 3D")]
+    [InlineData("Us.mp4", "Us")]
+    public void Abbreviations_are_upper_but_real_words_are_not(string file, string expected) =>
+        Assert.Equal(expected, StreamTitle.PrettifyFile(file));
 }
