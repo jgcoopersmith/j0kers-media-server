@@ -47,9 +47,25 @@ public static class ProviderStore
 
         try
         {
-            var defs = JsonSerializer.Deserialize<List<ProviderDef>>(File.ReadAllText(file),
+            var text = File.ReadAllText(file);
+            var defs = JsonSerializer.Deserialize<List<ProviderDef>>(text,
                 new JsonSerializerOptions { ReadCommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true })
                 ?? new List<ProviderDef>();
+
+            // An install made while the template shipped every provider
+            // commented out has a file that parses to nothing, and shows Pluto
+            // alone. That is the untouched template rather than a choice, so
+            // replace it with the current one and use it. Recognised by having
+            // no entries *and* still carrying the commented-out examples — a
+            // deliberately emptied list has neither and is left alone.
+            if (defs.Count == 0 && text.Contains("// {"))
+            {
+                TryWriteTemplate(file);
+                defs = JsonSerializer.Deserialize<List<ProviderDef>>(Template,
+                    new JsonSerializerOptions { ReadCommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true })
+                    ?? new List<ProviderDef>();
+                Log.Info("provider", "providers.json held only commented-out examples — refreshed it with the current list");
+            }
 
             foreach (var d in defs)
             {
@@ -97,7 +113,9 @@ public static class ProviderStore
     // reached: point at a playlist that someone keeps current, and the churn
     // stays with whoever maintains it.
     //
-    // Nothing is enabled by default: uncomment a line and set "enabled": true.
+    // The three below are on, so a fresh install has the same free-TV lineup
+    // as an established one rather than Pluto alone. Set "enabled": false on
+    // any you don't want, or delete the entry.
     // "relaySegments" is only needed if playback fails with a CORS error in the
     // browser console — it routes the video through this server instead of
     // straight from the source. None of the three below need it.
@@ -110,15 +128,15 @@ public static class ProviderStore
     // Note: Sling Freestream is deliberately absent. Its streams are DRM
     // (Widevine), so no playlist can make them play here.
     [
-      // { "id": "tubi",    "name": "Tubi",
-      //   "url": "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/us_tubi.m3u",
-      //   "enabled": true },
-      // { "id": "roku",    "name": "The Roku Channel",
-      //   "url": "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/us_roku.m3u",
-      //   "enabled": true },
-      // { "id": "samsung", "name": "Samsung TV Plus",
-      //   "url": "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/us_samsung.m3u",
-      //   "enabled": true }
+      { "id": "tubi",    "name": "Tubi",
+        "url": "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/us_tubi.m3u",
+        "enabled": true },
+      { "id": "roku",    "name": "The Roku Channel",
+        "url": "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/us_roku.m3u",
+        "enabled": true },
+      { "id": "samsung", "name": "Samsung TV Plus",
+        "url": "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/us_samsung.m3u",
+        "enabled": true }
     ]
     """;
 

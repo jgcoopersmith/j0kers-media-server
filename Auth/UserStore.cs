@@ -124,6 +124,24 @@ public sealed class UserStore
                 u.Keys ??= new List<ApiKeyRecord>();
             }
             Log.Info("auth", $"loaded {_users.Count} user account(s) from {Path.GetFileName(_file)}");
+
+            // A server with no Server Admin has features nobody can reach: the
+            // transcode panel and the log window are that tier's, and only that
+            // tier can grant it. Installs made before first-run setup created
+            // the owner as Server Admin are in exactly that state, so promote
+            // the sole enabled administrator — the person who claimed the
+            // server — rather than leaving them locked out of their own box.
+            if (_users.Count > 0 && !_users.Any(u => u.Enabled && u.IsServerAdmin))
+            {
+                var owners = _users.Where(u => u.Enabled && u.IsAdmin).ToList();
+                if (owners.Count == 1)
+                {
+                    owners[0].Role = RoleServerAdmin;
+                    Save();
+                    Log.Info("auth", $"'{owners[0].Username}' promoted to Server Admin — " +
+                                     "this server had no account of that tier");
+                }
+            }
         }
         catch (Exception ex)
         {

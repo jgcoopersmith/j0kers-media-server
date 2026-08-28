@@ -223,8 +223,13 @@ public sealed partial class ControlApi
             return;
         }
 
-        var admin = _auth.Users.Create(req.username!, req.password, UserStore.RoleAdmin, req.username, enabled: true);
-        Log.Info("auth", $"administrator '{admin.Username}' created — configuration is now protected");
+        // Server Admin, not Admin: this is the person installing the server on
+        // their own machine, and the top tier is what owns the things only an
+        // owner should do — the transcode panel, the log window, the server's
+        // own files. Created as plain Admin they could never see those, with no
+        // higher account in existence to grant it.
+        var admin = _auth.Users.Create(req.username!, req.password, UserStore.RoleServerAdmin, req.username, enabled: true);
+        Log.Info("auth", $"server administrator '{admin.Username}' created — configuration is now protected");
 
         // sign the new admin straight in rather than bouncing them to a login form
         var outcome = _auth.Login(req.username, req.password, ctx);
