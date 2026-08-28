@@ -3754,6 +3754,11 @@ public sealed partial class ControlApi : IDisposable
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _probeQueued =
         new(StringComparer.OrdinalIgnoreCase);
 
+    /// When each directory was last finished, so the panel asking again every
+    /// few seconds does not start the same walk over.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _probeDone =
+        new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>
     /// Asks the background prober to look at this directory next. Cheap and
     /// non-blocking - the listing that triggered it must not wait for ffprobe.
@@ -3762,6 +3767,8 @@ public sealed partial class ControlApi : IDisposable
     {
         if (_tvCodecs is null || string.IsNullOrWhiteSpace(dir)) return;
         if (_probeQueued.Count > 500) return;                 // already plenty to do
+        // walked recently: nothing has changed in the seconds since
+        if (_probeDone.TryGetValue(dir, out var done) && DateTime.UtcNow - done < TimeSpan.FromSeconds(45)) return;
         if (!_probeQueued.TryAdd(dir, 0)) return;             // asked for already
         _probeWanted.Enqueue(dir);
     }
@@ -3816,7 +3823,13 @@ public sealed partial class ControlApi : IDisposable
             // So run several together and drop the gap. Four at a time is a
             // handful of short-lived processes, nothing next to an encode, and
             // it turns a thousand-file folder from minutes into seconds.
-            const int probeWidth = 4;
+            // Scaled to the machine. Four was picked when the gap between files was
+            // the thing being tuned; the real limit is how many short ffprobe
+            // processes can be in flight, and a box with cores to spare can
+            // have plenty. Four probes at 90ms each is 22ms a file, which is
+            // two minutes for a five-thousand-file folder - the wait actually
+            // reported. Sixteen brings the same folder under half a minute.
+            var probeWidth = Math.Clamp(Environment.ProcessorCount / 2, 4, 16);
             async Task<int> ProbeMany(IEnumerable<string> files)
             {
                 var batch = new List<string>(probeWidth);
@@ -3852,14 +3865,23 @@ public sealed partial class ControlApi : IDisposable
             {
                 while (_probeWanted.TryDequeue(out var wanted))
                 {
-                    _probeQueued.TryRemove(wanted, out _);
-                    if (!Directory.Exists(wanted)) continue;
-                    try
+                    // Deliberately still marked as queued while the walk runs.
+                    // The panel asks again every few seconds while any pill is
+                    // unresolved, and removing the mark here let each of those
+                    // re-queue the same folder - so a large tree was walked from
+                    // the top over and over and never got to the end of itself.
+                    if (Directory.Exists(wanted))
                     {
-                        await ProbeMany(Directory.EnumerateFiles(wanted, "*", opts)).ConfigureAwait(false);
+                        try
+                        {
+                            await ProbeMany(Directory.EnumerateFiles(wanted, "*", opts)).ConfigureAwait(false);
+                        }
+                        catch { /* a folder that vanished or refused: on to the next */ }
+                        _tvCodecs.Save();
                     }
-                    catch { /* a folder that vanished or refused: on to the next */ }
-                    _tvCodecs.Save();
+                    // Finished: let it be asked for again, but not immediately.
+                    _probeDone[wanted] = DateTime.UtcNow;
+                    _probeQueued.TryRemove(wanted, out _);
                 }
             }
 
