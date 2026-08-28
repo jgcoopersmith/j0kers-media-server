@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__ — j0kers</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🃏</text></svg>">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #ddd;
+               font-family: system-ui, sans-serif; overflow: hidden; }
+  video { width: 100vw; height: 100vh; display: block; background: #000; }
+  #msg {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    font-size: 14px; color: #bbb; text-align: center; pointer-events: none;
+  }
+  /* only until the first click, which is also what earns fullscreen */
+  #hint {
+    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+    background: rgba(0,0,0,.6); border: 1px solid rgba(255,255,255,.18);
+    border-radius: 999px; padding: 6px 14px; font-size: 12.5px; color: #ddd;
+    transition: opacity .4s; pointer-events: none;
+  }
+  /* Skip buttons of our own. The browser's controls have none,
+     and its arrow keys move by an amount it chooses — which is
+     why skipping felt different from one film to the next. These
+     are a fixed 30 seconds, the same in every stream. Placed
+     above the native control bar so they do not cover the
+     scrubber, and faded until the pointer is near. */
+  #skip {
+    position: fixed; left: 50%; bottom: 76px; transform: translateX(-50%);
+    display: flex; gap: 10px; opacity: .25; transition: opacity .25s;
+  }
+  #skip:hover, body.busy #skip { opacity: 1; }
+  #skip button {
+    background: rgba(0,0,0,.62); color: #eee; cursor: pointer;
+    border: 1px solid rgba(255,255,255,.22); border-radius: 999px;
+    padding: 7px 15px; font-size: 13px; font-family: inherit;
+  }
+  #skip button:hover { background: rgba(0,0,0,.85); border-color: rgba(255,255,255,.45); }
+  /* a moment's confirmation of where a skip landed */
+  #seeknote {
+    position: fixed; left: 50%; top: 12%; transform: translateX(-50%);
+    background: rgba(0,0,0,.7); border-radius: 8px; padding: 8px 16px;
+    color: #fff; font-size: 20px; opacity: 0; transition: opacity .25s;
+    pointer-events: none;
+  }
+</style>
+<script src="/hls.min.js"></script>
+</head>
+<body>
+<video id="v" controls autoplay playsinline></video>
+<div id="msg">loading…</div>
+<div id="seeknote"></div>
+<div id="skip">
+  <button id="sk-back" title="Back 15 seconds (← or J)">⏪ 15s</button>
+  <button id="sk-fwd" title="Forward 15 seconds (→ or L)">15s ⏩</button>
+</div>
+<div id="hint">click for fullscreen</div>
+<script>
+  const src = __SRC_JS__, v = document.getElementById("v");
+  const msg = document.getElementById("msg"), hint = document.getElementById("hint");
+  const done = () => { msg.style.display = "none"; };
+
+  // A live channel, where falling behind is fatal and going back
+  // to where you were is the wrong answer. Guessed from the URL
+  // so it is known before the first playlist arrives, then
+  // corrected from the playlist itself, which actually knows.
+  let live = /\/ch-[^/]*\//.test(src) || src.indexOf("/api/tv/") === 0;
+
+  // hls.js first. Chromium answers "maybe" to the native HLS
+  // question and then cannot play it — asking politely gets a
+  // black screen and a MEDIA_ELEMENT_ERROR. Native is the
+  // fallback, which is where Safari lands.
+  if (window.Hls && Hls.isSupported()) {
+    const hls = new Hls({
+      enableWorker: true,
+      // a channel left on all evening keeps every played-out
+      // second otherwise; half an hour is a generous DVR
+      backBufferLength: 1800,
+    });
+    hls.loadSource(src);
+    hls.attachMedia(v);
+
+    // Autoplay with sound — exactly the way the first build did it:
+    // the <video autoplay> attribute alone, with NO programmatic
+    // play() here. A deferred programmatic play() suppresses the
+    // browser's own declarative autoplay, which is what stopped the
+    // auto-start; and a muted fallback is what silenced it. Both are
+    // deliberately absent. hls.js attaches the media above and the
+    // autoplay attribute starts it, with audio, as it always did.
+
+    hls.on(Hls.Events.LEVEL_LOADED, (_, d) => {
+      if (d && d.details) live = !!d.details.live;
+    });
+
+    /* Recover, rather than announce the death.
+       A fatal hls.js error is usually a moment — one segment that
+       timed out, one playlist reload that missed — and the fix is
+       the same one the dashboard's own player has always used.
+       Without it a single hiccup ends playback for good, which on
+       a live channel with a 25-second window happens within the
+       first minute almost every time. */
+    let recoveries = 0, healthy = 0;
+    v.addEventListener("playing", () => {
+      // a spell of real playback means the last trouble is over,
+      // so a channel watched for hours is not slowly spending a
+      // fixed allowance of retries
+      clearTimeout(healthy);
+      healthy = setTimeout(() => { recoveries = 0; }, 60000);
+    });
+
+    hls.on(Hls.Events.ERROR, (_, d) => {
+      if (!d || !d.fatal) return;            // non-fatal: hls.js copes
+      if (++recoveries > 6) {
+        msg.style.display = "";
+        msg.textContent = "playback failed: " + (d.details || d.type);
+        return;
+      }
+      const was = v.currentTime;
+      msg.style.display = "";
+      msg.textContent = "reconnecting…";
+      try {
+        if (d.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
+        else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+        else { msg.textContent = "playback failed: " + (d.details || d.type); return; }
+      } catch { return; }
+      // A recording resumes where it was. A channel does not:
+      // the position it stopped at has already fallen out of the
+      // playlist, and asking for it again is how it stops twice.
+      if (!live && was > 1) {
+        v.addEventListener("canplay", function restore() {
+          v.removeEventListener("canplay", restore);
+          if (Math.abs(v.currentTime - was) > 2) { try { v.currentTime = was; } catch {} }
+        });
+      }
+    });
+
+    /* Falling off the back of the window.
+       Pluto's playlists hold about five segments — twenty-five
+       seconds of live — so a stall of any length leaves the
+       player asking for segments the playlist no longer lists,
+       and it stops with no error worth the name. Every few
+       seconds, if we are live and further behind than the window
+       is long, skip to the edge: a jump forward is what watching
+       live means, and the alternative is a frozen picture. */
+    setInterval(() => {
+      if (!live || v.paused || v.seekable.length === 0) return;
+      const edge = v.seekable.end(v.seekable.length - 1);
+      if (edge - v.currentTime > 30) {
+        try { v.currentTime = edge - 6; } catch {}
+      }
+    }, 5000);
+  } else {
+    v.src = src;
+  }
+  v.addEventListener("playing", done);
+  v.addEventListener("loadeddata", done);
+
+  // Try immediately — some browsers honour the opener's click —
+  // and fall back to earning it from the first one here.
+  function goFullscreen() {
+    const el = document.documentElement;
+    const ask = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (!ask || document.fullscreenElement) return;
+    try { const p = ask.call(el); if (p && p.catch) p.catch(() => {}); } catch {}
+  }
+  /* Skipping: a fixed 30 seconds, the same in every stream.
+     The browser's own arrow keys move by an amount of its
+     choosing, and with HLS a seek lands on a segment boundary —
+     so on a film whose segments are uneven, "a little forward"
+     could be minutes. This asks for an exact position, and the
+     note says where it landed, so a stream that still snaps is
+     visible rather than mystifying. */
+  const SKIP = 15;   // same as the dashboard player: one skip, everywhere
+  const note = document.getElementById("seeknote");
+  let noteTimer = 0;
+  const clock = s => {
+    s = Math.max(0, Math.floor(s));
+    const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+    return (h ? h + ":" + String(m).padStart(2, "0") : String(m))
+           + ":" + String(x).padStart(2, "0");
+  };
+  /* How far playback can actually go right now.
+     seekable first, duration only as a fallback — and that order
+     is the whole point. While a file is still being converted the
+     playlist grows as ffmpeg writes it, and duration is the
+     optimistic figure: it names an end that has not been written
+     yet. Clamping a skip to it seeks onto a fragment that does
+     not exist, hls.js raises a fatal error, the recovery above
+     reloads and restores the position, and the next press does it
+     again — forward a few times, then a stall, a pause and a
+     restart. seekable is the honest bound; the dashboard player
+     and the watch page both take it, and this one now agrees. */
+  function playableEnd() {
+    if (v.seekable && v.seekable.length) return v.seekable.end(v.seekable.length - 1);
+    return isFinite(v.duration) ? v.duration : Infinity;
+  }
+  function skip(by) {
+    if (!isFinite(v.duration) && by > 0 && live) return;   // no seeking past a live edge
+    if (by < 0) {
+      const back = Math.max(0, v.currentTime + by);
+      try { v.currentTime = back; } catch { return; }
+      showNote(by, back);
+      return;
+    }
+    // Skip anywhere in the film, converted or not. The playlist
+    // covers the whole length from the start now, and a segment
+    // that has not been made yet is made when the player asks
+    // for it — so there is no converted edge to stop at and
+    // nothing to clamp to. The only bound left is the film.
+    const end = isFinite(v.duration) ? v.duration : playableEnd();
+    const want = Math.min(Math.max(0, v.currentTime + by),
+                          isFinite(end) ? Math.max(0, end - 0.5) : v.currentTime + by);
+    try { v.currentTime = want; } catch { return; }
+    showNote(by, want);
+  }
+  function showNote(by, want) {
+    note.textContent = (by > 0 ? "⏩ +" : "⏪ −") + Math.abs(by) + "s · " + clock(want);
+    note.style.opacity = "1";
+    clearTimeout(noteTimer);
+    noteTimer = setTimeout(() => { note.style.opacity = "0"; }, 1100);
+  }
+  document.getElementById("sk-back").addEventListener("click", e => { e.stopPropagation(); skip(-SKIP); });
+  document.getElementById("sk-fwd").addEventListener("click", e => { e.stopPropagation(); skip(SKIP); });
+
+  goFullscreen();
+  addEventListener("click", () => { goFullscreen(); hint.style.opacity = "0"; }, { once: true });
+  // Capture phase, and an intention held for half a second.
+  //
+  // Measured in Chrome 148: a keydown reaches document capture,
+  // then any listener on the video, then document bubble. This
+  // was a bubble listener, so the video's own control bar had
+  // already toggled play/pause by the time it ran — it then read
+  // the state the video had just changed and toggled it straight
+  // back. Press space while paused and it started, then stopped.
+  // Capture reads the state before anything else touches it, and
+  // holding the intention undoes a second toggle from either
+  // side, whoever fires it.
+  let want = null, wantAt = 0;
+  function hold() {
+    if (want === "play") { if (v.paused) v.play().catch(() => {}); }
+    else if (want === "pause") { if (!v.paused) v.pause(); }
+  }
+  for (const ev of ["play", "pause"]) v.addEventListener(ev, () => {
+    if (!want) return;
+    if (performance.now() - wantAt > 500) { want = null; return; }
+    hold();
+  });
+  v.addEventListener("pointerdown", () => { want = null; });  // a click outranks the key
+
+  addEventListener("keydown", e => {
+    if (e.key === "f") { goFullscreen(); return; }
+    const t = e.target;
+    if (t && (t.tagName === "SELECT" || t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+    // preventDefault, or the browser adds its own 5-second seek
+    // on top of ours and the skip is neither 15 nor predictable
+    if (e.key === "ArrowLeft"  || e.key === "j" || e.key === "J") { e.preventDefault(); if (!e.repeat) skip(-SKIP); }
+    if (e.key === "ArrowRight" || e.key === "l" || e.key === "L") { e.preventDefault(); if (!e.repeat) skip(SKIP); }
+    if (e.key === " " || e.key === "Spacebar" || e.key === "k" || e.key === "K") {
+      e.preventDefault();
+      if (e.repeat) return;
+      want = v.paused ? "play" : "pause";
+      wantAt = performance.now();
+      hold();
+    }
+  }, true);
+  // it stops being useful the moment fullscreen happens
+  document.addEventListener("fullscreenchange",
+    () => { if (document.fullscreenElement) hint.style.display = "none"; });
+  setTimeout(() => { hint.style.opacity = "0"; }, 6000);
+</script>
+</body>
+</html>

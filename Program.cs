@@ -305,6 +305,13 @@ var auth = new J0kersMediaServer.Auth.AuthService(userStore, config.Control.Auth
 // carry a cookie or a header.
 var mediaLinks = new J0kersMediaServer.Auth.MediaLink(baseDirectory);
 
+// The title prettifier is static and shared, so it has no base directory of
+// its own to go looking in. It is told one here, before anything that shows a
+// title exists, so an optional stream-titles.json next to the config can
+// correct its release-tag and small-word lists without a rebuild. Without
+// that file, or with a broken one, the built-in lists stand.
+J0kersMediaServer.Media.StreamTitle.Initialise(baseDirectory);
+
 if (config.Control.Enabled && !auth.Enforcing)
 {
     var exposed = config.Control.BindAddress is not ("127.0.0.1" or "localhost" or "::1");

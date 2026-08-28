@@ -9,17 +9,60 @@
     <Nullable>enable</Nullable>
     <RootNamespace>J0kersMediaServer</RootNamespace>
     <AssemblyName>j0kers-media-server</AssemblyName>
-    <Version>2.0.175</Version>
+    <Version>2.0.176</Version>
     <ApplicationIcon>assets\j0kers.ico</ApplicationIcon>
     <!-- Protocol text (HLS EXTINF, RTSP dates) must never be locale-formatted:
          a de-DE machine would otherwise emit "#EXTINF:6,000," and break playback. -->
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- A warning in a streaming server is usually a real defect that only shows up
+         as a stall or a dropped client hours later, so the build refuses to produce
+         a binary until every one of them has been looked at and dealt with. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <AnalysisLevel>latest</AnalysisLevel>
   </PropertyGroup>
 
   <ItemGroup>
     <EmbeddedResource Include="wwwroot\dashboard.html" LogicalName="dashboard.html" />
+    <!-- The dashboard's script, one file per area of the page. It was a single
+         block inside dashboard.html and is still loaded the same way, as
+         ordinary script tags in this order, so nothing about it is a module.
+         Each one needs its own LogicalName because ControlApi asks for the
+         resource by the same name the browser asks for. -->
+    <EmbeddedResource Include="wwwroot\dashboard-core.js" LogicalName="dashboard-core.js" />
+    <EmbeddedResource Include="wwwroot\dashboard-accounts.js" LogicalName="dashboard-accounts.js" />
+    <EmbeddedResource Include="wwwroot\dashboard-status.js" LogicalName="dashboard-status.js" />
+    <EmbeddedResource Include="wwwroot\dashboard-transcode.js" LogicalName="dashboard-transcode.js" />
+    <EmbeddedResource Include="wwwroot\dashboard-log.js" LogicalName="dashboard-log.js" />
+    <EmbeddedResource Include="wwwroot\dashboard-streams.js" LogicalName="dashboard-streams.js" />
+    <EmbeddedResource Include="wwwroot\dashboard-player.js" LogicalName="dashboard-player.js" />
+    <EmbeddedResource Include="wwwroot\dashboard-config.js" LogicalName="dashboard-config.js" />
+    <EmbeddedResource Include="wwwroot\dashboard-library.js" LogicalName="dashboard-library.js" />
+    <EmbeddedResource Include="wwwroot\dashboard-channels.js" LogicalName="dashboard-channels.js" />
+    <EmbeddedResource Include="wwwroot\dashboard-content.js" LogicalName="dashboard-content.js" />
+    <EmbeddedResource Include="wwwroot\dashboard-ui.js" LogicalName="dashboard-ui.js" />
     <EmbeddedResource Include="wwwroot\login.html" LogicalName="login.html" />
     <EmbeddedResource Include="wwwroot\hls.min.js" LogicalName="hls.min.js" />
+    <EmbeddedResource Include="wwwroot\player.html" LogicalName="player.html" />
+    <EmbeddedResource Include="wwwroot\watch.html" LogicalName="watch.html" />
+  </ItemGroup>
+
+  <!-- The SDK compiles every .cs file under the project directory, so the test
+       project living in tests\ would otherwise be pulled into the server itself
+       and drag xunit into the shipped binary. It is a separate project with its
+       own csproj; nothing under tests\ belongs to this one. -->
+  <ItemGroup>
+    <Compile Remove="tests\**" />
+    <EmbeddedResource Remove="tests\**" />
+    <None Remove="tests\**" />
+  </ItemGroup>
+
+  <!-- Several pieces worth testing are internal because nothing outside the
+       server has any business calling them - JsonSidecar above all. Widening
+       them to public just to reach them from a test would be a worse trade
+       than naming the one assembly that is allowed to look in. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="J0kersMediaServer.Tests" />
   </ItemGroup>
 
 </Project>

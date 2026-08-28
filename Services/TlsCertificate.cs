@@ -51,6 +51,10 @@ public static class TlsCertificate
                     X509KeyStorageFlags.Exportable | X509KeyStorageFlags.PersistKeySet);
                 if (!supplied.HasPrivateKey)
                 {
+                    // Nothing downstream ever sees this one, so it has to be
+                    // let go here: an X509Certificate2 owns a native handle
+                    // that the garbage collector will not hurry to release.
+                    supplied.Dispose();
                     Log.Error("tls", $"{System.IO.Path.GetFileName(path)} has no private key — TLS needs one");
                     return null;
                 }
@@ -72,6 +76,10 @@ public static class TlsCertificate
                     Log.Info("tls", $"using the server's own certificate (expires {existing.NotAfter:yyyy-MM-dd})");
                     return new Loaded(existing, own, true);
                 }
+                // The expired one is finished with the moment that test
+                // fails, since a new certificate is about to take its place,
+                // and it holds a key handle until it is told otherwise.
+                existing.Dispose();
                 Log.Info("tls", "the server's certificate has expired — generating a new one");
             }
 
@@ -117,7 +125,12 @@ public static class TlsCertificate
 
         // Two years: long enough not to be a chore, short enough that a key
         // living in a file on a media server does not outlive its welcome.
-        var cert = request.CreateSelfSigned(DateTimeOffset.Now.AddDays(-1), DateTimeOffset.Now.AddYears(2));
+        //
+        // Disposed on the way out: the object this method returns is a
+        // separate certificate with its own key, so once the export below has
+        // been taken this one is dead weight holding a native key handle that
+        // only Dispose releases promptly.
+        using var cert = request.CreateSelfSigned(DateTimeOffset.Now.AddDays(-1), DateTimeOffset.Now.AddYears(2));
 
         // Round-tripping through PFX is what gives the key a persisted home
         // on Windows; without it the private key vanishes with the process.

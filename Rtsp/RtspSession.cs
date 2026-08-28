@@ -29,11 +29,21 @@ public sealed class SessionManager : IDisposable
     private readonly int _maxSessions;
     private readonly Timer _sweeper;
 
+    /// <summary>
+    /// How often idle sessions are looked for. This is the resolution of the
+    /// negotiated timeout, not the timeout itself: a session can outlive its
+    /// deadline by up to one sweep. Ten seconds keeps that overshoot small
+    /// against the shortest timeout a client is likely to ask for, while the
+    /// sweep itself - a walk of a handful of live sessions - costs so little
+    /// that running it six times a minute forever does not matter.
+    /// </summary>
+    private static readonly TimeSpan SweepInterval = TimeSpan.FromSeconds(10);
+
     public SessionManager(int timeoutSeconds, int maxSessions)
     {
         _timeoutSeconds = timeoutSeconds;
         _maxSessions = maxSessions;
-        _sweeper = new Timer(_ => Sweep(), null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10));
+        _sweeper = new Timer(_ => Sweep(), null, SweepInterval, SweepInterval);
     }
 
     public int Count => _sessions.Count;

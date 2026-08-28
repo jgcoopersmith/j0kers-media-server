@@ -5,6 +5,53 @@
 # Enabled via: git config core.hooksPath .githooks
 cd "$(git rev-parse --show-toplevel)" || exit 0
 
+# Refuse to record a commit that does not compile. This matters more here than
+# in an ordinary repo because the post-commit hook publishes the desktop
+# executable from whatever was just committed: a commit that fails to build
+# does not simply sit in history, it leaves the binary behind the desktop
+# shortcut stale while the server carries on running code that no longer
+# corresponds to any source you can rebuild, which is exactly the sort of
+# mismatch that is miserable to diagnose later.
+#
+# The check has to run before the version bump below, because a build that
+# fails must leave the csproj untouched rather than spend a version number on
+# a commit that never happened.
+#
+# This compiles the working tree rather than the staged content, so a
+# partially staged commit is not fully proven by it. That is a deliberate
+# trade: the honest alternative is checking the index out into a temporary
+# tree for every commit, which costs far more than it catches in a repo with
+# one project and one author.
+#
+# Skipped when the SDK is absent, matching post-commit, so a machine that
+# cannot build is not a machine that cannot commit. Set
+# J0KERS_NO_BUILD_CHECK=1 to skip it deliberately, for a rebase replaying many
+# commits or a known work-in-progress commit.
+if [ -z "$J0KERS_NO_BUILD_CHECK" ] && command -v dotnet >/dev/null 2>&1; then
+    # The output is held back and printed only on failure, so a successful
+    # commit stays as quiet as it was before this check existed.
+    if ! build_out=$(dotnet build -c Release -v q --nologo 2>&1); then
+        echo "$build_out"
+        echo "pre-commit: build FAILED, commit aborted. The version was not bumped."
+        echo "pre-commit: fix the errors above, or set J0KERS_NO_BUILD_CHECK=1 to commit anyway."
+        exit 1
+    fi
+
+    # And the tests, for the same reason: a build that compiles but whose
+    # tests fail is still a commit nobody should be able to make by accident.
+    # The build check above already caught a broken compile, so this only ever
+    # reports genuine test failures. Skipped when the test project is absent,
+    # so a checkout without it commits exactly as before.
+    if [ -d tests/J0kersMediaServer.Tests ]; then
+        if ! test_out=$(dotnet test tests/J0kersMediaServer.Tests -c Release -v q --nologo 2>&1); then
+            echo "$test_out"
+            echo "pre-commit: TESTS FAILED, commit aborted. The version was not bumped."
+            echo "pre-commit: fix the failures above, or set J0KERS_NO_BUILD_CHECK=1 to commit anyway."
+            exit 1
+        fi
+    fi
+fi
+
 ver=$(sed -n 's/.*<Version>\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)<\/Version>.*/\1/p' J0kersMediaServer.csproj)
 [ -z "$ver" ] && exit 0
 

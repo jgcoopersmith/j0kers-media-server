@@ -47,6 +47,13 @@ public sealed class DlnaLive : IDisposable
     // How long a channel's buffer lingers with no viewers before it is swept.
     private static readonly TimeSpan IdleGrace = TimeSpan.FromSeconds(30);
 
+    // How often the janitor looks for buffers past that grace. It is the
+    // resolution of IdleGrace rather than a policy of its own, so a buffer can
+    // outlive the grace by up to one sweep; ten seconds keeps the overshoot to
+    // a third of it, which for disk a viewer has already stopped using is close
+    // enough, and the sweep is a walk of at most a few buffers.
+    private static readonly TimeSpan SweepInterval = TimeSpan.FromSeconds(10);
+
     private readonly string _bufferRoot;
     private readonly Dictionary<string, Buffer> _buffers = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _lock = new();
@@ -66,7 +73,7 @@ public sealed class DlnaLive : IDisposable
         try { Directory.CreateDirectory(_bufferRoot); } catch { }
 
         _janitor = new System.Threading.Timer(_ => Sweep(), null,
-            TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10));
+            SweepInterval, SweepInterval);
     }
 
     /// <summary>

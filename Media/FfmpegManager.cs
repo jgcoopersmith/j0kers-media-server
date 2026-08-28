@@ -2109,6 +2109,17 @@ public sealed class FfmpegManager : IDisposable
     private readonly SemaphoreSlim _restartSignal = new(0);
     private Task? _restartWorker;
 
+    /// <summary>
+    /// How long a channel has to have stayed up before its death counts as a
+    /// fresh problem rather than another go round the same one. The backoff
+    /// below doubles per crash, so without a way back down a channel that had
+    /// one bad hour in the morning would still be waiting a minute between
+    /// restarts at midnight. Five minutes is well past the seconds a genuinely
+    /// broken source takes to fall over, so anything that lived that long was
+    /// working and deserves to start counting again from nothing.
+    /// </summary>
+    private static readonly TimeSpan LiveCrashForgivenAfter = TimeSpan.FromMinutes(5);
+
     private void OnLiveJobExited(string name, string url, Process p)
     {
         var stream = ChannelStream(name);
@@ -2138,7 +2149,7 @@ public sealed class FfmpegManager : IDisposable
             _liveJobs.Remove(stream);
 
             var lived = DateTime.UtcNow - (_liveStarted.TryGetValue(stream, out var t) ? t : DateTime.UtcNow);
-            var crashes = lived > TimeSpan.FromMinutes(5) ? 0 : _liveCrashes.GetValueOrDefault(stream);
+            var crashes = lived > LiveCrashForgivenAfter ? 0 : _liveCrashes.GetValueOrDefault(stream);
             _liveCrashes[stream] = crashes + 1;
             delay = Math.Min(60, 3 << Math.Min(crashes, 4));   // 3, 6, 12, 24, 48, 60…
         }
@@ -2223,6 +2234,25 @@ public sealed class FfmpegManager : IDisposable
         new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
+    /// How long a conversion is left alone after it starts. ffmpeg opens the
+    /// input, reads headers and builds its filter graph before it writes the
+    /// first byte, and on a big remuxed file over a slow drive that is a long
+    /// silence with nothing on disk to show for it. Two minutes is longer than
+    /// that ever takes, so the watchdog never judges a job by a window it
+    /// spent starting up.
+    /// </summary>
+    private static readonly TimeSpan VodStartGrace = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// How long a conversion's directory may go without growing before the job
+    /// is called stuck rather than slow. Ten minutes is far longer than any gap
+    /// a working encode leaves, even a slow one, so nothing that is genuinely
+    /// making progress is ever killed by it; the whole point is that the slot
+    /// it holds is worth more than the small chance of being wrong.
+    /// </summary>
+    private static readonly TimeSpan VodStuckAfter = TimeSpan.FromMinutes(10);
+
+    /// <summary>
     /// The same watch the live channels get, for batch conversions - and the
     /// reason the queue could stop for good.
     ///
@@ -2260,7 +2290,7 @@ public sealed class FfmpegManager : IDisposable
                 if (gone) continue;                       // the exit handler owns it
 
                 if (_vodStarted.TryGetValue(stream, out var started)
-                    && DateTime.UtcNow - started < TimeSpan.FromMinutes(2))
+                    && DateTime.UtcNow - started < VodStartGrace)
                     continue;                             // still getting going
 
                 DateTime newest;
@@ -2274,7 +2304,7 @@ public sealed class FfmpegManager : IDisposable
                 }
                 catch { continue; }
 
-                if (DateTime.UtcNow - newest > TimeSpan.FromMinutes(10)) stuck.Add(stream);
+                if (DateTime.UtcNow - newest > VodStuckAfter) stuck.Add(stream);
             }
         }
 
@@ -2300,6 +2330,27 @@ public sealed class FfmpegManager : IDisposable
     /// has written nothing for 90 seconds is not slow, it is gone, and
     /// killing it hands it to the exit handler above, which brings it back.
     /// </summary>
+    /// <summary>
+    /// How long a live channel is left alone after it starts. Opening a remote
+    /// source, negotiating with it and filling the first segment all happen
+    /// before anything lands on disk, and an upstream that is merely slow to
+    /// answer can spend most of a minute there. Ninety seconds covers that
+    /// without leaving a truly dead start unnoticed for long.
+    /// </summary>
+    private static readonly TimeSpan LiveStartGrace = TimeSpan.FromSeconds(90);
+
+    /// <summary>
+    /// How long a running live channel may write nothing before it is judged
+    /// wedged. Deliberately wider than the 120s in-process reconnect budget
+    /// ffmpeg is given, because a kill here is itself a restart and a restart
+    /// resets the timeline, which viewers see as a jump. This has to fire only
+    /// once ffmpeg's own patient reconnect has genuinely given up, never in
+    /// the middle of it. It was 90s back when a read timed out in 6s and
+    /// recovery was a 45s affair; now that a read waits 20s and reconnect runs
+    /// up to two minutes, 90s would shoot a job that was busy recovering.
+    /// </summary>
+    private static readonly TimeSpan LiveStaleAfter = TimeSpan.FromSeconds(210);
+
     public void CheckLiveJobs()
     {
         List<(string stream, string name)> stale = new();
@@ -2327,7 +2378,7 @@ public sealed class FfmpegManager : IDisposable
                 DateTime started;
                 bool known;
                 lock (_lock) known = _liveStarted.TryGetValue(stream, out started);
-                if (known && DateTime.UtcNow - started < TimeSpan.FromSeconds(90))
+                if (known && DateTime.UtcNow - started < LiveStartGrace)
                     continue;                                    // still coming up
 
                 var dir = Path.Combine(_mediaRoot, stream);
@@ -2339,16 +2390,9 @@ public sealed class FfmpegManager : IDisposable
                 }
                 catch { continue; }
 
-                // 210s, wider than the 120s in-process reconnect budget above.
-                // A kill here is itself a restart, and a restart resets the
-                // timeline — the jumping — so the watchdog must fire only when
-                // ffmpeg's own patient reconnect has genuinely given up, never
-                // in the middle of it. It was 90s, back when a read timed out
-                // in 6s and recovery was a 45s affair; now that a read waits
-                // 20s and reconnect runs up to two minutes, 90s would shoot a
-                // job that was busy recovering. The watchdog is for jobs that
-                // are gone, not jobs that are slow.
-                if (DateTime.UtcNow - newest > TimeSpan.FromSeconds(210))
+                // The watchdog is for jobs that are gone, not jobs that are
+                // slow; LiveStaleAfter carries the reasoning for the number.
+                if (DateTime.UtcNow - newest > LiveStaleAfter)
                 {
                     string label;
                     lock (_lock) label = _channels.FirstOrDefault(c => ChannelStream(c.Name) == stream)?.Name ?? stream;

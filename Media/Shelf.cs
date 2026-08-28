@@ -101,6 +101,14 @@ public sealed class Shelf
             _state.Running = true;
             Save();
             if (_worker is { IsAlive: true }) return;
+            // Getting here proves the previous worker has finished, because a
+            // live one returns on the line above, and that worker was the only
+            // thing holding the old token. So the source it ran on is now
+            // nobody's, and this is the one moment it can be released without
+            // pulling a token out from under a thread that is still reading
+            // it. Started and stopped through an evening it would otherwise
+            // leave a handle behind per run.
+            _cancel?.Dispose();
             _cancel = new CancellationTokenSource();
             _worker = new Thread(() => Work(_cancel.Token))
             {
@@ -125,6 +133,20 @@ public sealed class Shelf
             // leave a part-written directory that the next run would have to
             // detect and clean, and a film that is 90% converted is worth
             // more than the minute saved by stopping now.
+            //
+            // Which is why the source is usually not disposed here: that
+            // worker keeps reading the token for as long as its conversion
+            // takes, and pulling the source out from under a live reader is
+            // the kind of unsafe that only shows itself under load. The next
+            // Start releases it instead, and Start can only reach that point
+            // once the worker is gone. A shelf stopped with no worker left is
+            // the one case that can be tidied here, and the field is cleared
+            // with it so a second Stop cannot cancel a disposed source.
+            if (_worker is not { IsAlive: true })
+            {
+                _cancel?.Dispose();
+                _cancel = null;
+            }
             _note = "stopping after the current conversion";
         }
     }

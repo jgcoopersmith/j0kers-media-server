@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__PRETTY__ — j0kers</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🃏</text></svg>">
+<style>
+  /* The dashboard's own light/dark pick lives in its localStorage,
+     which this page cannot read: it is served from the HLS port,
+     and that is a different origin. Following the system is the
+     next best thing, and is what the dashboard does until the
+     viewer overrides it. Same palette either way. */
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #222221; --ink: #ffffff;
+    --ink-2: #c3c2b7; --muted: #898781; --line: rgba(255,255,255,0.10);
+    --link: #3987e5;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      color-scheme: light;
+      --page: #f9f9f7; --surface: #f0efec; --ink: #0b0b0b;
+      --ink-2: #52514e; --muted: #898781; --line: rgba(11,11,11,0.10);
+      --link: #2a78d6;
+    }
+  }
+  body { margin: 0; background: var(--page); color: var(--ink-2); font-family: system-ui, sans-serif; }
+  video { display: block; width: 100vw; max-height: 82vh; background: #000; }
+  .bar { padding: 10px 14px; font-size: 13px; }
+  a { color: var(--link); }
+  .ctl { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 14px 0; }
+  .ctl button, .ctl select {
+    font: inherit; font-size: 12.5px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--surface); color: var(--ink-2);
+  }
+  .ctl button { padding: 4px 10px; cursor: pointer; }
+  .ctl select { padding: 3px 6px; }
+  .ctl button:hover { border-color: var(--muted); color: var(--ink); }
+  .ctl label { color: var(--muted); font-size: 12px; }
+  .ctl select:disabled { opacity: 0.5; cursor: not-allowed; }
+  #msg { color: var(--muted); font-size: 12px; padding: 4px 14px 0; min-height: 1em; }
+  .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+</style>
+<script src="/hls.min.js"></script>
+</head>
+<body>
+<video id="v" controls playsinline autoplay></video>
+<div class="ctl">
+  <button id="back" title="Back 15 seconds (← arrow) · space plays and pauses">⏪ 15s</button>
+  <button id="fwd" title="Forward 15 seconds (→ arrow) · space plays and pauses">15s ⏩</button>
+  <span style="flex:1"></span>
+  <label>Speed
+    <select id="speed">
+      <option value="0.5">0.5×</option><option value="0.75">0.75×</option>
+      <option value="1" selected>1×</option><option value="1.25">1.25×</option>
+      <option value="1.5">1.5×</option><option value="2">2×</option>
+    </select></label>
+  <label>Quality
+    <select id="quality" disabled title="Reading the stream…">
+      <option value="-1">Auto</option>
+    </select></label>
+</div>
+<div id="msg"></div>
+<div class="bar">🃏 __PRETTY__ · <a href="__SRC__">raw playlist</a> (for VLC etc.)
+  <div class="sub">__NAME__</div></div>
+<script>
+  const v = document.getElementById("v");
+  const speed = document.getElementById("speed");
+  const quality = document.getElementById("quality");
+  const msg = document.getElementById("msg");
+  const src = "__SRC__";
+  const stream = __NAME_JS__;
+  // recordings start at the beginning; live channels join the edge
+  const live = /^ch-/i.test(stream);
+  if (!live) {
+    v.addEventListener("playing", function once() {
+      v.removeEventListener("playing", once);
+      if (v.currentTime > 2) { try { v.currentTime = 0; } catch (e) {} }
+    });
+  }
+  let hls = null;
+  if (window.Hls && Hls.isSupported()) {
+    // startPosition is what actually pins the initial seek;
+    // startLoad(0) alone still lets hls.js pick its own spot
+    hls = new Hls(live ? {} : { startPosition: 0 });
+    hls.loadSource(src);
+    hls.attachMedia(v);
+    // A stream's renditions are only known once the playlist is
+    // read. Most streams here are a single rendition, so the
+    // control stays disabled rather than offering a choice of one.
+    hls.on(Hls.Events.MANIFEST_PARSED, function () {
+      const levels = hls.levels || [];
+      if (levels.length < 2) {
+        quality.title = "This stream has one quality only";
+        return;
+      }
+      levels.forEach(function (l, i) {
+        const o = document.createElement("option");
+        o.value = String(i);
+        o.textContent = l.height ? l.height + "p" : Math.round((l.bitrate || 0) / 1000) + "k";
+        quality.appendChild(o);
+      });
+      quality.disabled = false;
+      quality.title = "Pick a rendition, or let the player choose";
+    });
+  } else if (v.canPlayType("application/vnd.apple.mpegurl")) {
+    v.src = src;
+    // native HLS picks its own rendition and offers no way in
+    quality.title = "This browser chooses the quality itself";
+  } else {
+    document.querySelector(".bar").textContent = "This browser cannot play HLS — open the raw playlist in VLC.";
+  }
+  quality.addEventListener("change", function () {
+    if (hls) hls.currentLevel = parseInt(quality.value, 10);
+  });
+  // subtitles: same-origin tracks, exposed through the native CC menu
+  fetch("/" + encodeURIComponent(stream) + "/subs.json" + __TOKEN_JS__)
+    .then(r => r.ok ? r.json() : null)
+    .then(d => {
+      for (const t of (d && d.tracks) || []) {
+        if (!t.supported) continue;
+        const tr = document.createElement("track");
+        tr.kind = "subtitles";
+        tr.label = t.label;
+        if (t.language) tr.srclang = t.language;
+        tr.src = t.url;
+        v.appendChild(tr);
+      }
+    })
+    .catch(() => {});
+  // ---- seek, speed, keyboard ----
+  // How far playback can actually go right now. duration is the
+  // wrong bound while a file is still being converted: the playlist
+  // grows as ffmpeg writes it, so duration reports only what exists
+  // so far. Seeking past that lands on a fragment nobody has
+  // written, which the player answers by restarting the stream.
+  function playableEnd() {
+    if (v.seekable && v.seekable.length) return v.seekable.end(v.seekable.length - 1);
+    return isFinite(v.duration) ? v.duration : Infinity;
+  }
+  let msgTimer = 0;
+  function say(text) {
+    msg.textContent = text;
+    clearTimeout(msgTimer);
+    msgTimer = setTimeout(function () { if (msg.textContent === text) msg.textContent = ""; }, 4000);
+  }
+  function seekBy(delta) {
+    if (delta < 0) { v.currentTime = Math.max(0, v.currentTime + delta); return; }
+    // Anywhere in the film. The playlist covers its whole length
+    // from the first moment and a segment that has not been
+    // converted yet is made when it is asked for, so there is no
+    // converted edge to stop short of.
+    const end = isFinite(v.duration) ? v.duration : playableEnd();
+    const wanted = v.currentTime + delta;
+    v.currentTime = isFinite(end) ? Math.min(wanted, Math.max(0, end - 0.5)) : wanted;
+  }
+  document.getElementById("back").addEventListener("click", function () { seekBy(-15); });
+  document.getElementById("fwd").addEventListener("click", function () { seekBy(15); });
+
+  speed.addEventListener("change", function () {
+    v.playbackRate = parseFloat(speed.value) || 1;
+    try { localStorage.setItem("j0kers-speed", speed.value); } catch (e) {}
+  });
+  try {
+    const saved = localStorage.getItem("j0kers-speed");
+    if (saved) speed.value = saved;
+  } catch (e) {}
+  // a rate set before the stream loads does not survive it
+  v.addEventListener("loadedmetadata", function () {
+    v.playbackRate = parseFloat(speed.value) || 1;
+  });
+
+  // Arrow keys jump 15 seconds, space plays and pauses. The
+  // browser only does any of this while its own control bar has
+  // focus, which after clicking anywhere on the page it does not
+  // — so the whole document listens instead. The dropdowns keep
+  // their arrows: that is how a select is operated from the
+  // keyboard.
+  //
+  // Capture phase, and an intention held for half a second.
+  // Measured in Chrome 148: a keydown reaches document capture,
+  // then any listener on the video, then document bubble. On
+  // bubble, the video's own controls have already toggled
+  // play/pause, so reading v.paused there reads the state they
+  // just changed and toggling again undoes it — space starts the
+  // film and stops it again. Capture reads the state first, and
+  // the hold puts right a second toggle from either side.
+  let want = null, wantAt = 0;
+  function hold() {
+    if (want === "play") { if (v.paused) v.play().catch(function () {}); }
+    else if (want === "pause") { if (!v.paused) v.pause(); }
+  }
+  ["play", "pause"].forEach(function (ev) {
+    v.addEventListener(ev, function () {
+      if (!want) return;
+      if (performance.now() - wantAt > 500) { want = null; return; }
+      hold();
+    });
+  });
+  v.addEventListener("pointerdown", function () { want = null; });
+
+  document.addEventListener("keydown", function (e) {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    const t = e.target;
+    if (t && (t.tagName === "SELECT" || t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+    if (t && (t.tagName === "BUTTON" || t.tagName === "A")) return;
+    if (e.key === "ArrowRight") { e.preventDefault(); if (!e.repeat) seekBy(15); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); if (!e.repeat) seekBy(-15); }
+    else if (e.key === " " || e.key === "Spacebar" || e.key === "k" || e.key === "K") {
+      e.preventDefault();
+      if (e.repeat) return;
+      want = v.paused ? "play" : "pause";
+      wantAt = performance.now();
+      hold();
+    }
+  }, true);
+
+  // Autoplay, with sound: try unmuted first, and only if the
+  // browser refuses fall back to a muted start (so it still plays)
+  // that unmutes on the first interaction. Never start muted
+  // outright — unmuting a muted autoplay makes the browser pause.
+  v.play().catch(function () {
+    v.muted = true;
+    v.play().catch(function () {});
+    var unmute = function () {
+      v.muted = false;
+      document.removeEventListener("pointerdown", unmute);
+      document.removeEventListener("keydown", unmute);
+    };
+    document.addEventListener("pointerdown", unmute);
+    document.addEventListener("keydown", unmute);
+  });
+</script>
+</body>
+</html>

@@ -80,9 +80,7 @@ public sealed partial class ControlApi : IDisposable
             || stream.Contains('/') || stream.Contains('\\')) return "";
         try
         {
-            var root = Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
-                ? _serverConfig.Hls.MediaRoot
-                : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
+            var root = MediaRootPath();
             var marker = Path.Combine(root, stream, "source.txt");
             if (!File.Exists(marker)) return "";
             var file = File.ReadAllText(marker).Trim();
@@ -104,9 +102,7 @@ public sealed partial class ControlApi : IDisposable
     {
         try
         {
-            var root = Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
-                ? _serverConfig.Hls.MediaRoot
-                : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
+            var root = MediaRootPath();
             return File.Exists(Path.Combine(root, stream, "index_vtt.m3u8"));
         }
         catch { return false; }
@@ -174,9 +170,7 @@ public sealed partial class ControlApi : IDisposable
                 && _tvCodecs?.NeedsConversion(sourceFile) != true)
                 return null;
 
-            var mediaRoot = Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
-                ? _serverConfig.Hls.MediaRoot
-                : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
+            var mediaRoot = MediaRootPath();
             if (!Directory.Exists(mediaRoot)) return null;
 
             foreach (var dir in Directory.EnumerateDirectories(mediaRoot, "vod-*"))
@@ -392,6 +386,17 @@ public sealed partial class ControlApi : IDisposable
     /// Nothing happens until a dashboard has been seen at least once, so a
     /// server started headless is left alone.
     /// </summary>
+    /// <summary>
+    /// How long the dashboard has to be silent before the server treats it as
+    /// closed. The page polls every two seconds, so thirty covers roughly
+    /// fifteen missed polls: far more than a slow reply, a garbage collection
+    /// or a moment of packet loss can account for, and short enough that
+    /// closing the browser stops the server while the user is still expecting
+    /// it to. It is not an idleness measure - a dashboard sitting untouched
+    /// still polls - so nothing here shortens with inactivity.
+    /// </summary>
+    private static readonly TimeSpan DashboardGoneAfter = TimeSpan.FromSeconds(30);
+
     private void StartIdleShutdownWatch()
     {
         if (_requestShutdown is null) return;
@@ -407,7 +412,7 @@ public sealed partial class ControlApi : IDisposable
             Services.KeepAwake.Busy(converting);
 
             if (!_config.ShutdownOnClose || !_sawDashboard) return;
-            if (DateTime.UtcNow - _lastSeenUtc < TimeSpan.FromSeconds(30)) return;
+            if (DateTime.UtcNow - _lastSeenUtc < DashboardGoneAfter) return;
             if (_services.Viewers.Count > 0) return;       // somebody is watching
             // Converting counts as being in use just as much as watching does.
             // Without this, locking the screen stopped the work: the browser
@@ -593,6 +598,31 @@ public sealed partial class ControlApi : IDisposable
     private static readonly Lazy<byte[]> Dashboard = new(() => LoadResource("dashboard.html"));
     private static readonly Lazy<byte[]> LoginPage = new(() => LoadResource("login.html"));
     private static readonly Lazy<byte[]> HlsJs = new(() => LoadResource("hls.min.js"));
+
+    /// <summary>
+    /// The dashboard's script, which used to be one block inside
+    /// dashboard.html and is now a file per area of the page. The page pulls
+    /// them in with ordinary script tags in the order listed there, so they
+    /// are separate assets rather than one bundle and each is served exactly
+    /// as the player library is. Keyed by the request path so one route
+    /// covers all of them instead of a dozen copies of the same block; the
+    /// resource name and the URL are deliberately the same string, so adding
+    /// a file means adding it here and to the csproj and nowhere else.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, Lazy<byte[]>> DashboardScripts =
+        new[]
+        {
+            "dashboard-core.js", "dashboard-accounts.js", "dashboard-status.js",
+            "dashboard-transcode.js", "dashboard-log.js", "dashboard-streams.js",
+            "dashboard-player.js", "dashboard-config.js", "dashboard-library.js",
+            "dashboard-channels.js", "dashboard-content.js", "dashboard-ui.js",
+        }.ToDictionary(n => "/" + n, n => new Lazy<byte[]>(() => LoadResource(n)), StringComparer.Ordinal);
+
+    // The player and watch pages are templates rather than finished bytes, so
+    // this one is kept as text: the placeholder substitution runs on every
+    // request and decoding the resource again each time would be waste.
+    private static readonly Lazy<string> PlayerTemplate =
+        new(() => Encoding.UTF8.GetString(LoadResource("player.html")));
 
     /// <summary>
     /// True when a state-changing request originates from a different site.
@@ -794,7 +824,7 @@ public sealed partial class ControlApi : IDisposable
                 var dlna = _dlna;
                 if (dlna is null)
                 {
-                    WriteJson(res, 404, new { error = "DLNA is off — enable discovery.dlna to serve the library to TVs" });
+                    NotFound(res, "DLNA is off — enable discovery.dlna to serve the library to TVs");
                     return;
                 }
                 if (!Dlna.DlnaService.IsLocalClient(ctx.Request.RemoteEndPoint?.Address))
@@ -826,7 +856,7 @@ public sealed partial class ControlApi : IDisposable
                 // somewhere else entirely.
                 if (!IsOwnMediaUrl(src, ctx))
                 {
-                    WriteJson(res, 400, new { error = "src must be a path or a URL on this server" });
+                    BadRequest(res, "src must be a path or a URL on this server");
                     return;
                 }
                 var page = Encoding.UTF8.GetBytes(PlayerPage(src, title));
@@ -847,6 +877,33 @@ public sealed partial class ControlApi : IDisposable
                 res.Headers["Cache-Control"] = "max-age=86400";
                 res.ContentLength64 = HlsJs.Value.Length;
                 res.OutputStream.Write(HlsJs.Value);
+                return;
+            }
+
+            // The dashboard's own script files, served the same way and from
+            // the same place in the pipeline as the player library above.
+            // The charset is spelled out where the player library leaves it
+            // off because these carry the page's text - the emoji on the
+            // buttons, the ellipses in the status lines - and a script with
+            // no charset is only decoded as UTF-8 by falling back to the
+            // encoding of the document that pulled it in.
+            if (method == "GET" && DashboardScripts.TryGetValue(path, out var dashScript))
+            {
+                res.StatusCode = 200;
+                res.ContentType = "text/javascript; charset=utf-8";
+                // Not cached, exactly as the page that loads them is not.
+                //
+                // hls.min.js next door is cached for a day because it is a
+                // third-party library that never changes. This is the
+                // dashboard's own code, split out of the page it belongs to,
+                // and it changes with every release. Caching it would leave a
+                // browser running yesterday's script against today's markup
+                // and API for a day after an upgrade - an upgrade that
+                // appears to have done nothing, which is worse than fetching
+                // a couple of hundred kilobytes again over a LAN.
+                res.Headers["Cache-Control"] = "no-store";
+                res.ContentLength64 = dashScript.Value.Length;
+                res.OutputStream.Write(dashScript.Value);
                 return;
             }
 
@@ -881,7 +938,7 @@ public sealed partial class ControlApi : IDisposable
             if (path.StartsWith("/api/auth/", StringComparison.Ordinal))
             {
                 if (HandleAuthRoutes(ctx, auth, method, path)) return;
-                WriteJson(res, 404, new { error = "not found" });
+                NotFound(res, "not found");
                 return;
             }
 
@@ -933,7 +990,7 @@ public sealed partial class ControlApi : IDisposable
             if (path.StartsWith("/api/users", StringComparison.Ordinal))
             {
                 if (HandleUserRoutes(ctx, auth, method, path)) return;
-                WriteJson(res, 404, new { error = "not found" });
+                NotFound(res, "not found");
                 return;
             }
 
@@ -977,828 +1034,30 @@ public sealed partial class ControlApi : IDisposable
             }
             if (method == "GET" && path == "/api/status") { _sawDashboard = true; NoteActivity(); }
 
-            switch (method, path)
+            // Everything past this point is a plain route. The table maps
+            // one exact method-and-path pair to the code that answers it,
+            // and the short list after it covers the paths that carry an id
+            // on the end and so cannot be matched exactly. The table is
+            // consulted first because that is the order the if-chain this
+            // replaced ran in: every exact test came before the one
+            // StartsWith test at the bottom of it.
+            if (Routes.TryGetValue((method, path), out var route))
             {
-                case ("GET", "/api/status"):
-                    WriteJson(res, 200, new
-                    {
-                        server = _serverConfig.ServerName,
-                        version = typeof(ControlApi).Assembly.GetName().Version?.ToString(3),
-                        running = _services.Running,
-                        uptimeSeconds = (int)(DateTime.UtcNow - _startedUtc).TotalSeconds,
-                        // the machine's own clock, for the dashboard's header:
-                        // an instant, the offset that turns it into local time
-                        // here, and what this zone is called
-                        timeUtc = DateTime.UtcNow,
-                        utcOffsetMinutes = (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.Now).TotalMinutes,
-                        timeZone = ZoneAbbreviation(),
-                        timeZoneFull = TimeZoneInfo.Local.IsDaylightSavingTime(DateTime.Now)
-                            ? TimeZoneInfo.Local.DaylightName
-                            : TimeZoneInfo.Local.StandardName,
-                        rtsp = new
-                        {
-                            enabled = _serverConfig.Rtsp.Enabled,
-                            port = _serverConfig.Rtsp.Port,
-                            sessions = RtspServer?.Sessions.Count ?? 0,
-                            maxSessions = _serverConfig.Rtsp.MaxSessions,
-                        },
-                        hls = new
-                        {
-                            enabled = _serverConfig.Hls.Enabled,
-                            port = _serverConfig.Hls.Port,
-                            // people watching over HTTP right now; RTSP
-                            // sessions above are counted separately
-                            viewers = _services.Viewers.Count,
-                            // every address this port answers on, so the
-                            // dashboard can offer a link per network rather
-                            // than only the one you happen to be browsing
-                            addresses = MediaAddresses(),
-                        },
-                        ffmpeg = new
-                        {
-                            available = _ffmpeg?.Available ?? false,
-                            version = _ffmpeg?.VersionLine ?? "not configured",
-                            videoCodec = _ffmpeg?.VideoEncoder,
-                            audioCodec = _ffmpeg?.AudioEncoder,
-                        },
-                        // monotonic: the dashboard differences consecutive
-                        // readings into a live rate
-                        bytesServed = _services.Served.TotalBytes,
-                        transcodes = _ffmpeg?.ActiveVodStreams ?? (IReadOnlyList<string>)Array.Empty<string>(),
-                        // the same conversions with how far each has got
-                        transcoding = (_ffmpeg?.VodProgressSnapshot
-                                       ?? Array.Empty<Media.FfmpegManager.VodProgress>())
-                            .Select(v => new
-                            {
-                                stream = v.Stream,
-                                title = v.Title,
-                                percent = v.Percent,
-                                doneSeconds = (int)v.DoneSeconds,
-                                durationSeconds = (int)v.DurationSeconds,
-                            }),
-                        // files waiting to convert, in order — the dashboard
-                        // lists these with a remove button (running ones can't
-                        // be removed here, only what hasn't started)
-                        transcodeQueue = (_ffmpeg?.VodQueueSnapshot ?? (IReadOnlyList<string>)Array.Empty<string>())
-                            .Select(p => new { path = p, title = Media.StreamTitle.PrettifyFile(Path.GetFileName(p)) }),
-                    });
-                    return;
-
-                case ("GET", "/api/config"):
-                    // redact by replacing the value before serialization, not
-                    // by string-replacing the output (which missed tokens
-                    // containing +, ", or non-ASCII once JSON-escaped)
-                    var savedToken = _serverConfig.Control.AuthToken;
-                    _serverConfig.Control.AuthToken = savedToken.Length > 0 ? "***" : "";
-                    JsonElement redacted;
-                    try { redacted = JsonSerializer.Deserialize<JsonElement>(_serverConfig.ToJson()); }
-                    finally { _serverConfig.Control.AuthToken = savedToken; }
-                    WriteJson(res, 200, new { config = redacted, note = "control.authToken redacted" });
-                    return;
-
-                case ("GET", "/api/mounts"):
-                    WriteJson(res, 200, new
-                    {
-                        mounts = _serverConfig.MountsSnapshot().Select(m => new
-                        {
-                            path = m.Path,
-                            source = m.Source,
-                            description = m.Description,
-                            dynamic = _serverConfig.IsDynamicMount(m.Path),
-                            uri = $"rtsp://<host>:{_serverConfig.Rtsp.Port}{m.Path}",
-                        }),
-                        announcementService = _serverConfig.Services.AnnouncementEnabled
-                            ? $"rtsp://<host>:{_serverConfig.Rtsp.Port}/annc?play=<clip>"
-                            : null,
-                    });
-                    return;
-
-                case ("GET", "/api/sessions"):
-                    // Both kinds of viewing in one list. RTSP has real
-                    // sessions; HLS viewers are inferred from request
-                    // traffic, which is the only thing plain HTTP gives us.
-                    WriteJson(res, 200, new
-                    {
-                        sessions = (RtspServer?.Sessions.All ?? Array.Empty<RtspSession>()).Select(s => new
-                        {
-                            protocol = "rtsp",
-                            id = s.Id,
-                            mount = s.MountPath,
-                            // an RTSP mount path is already the readable name
-                            title = s.MountPath,
-                            state = s.State.ToString().ToLowerInvariant(),
-                            client = s.ClientAddress,
-                            player = "",
-                            user = "",
-                            startedUtc = (DateTime?)null,
-                            lastActivityUtc = s.LastActivity,
-                            bytes = s.Sender.Stats.octets,
-                            // a real session can be torn down; an HTTP
-                            // viewer has nothing to tear down
-                            terminable = true,
-                            rtp = new { packetsSent = s.Sender.Stats.packets, octetsSent = s.Sender.Stats.octets },
-                        }).Concat<object>(_services.Viewers.Active.Select(v => new
-                        {
-                            protocol = v.Protocol,
-                            id = v.Id,
-                            // a DLNA viewing is identified by the file itself;
-                            // the folder above it is the useful part to show
-                            mount = v.File is not null ? Path.GetFileName(v.File) : v.Stream,
-                            // "vod-skyfall-2012-1080p-brrip-df019bf7" tells
-                            // you nothing at a glance; "Skyfall (2012)" does,
-                            // and a free-TV channel is named by its lineup
-                            title = v.File is not null
-                                ? Media.StreamTitle.PrettifyFile(Path.GetFileName(v.File))
-                                : v.Protocol == "tv"
-                                    ? _tvNames.TryGetValue(v.Stream, out var chName) ? chName : v.Stream
-                                    : Media.StreamTitle.Prettify(v.Stream),
-                            state = v.State,
-                            client = v.Client,
-                            player = v.Player,
-                            user = v.User,
-                            startedUtc = (DateTime?)v.StartedUtc,
-                            lastActivityUtc = v.LastSeenUtc,
-                            bytes = v.Bytes,
-                            terminable = false,
-                            rtp = new { packetsSent = 0L, octetsSent = v.Bytes },
-                        })),
-                    });
-                    return;
+                await route(this, ctx, auth);
+                return;
             }
 
-            // A media token for the caller's own playback. The dashboard
-            // takes one all-streams token at startup and appends it to every
-            // HLS URL it builds; ?stream= narrows it to a single stream for
-            // a link you mean to hand to VLC, a TV, or someone else.
-            if (method == "GET" && path == "/api/media/token")
+            foreach (var prefixed in PrefixRoutes)
             {
-                var stream = ctx.Request.QueryString["stream"];
-                var scope = string.IsNullOrWhiteSpace(stream) ? Auth.MediaLink.AllStreams : stream.Trim();
-                var hours = _serverConfig.Hls.LinkLifetimeHours;
-                var minted = _mediaLinks.Sign(scope, TimeSpan.FromHours(hours));
-                // also split out, because JSON escapes the '&' in `token`
-                // and a shell script shouldn't have to un-escape it
-                var pieces = minted.Split('&');
-                WriteJson(res, 200, new
+                if (method == prefixed.Method
+                    && path.StartsWith(prefixed.Prefix, StringComparison.Ordinal))
                 {
-                    token = minted,
-                    exp = pieces[0]["exp=".Length..],
-                    sig = pieces[1]["sig=".Length..],
-                    scope,
-                    expiresUtc = DateTime.UtcNow.AddHours(hours),
-                    port = _serverConfig.Hls.Port,
-                });
-                return;
-            }
-
-            if (method == "GET" && path == "/api/preview")
-            {
-                StreamPreview(ctx);
-                return;
-            }
-
-            if (method == "GET" && path == "/api/browse")
-            {
-                Browse(ctx);
-                return;
-            }
-
-            if (method == "GET" && path == "/api/transcode/scan")
-            {
-                TranscodeScan(ctx);
-                return;
-            }
-            if (method == "POST" && path == "/api/transcode")
-            {
-                TranscodeBatch(ctx);
-                return;
-            }
-            if (path == "/api/transcode/config" && method is "GET" or "POST")
-            {
-                TranscodeConfig(ctx, method == "POST");
-                return;
-            }
-            if (method == "POST" && path == "/api/transcode/remove")
-            {
-                TranscodeRemove(ctx);
-                return;
-            }
-            if (method == "POST" && path == "/api/transcode/delete")
-            {
-                TranscodeDelete(ctx);
-                return;
-            }
-
-            // ---- service power + settings ----
-            if (method == "POST" && path == "/api/server/start")
-            {
-                try { _services.StartServices(); }
-                catch (Exception ex) { WriteJson(res, 500, new { error = ex.Message }); return; }
-                Log.Info("control", "services started via dashboard");
-                WriteJson(res, 200, new { running = _services.Running });
-                return;
-            }
-
-            // Restarting the *process*, not the streaming services: the
-            // settings that only apply at startup — the control port, TLS —
-            // otherwise leave the dashboard telling someone to go and do it
-            // themselves, which on a tray-mode server means hunting for the
-            // icon. Not on Unix: there the server belongs to systemd or
-            // launchd, and relaunching itself would fight whatever supervises
-            // it.
-            if (method == "POST" && path == "/api/server/restart")
-            {
-                if (!OperatingSystem.IsWindows())
-                {
-                    WriteJson(res, 501, new { error = "restart the service through systemd/launchd on this platform" });
+                    await prefixed.Handler(this, ctx, auth, path);
                     return;
                 }
-                var comeBackTo = Services.NetworkInfo.DashboardUrls(_config.BindAddress, _config.Port)[0];
-                if (!ScheduleRestart())
-                {
-                    WriteJson(res, 500, new { error = "could not schedule the restart — start the server again yourself" });
-                    return;
-                }
-                // answered before the shutdown begins, or the caller sees the
-                // connection drop instead of the address to come back to
-                WriteJson(res, 200, new { restarting = true, url = comeBackTo });
-                _ = Task.Run(async () =>
-                {
-                    await Task.Delay(400);      // let the response reach the browser
-                    Log.Info("control", "restarting at the dashboard's request");
-                    _requestShutdown?.Invoke();
-                });
-                return;
             }
 
-            if (method == "POST" && path == "/api/server/stop")
-            {
-                _services.StopServices();
-                Log.Info("control", "services stopped via dashboard");
-                WriteJson(res, 200, new { running = _services.Running });
-                return;
-            }
-
-            if (method == "GET" && path == "/api/settings")
-            {
-                WriteJson(res, 200, new
-                {
-                    serverName = _serverConfig.ServerName,
-                    bindAddress = _serverConfig.Rtsp.BindAddress,
-                    rtspPort = _serverConfig.Rtsp.Port,
-                    hlsPort = _serverConfig.Hls.Port,
-                    controlPort = _serverConfig.Control.Port,
-                    minimizeToTray = _serverConfig.MinimizeToTray,
-                    linkLifetimeHours = _serverConfig.Hls.LinkLifetimeHours,
-                    // where transcodes and live-channel streams are written; the
-                    // resolved path is what Browse opens at and what the box shows
-                    mediaRoot = _serverConfig.Hls.MediaRoot,
-                    mediaRootResolved = MediaRootPath(),
-                    // what removing a stream link does with an existing conversion
-                    streamRemoveAction = _serverConfig.StreamRemoveAction,
-                    // the tray lives in the Windows notification area
-                    traySupported = OperatingSystem.IsWindows(),
-                    // network announcement, and the name it publishes, so the
-                    // dialog can show the .local address the switch produces
-                    discoveryEnabled = _serverConfig.Discovery.Enabled,
-                    discoveryHostName = Discovery?.HostName ?? _serverConfig.Discovery.HostName,
-                    dlnaEnabled = _serverConfig.Discovery.Dlna,
-                    // what is configured, and what is actually being served
-                    // right now — they differ between saving and restarting
-                    httpsEnabled = _serverConfig.Https.Enabled,
-                    httpsActive = Services.UrlScheme.Https,
-                    httpsOwnCertificate = string.IsNullOrWhiteSpace(_serverConfig.Https.Certificate),
-                    // DLNA serves the library folders and nothing else, so an
-                    // empty library is worth saying before the switch is
-                    // thrown rather than after a TV shows an empty list
-                    dlnaFolders = _library.All.Count,
-                    // logging: level, the rotating file sink, and what it has
-                    // written so far, so the dialog can show the real cost
-                    logLevel = _serverConfig.Logging.Level,
-                    logToFile = _serverConfig.Logging.ToFile,
-                    logDirectory = _serverConfig.Logging.Directory,
-                    logDirectoryResolved = _serverConfig.Logging.ResolveDirectory(_baseDirectory),
-                    logRotateSizeMb = _serverConfig.Logging.RotateSizeMb,
-                    logRotatePeriod = _serverConfig.Logging.RotatePeriod,
-                    logMaxFiles = _serverConfig.Logging.MaxFiles,
-                    logFiles = Log.Files(_serverConfig.Logging.ResolveDirectory(_baseDirectory))
-                        .Select(f => new { name = f.Name, bytes = f.Bytes, modified = f.Modified }),
-                    // what "0.0.0.0" actually resolves to right now, so the
-                    // Config dialog can show which addresses are reachable
-                    interfaces = Services.NetworkInfo.Active().Select(i => new
-                    {
-                        name = i.Name,
-                        address = i.Address,
-                        kind = i.Kind,
-                        primary = i.Primary,
-                    }),
-                });
-                return;
-            }
-
-            if (method == "POST" && path == "/api/settings")
-            {
-                SaveSettings(ctx);
-                return;
-            }
-
-            // ---- the log, for the dashboard's panel ----
-            if (method == "GET" && path == "/api/log")
-            {
-                _ = long.TryParse(ctx.Request.QueryString["since"], out var since);
-                var take = int.TryParse(ctx.Request.QueryString["max"], out var m) ? Math.Clamp(m, 1, 500) : 200;
-                var (entries, last, missed) = Log.Since(since, take);
-                WriteJson(res, 200, new
-                {
-                    entries = entries.Select(e => new
-                    {
-                        seq = e.Seq,
-                        level = e.Level,
-                        area = e.Area,
-                        message = e.Message,
-                        at = e.At.ToString("HH:mm:ss.fff"),
-                    }),
-                    last,
-                    // the ring wrapped past what they had — there is a hole
-                    missed,
-                    level = _serverConfig.Logging.Level,
-                    file = Log.FilePath,
-                });
-                return;
-            }
-
-            // The rotated history on disk, so the log window can review earlier
-            // sessions — the crash last night, say — not only the live ring
-            // buffer, which starts empty on every restart. Newest first; the
-            // active file is flagged so the UI can label it "current".
-            if (method == "GET" && path == "/api/log/files")
-            {
-                var dir = _serverConfig.Logging.ResolveDirectory(_baseDirectory);
-                var activeName = Log.FilePath is null ? null : Path.GetFileName(Log.FilePath);
-                WriteJson(res, 200, new
-                {
-                    dir,
-                    files = Log.Files(dir).Select(f => new
-                    {
-                        name = f.Name,
-                        bytes = f.Bytes,
-                        modified = f.Modified,
-                        active = f.Name.Equals(activeName, StringComparison.OrdinalIgnoreCase),
-                    }),
-                });
-                return;
-            }
-
-            // One rotated file's tail, as raw text. Raw, not parsed into
-            // entries: a crash's stack trace spans many lines and is the whole
-            // reason to read history, so it is shown exactly as written rather
-            // than flattened into one message per line.
-            if (method == "GET" && path == "/api/log/file")
-            {
-                var name = ctx.Request.QueryString["name"] ?? "";
-                var take = int.TryParse(ctx.Request.QueryString["max"], out var mx) ? Math.Clamp(mx, 50, 5000) : 2000;
-                var dir = _serverConfig.Logging.ResolveDirectory(_baseDirectory);
-
-                // Only a file the listing actually offers — no path the caller
-                // typed. This blocks "../" and any name that is not a real log
-                // file in the log directory.
-                var known = Log.Files(dir).FirstOrDefault(f =>
-                    f.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
-                if (known.Name is null)
-                {
-                    WriteJson(res, 404, new { error = "no such log file" });
-                    return;
-                }
-
-                var full = Path.Combine(dir, known.Name);
-                string[] lines;
-                try
-                {
-                    // shared read: the active file is being written to right now
-                    using var fs = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                    using var sr = new StreamReader(fs);
-                    lines = sr.ReadToEnd().Split('\n');
-                }
-                catch (Exception ex)
-                {
-                    WriteJson(res, 500, new { error = "could not read: " + ex.Message });
-                    return;
-                }
-
-                var truncated = lines.Length > take;
-                var tail = truncated ? lines[^take..] : lines;
-                WriteJson(res, 200, new
-                {
-                    name = known.Name,
-                    bytes = known.Bytes,
-                    truncated,
-                    shown = tail.Length,
-                    text = string.Join("\n", tail),
-                });
-                return;
-            }
-
-            // ---- what has been watched lately ----
-            if (method == "GET" && path == "/api/history")
-            {
-                var take = int.TryParse(ctx.Request.QueryString["count"], out var n) ? Math.Clamp(n, 1, 50) : 10;
-                WriteJson(res, 200, new
-                {
-                    history = _history.Recent(auth.Name, take).Select(e => new
-                    {
-                        name = e.Name,
-                        path = e.Path,
-                        stream = e.Stream,
-                        kind = e.Kind,
-                        plays = e.Plays,
-                        startedUtc = e.StartedUtc,
-                        // empty = watched with no account, which today means
-                        // a television over DLNA; the list says so rather
-                        // than leaving it looking like the caller's own play
-                        viaDlna = e.User.Length == 0,
-                        // a file that has been deleted, or a stream that has
-                        // since been evicted from the cache: either way there
-                        // is nothing left to replay
-                        missing = e.Kind == "file"
-                            ? !File.Exists(e.Path)
-                            : !StreamExists(e.Stream),
-                    }),
-                });
-                return;
-            }
-
-            if (method == "DELETE" && path == "/api/history")
-            {
-                // no path clears the caller's whole history
-                var target = ctx.Request.QueryString["path"] ?? "";
-                WriteJson(res, 200, new { removed = _history.Forget(auth.Name, target) });
-                return;
-            }
-
-            // ---- media engine (ffmpeg) ----
-            if (method == "POST" && path == "/api/play")
-            {
-                PlayFile(ctx, auth);
-                return;
-            }
-
-            if (method == "GET" && path == "/api/play")
-            {
-                var stream = ctx.Request.QueryString["stream"] ?? "";
-                WriteJson(res, 200, new { stream, ready = _ffmpeg?.IsVodReady(stream) ?? false });
-                return;
-            }
-
-            if (method == "GET" && path == "/api/channels")
-            {
-                WriteJson(res, 200, new
-                {
-                    ffmpegAvailable = _ffmpeg?.Available ?? false,
-                    channels = (_ffmpeg?.Channels ?? new List<(Media.FfmpegManager.ChannelDef, string, string)>())
-                        // subtitles: whether the restream is writing a
-                        // subtitle rendition, so the dashboard links the
-                        // master playlist that names it rather than the bare
-                        // media one. Channels are not in the HLS listing —
-                        // this card is the only place that can report it.
-                        .Select(c => new { name = c.Item1.Name, url = c.Item1.Url, stream = c.Item2,
-                                           status = c.Item3, started = c.Item1.Started,
-                                           subtitles = HasSubtitleRendition(c.Item2) }),
-                });
-                return;
-            }
-
-            if (method == "POST" && path == "/api/channels")
-            {
-                AddChannel(ctx);
-                return;
-            }
-
-            // ---- what DLNA is allowed to show ----
-            if (method == "GET" && path == "/api/dlna")
-            {
-                var roots = _library.All;
-                var shared = _dlnaShare.Shared(roots).ToHashSet(StringComparer.OrdinalIgnoreCase);
-                WriteJson(res, 200, new
-                {
-                    enabled = _serverConfig.Discovery.Dlna,
-                    port = DlnaPort,
-                    // true when DLNA sits on a plain-HTTP port of its own
-                    // because the rest of the server moved to TLS
-                    plainPort = Services.DlnaEndpoint.IsSeparate(_serverConfig),
-                    sharingAll = _dlnaShare.SharingAll(roots),
-                    folders = roots.Select(f => new
-                    {
-                        path = f,
-                        name = Path.GetFileName(Path.TrimEndingDirectorySeparator(f)) is { Length: > 0 } n ? n : f,
-                        shared = shared.Contains(f),
-                        missing = !Directory.Exists(f),
-                    }),
-                });
-                return;
-            }
-
-            if (method == "POST" && path == "/api/dlna")
-            {
-                SetDlnaShare(ctx);
-                return;
-            }
-
-            // ---- HDHomeRun: read a tuner's lineup, import what's picked ----
-            if (method == "GET" && path == "/api/tuner")
-            {
-                await ReadTunerLineup(ctx);
-                return;
-            }
-
-            if (method == "POST" && path == "/api/channels/import")
-            {
-                ImportChannels(ctx);
-                return;
-            }
-
-            if (method == "DELETE" && path == "/api/channels")
-            {
-                var name = ctx.Request.QueryString["name"] ?? "";
-                if (_ffmpeg?.RemoveChannel(name) == true)
-                {
-                    Log.Info("control", $"channel removed: {name}");
-                    WriteJson(res, 200, new { removed = name });
-                }
-                else WriteJson(res, 404, new { error = "unknown channel" });
-                return;
-            }
-
-            if (method == "POST" && path == "/api/channels/restart")
-            {
-                var name = ctx.Request.QueryString["name"] ?? "";
-                if (_ffmpeg?.RestartChannel(name) == true) WriteJson(res, 200, new { restarted = name });
-                else WriteJson(res, 404, new { error = "unknown channel" });
-                return;
-            }
-
-            if (method == "POST" && path == "/api/channels/start")
-            {
-                var name = ctx.Request.QueryString["name"] ?? "";
-                if (_ffmpeg?.StartChannel(name) == true)
-                {
-                    Log.Info("control", $"channel started: {name}");
-                    WriteJson(res, 200, new { started = name });
-                }
-                else WriteJson(res, 404, new { error = "unknown channel" });
-                return;
-            }
-
-            if (method == "POST" && path == "/api/channels/stop")
-            {
-                var name = ctx.Request.QueryString["name"] ?? "";
-                if (_ffmpeg?.StopChannel(name) == true)
-                {
-                    Log.Info("control", $"channel stopped: {name}");
-                    WriteJson(res, 200, new { stopped = name });
-                }
-                else WriteJson(res, 404, new { error = "unknown channel" });
-                return;
-            }
-
-            // ---- free ad-supported TV (Pluto TV + playlist providers) ----
-            if (method == "GET" && path == "/api/tv/providers")
-            {
-                WriteJson(res, 200, new
-                {
-                    providers = _providers.All
-                        .Where(p => p.Enabled)
-                        .Select(p => new { id = p.Id, name = p.Name }),
-                });
-                return;
-            }
-
-            if (method == "GET" && path == "/api/tv/lineup")
-            {
-                await TvLineup(ctx);
-                return;
-            }
-
-            if (method == "GET" && (path == "/api/tv/watch" || path == "/api/tv/r"))
-            {
-                await TvProxy(ctx, entry: path == "/api/tv/watch", auth);
-                return;
-            }
-
-            if (method == "POST" && path == "/api/tv/pin")
-            {
-                await TvPin(ctx);
-                return;
-            }
-
-            if (method == "GET" && path == "/api/codecs")
-            {
-                WriteJson(res, 200, new
-                {
-                    active = new { video = _ffmpeg?.VideoEncoder, audio = _ffmpeg?.AudioEncoder },
-                    videoEncoders = _ffmpeg?.VideoEncoders.OrderBy(x => x) ?? Enumerable.Empty<string>(),
-                    audioEncoders = _ffmpeg?.AudioEncoders.OrderBy(x => x) ?? Enumerable.Empty<string>(),
-                    note = "set ffmpeg.videoCodec / ffmpeg.audioCodec in the config (friendly name, raw encoder name, or 'copy')",
-                });
-                return;
-            }
-
-            // ---- pinned media (quick buttons) ----
-            if (method == "GET" && path == "/api/favorites")
-            {
-                WriteJson(res, 200, new
-                {
-                    favorites = _favorites.All.Select(f => new { name = f.Name, path = f.Path }),
-                });
-                return;
-            }
-
-            if (method == "POST" && path == "/api/favorites")
-            {
-                AddFavorite(ctx);
-                return;
-            }
-
-            if (method == "DELETE" && path == "/api/favorites")
-            {
-                var favPath = ctx.Request.QueryString["path"] ?? "";
-                if (_favorites.Remove(favPath))
-                {
-                    Log.Info("control", $"favorite removed: {favPath}");
-                    WriteJson(res, 200, new { removed = favPath });
-                }
-                else WriteJson(res, 404, new { error = "unknown favorite" });
-                return;
-            }
-
-            // ---- library root folders ----
-            if (method == "GET" && path == "/api/library")
-            {
-                WriteJson(res, 200, new { folders = _library.All });
-                return;
-            }
-
-            if (method == "GET" && path == "/api/library/search")
-            {
-                SearchLibrary(ctx);
-                return;
-            }
-
-            if (method == "POST" && path == "/api/library")
-            {
-                AddLibraryFolder(ctx);
-                return;
-            }
-
-            if (method == "DELETE" && path == "/api/library")
-            {
-                var folder = ctx.Request.QueryString["folder"] ?? "";
-                if (_library.Remove(folder))
-                {
-                    Log.Info("control", $"library folder removed: {folder}");
-                    WriteJson(res, 200, new { removed = folder });
-                }
-                else WriteJson(res, 404, new { error = "unknown library folder" });
-                return;
-            }
-
-            if (method == "GET" && path == "/api/thumb")
-            {
-                ServeThumbnail(ctx, auth);
-                return;
-            }
-
-            // ---- remembered playlists (media library folders) ----
-            if (method == "GET" && path == "/api/playlists")
-            {
-                WriteJson(res, 200, new
-                {
-                    playlists = _playlists.All.Select(p => new { name = p.Name, folder = p.Folder }),
-                });
-                return;
-            }
-
-            if (method == "POST" && path == "/api/playlists")
-            {
-                SavePlaylist(ctx);
-                return;
-            }
-
-            if (method == "DELETE" && path == "/api/playlists")
-            {
-                var plName = ctx.Request.QueryString["name"] ?? "";
-                if (_playlists.Remove(plName))
-                {
-                    Log.Info("control", $"playlist removed: {plName}");
-                    WriteJson(res, 200, new { removed = plName });
-                }
-                else WriteJson(res, 404, new { error = "unknown playlist" });
-                return;
-            }
-
-            // attach a subtitle file the user picked to an existing stream
-            if (method == "POST" && path == "/api/subtitles")
-            {
-                AttachSubtitle(ctx);
-                return;
-            }
-
-            if (method == "GET" && path == "/api/image")
-            {
-                ServeImage(ctx, auth);
-                return;
-            }
-
-            if (method == "POST" && path == "/api/mounts")
-            {
-                AddMount(ctx);
-                return;
-            }
-
-            if (method == "DELETE" && path == "/api/mounts")
-            {
-                var mountPath = ctx.Request.QueryString["path"] ?? "";
-                if (_serverConfig.RemoveMount(mountPath))
-                {
-                    Log.Info("control", $"mount removed via dashboard: {mountPath}");
-                    WriteJson(res, 200, new { removed = mountPath });
-                }
-                else
-                {
-                    WriteJson(res, 404, new { error = "unknown mount" });
-                }
-                return;
-            }
-
-            if (method == "DELETE" && path == "/api/hls")
-            {
-                RemoveHlsStream(ctx);
-                return;
-            }
-
-            // Convert this media again from scratch: for a conversion that
-            // came out wrong, or one made before the codec settings changed.
-            // Unlinking keeps a conversion precisely because rebuilding it
-            // would produce the same bytes — this is the case where that is
-            // not true and the old one has to go.
-            if (method == "POST" && path == "/api/hls/retranscode")
-            {
-                var stream = ctx.Request.QueryString["stream"] ?? "";
-                if (stream.Length == 0 || stream.Contains("..") || stream.Contains('/') || stream.Contains('\\'))
-                {
-                    WriteJson(res, 400, new { error = "invalid stream name" });
-                    return;
-                }
-                var root = Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
-                    ? _serverConfig.Hls.MediaRoot
-                    : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
-                var sdir = Path.GetFullPath(Path.Combine(root, stream));
-                if (!sdir.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-                    || !Directory.Exists(sdir))
-                {
-                    WriteJson(res, 404, new { error = "unknown stream" });
-                    return;
-                }
-                // the source is only knowable from inside the directory, so
-                // read it before the directory is removed
-                string source;
-                try { source = File.ReadAllText(Path.Combine(sdir, "source.txt")).Trim(); }
-                catch { source = ""; }
-                if (source.Length == 0 || !File.Exists(source))
-                {
-                    WriteJson(res, 400, new
-                    {
-                        error = "this stream has no source file on record, so it cannot be rebuilt — "
-                              + "removing it would lose it for good",
-                    });
-                    return;
-                }
-
-                _ffmpeg?.DiscardVod(stream);
-                var (rebuilt, ready) = _ffmpeg?.StartVod(source) ?? (stream, false);
-                _links.Show(rebuilt);
-                Log.Info("control", $"retranscoding {stream} from {Path.GetFileName(source)}");
-                WriteJson(res, 200, new { stream = rebuilt, ready });
-                return;
-            }
-
-            if (method == "DELETE" && path.StartsWith("/api/sessions/", StringComparison.Ordinal))
-            {
-                var id = path["/api/sessions/".Length..];
-                // capture once — a concurrent /api/server/stop can null Rtsp
-                var rtsp = RtspServer;
-                var session = rtsp?.Sessions.Get(id);
-                if (session is null)
-                {
-                    WriteJson(res, 404, new { error = "session not found" });
-                    return;
-                }
-                rtsp!.Sessions.Remove(id);
-                Log.Info("control", $"session {id} terminated via control API");
-                WriteJson(res, 200, new { terminated = id });
-                return;
-            }
-
-            WriteJson(res, 404, new { error = "not found" });
+            NotFound(res, "not found");
         }
         catch (Exception ex)
         {
@@ -1809,6 +1068,836 @@ public sealed partial class ControlApi : IDisposable
         {
             try { res.Close(); } catch { }
         }
+    }
+
+    /// <summary>
+    /// One route's answer. Every handler takes the same three things so that
+    /// they can all live in one table; the ones with no interest in who is
+    /// calling discard the third. Task-returning because a handful of the
+    /// free-TV routes wait on a remote service, and a table cannot hold two
+    /// shapes of handler at once.
+    /// </summary>
+    private delegate Task Route(ControlApi api, HttpListenerContext ctx, AuthResult auth);
+
+    /// <summary>The same, for a path that carries an id on the end of it.</summary>
+    private delegate Task PrefixRoute(ControlApi api, HttpListenerContext ctx, AuthResult auth, string path);
+
+    /// <summary>
+    /// Wraps a handler that finishes on the calling thread. Most of them do,
+    /// because the work is memory and files. Awaiting a task that is already
+    /// complete continues inline, so these still answer without the request
+    /// ever leaving its thread, exactly as they did as inline code.
+    /// </summary>
+    private static Route Sync(Action<ControlApi, HttpListenerContext, AuthResult> handler) =>
+        (api, ctx, auth) => { handler(api, ctx, auth); return Task.CompletedTask; };
+
+    /// <summary>
+    /// Every route that is one exact method and path, with the code that
+    /// answers it. The table is static because it is the same for every
+    /// request and every server: the handlers are named on the instance the
+    /// dispatcher hands in rather than captured, so it is built once for the
+    /// process instead of once per request.
+    ///
+    /// No two keys can collide, so the order of the entries here is for
+    /// reading only and carries no meaning; it follows the order the routes
+    /// were written in before this was a table. A miss falls through to the
+    /// prefix list and then to the 404, which is what the chain's last else
+    /// did.
+    /// </summary>
+    private static readonly Dictionary<(string Method, string Path), Route> Routes = new()
+    {
+        [("GET", "/api/status")] = Sync((api, ctx, _) => api.WriteStatus(ctx)),
+        [("GET", "/api/config")] = Sync((api, ctx, _) => api.WriteConfig(ctx)),
+        [("GET", "/api/mounts")] = Sync((api, ctx, _) => api.WriteMounts(ctx)),
+        [("GET", "/api/sessions")] = Sync((api, ctx, _) => api.WriteSessions(ctx)),
+        [("GET", "/api/media/token")] = Sync((api, ctx, _) => api.MintMediaToken(ctx)),
+        [("GET", "/api/preview")] = Sync((api, ctx, _) => api.StreamPreview(ctx)),
+        [("GET", "/api/browse")] = Sync((api, ctx, _) => api.Browse(ctx)),
+
+        // batch transcoding
+        [("GET", "/api/transcode/scan")] = Sync((api, ctx, _) => api.TranscodeScan(ctx)),
+        [("POST", "/api/transcode")] = Sync((api, ctx, _) => api.TranscodeBatch(ctx)),
+        [("GET", "/api/transcode/config")] = Sync((api, ctx, _) => api.TranscodeConfig(ctx, write: false)),
+        [("POST", "/api/transcode/config")] = Sync((api, ctx, _) => api.TranscodeConfig(ctx, write: true)),
+        [("POST", "/api/transcode/remove")] = Sync((api, ctx, _) => api.TranscodeRemove(ctx)),
+        [("POST", "/api/transcode/delete")] = Sync((api, ctx, _) => api.TranscodeDelete(ctx)),
+
+        // service power + settings
+        [("POST", "/api/server/start")] = Sync((api, ctx, _) => api.StartStreamingServices(ctx)),
+        [("POST", "/api/server/restart")] = Sync((api, ctx, _) => api.RestartProcess(ctx)),
+        [("POST", "/api/server/stop")] = Sync((api, ctx, _) => api.StopStreamingServices(ctx)),
+        [("GET", "/api/settings")] = Sync((api, ctx, _) => api.WriteSettings(ctx)),
+        [("POST", "/api/settings")] = Sync((api, ctx, _) => api.SaveSettings(ctx)),
+
+        // the log, for the dashboard's panel
+        [("GET", "/api/log")] = Sync((api, ctx, _) => api.WriteLogTail(ctx)),
+        [("GET", "/api/log/files")] = Sync((api, ctx, _) => api.WriteLogFileList(ctx)),
+        [("GET", "/api/log/file")] = Sync((api, ctx, _) => api.WriteLogFileText(ctx)),
+
+        // what has been watched lately
+        [("GET", "/api/history")] = Sync((api, ctx, auth) => api.WriteHistory(ctx, auth)),
+        [("DELETE", "/api/history")] = Sync((api, ctx, auth) => api.ForgetHistory(ctx, auth)),
+
+        // media engine (ffmpeg)
+        [("POST", "/api/play")] = Sync((api, ctx, auth) => api.PlayFile(ctx, auth)),
+        [("GET", "/api/play")] = Sync((api, ctx, _) => api.WriteVodReady(ctx)),
+        [("GET", "/api/channels")] = Sync((api, ctx, _) => api.WriteChannels(ctx)),
+        [("POST", "/api/channels")] = Sync((api, ctx, _) => api.AddChannel(ctx)),
+
+        // what DLNA is allowed to show
+        [("GET", "/api/dlna")] = Sync((api, ctx, _) => api.WriteDlnaShare(ctx)),
+        [("POST", "/api/dlna")] = Sync((api, ctx, _) => api.SetDlnaShare(ctx)),
+
+        // HDHomeRun: read a tuner's lineup, import what's picked
+        [("GET", "/api/tuner")] = (api, ctx, _) => api.ReadTunerLineup(ctx),
+        [("POST", "/api/channels/import")] = Sync((api, ctx, _) => api.ImportChannels(ctx)),
+        [("DELETE", "/api/channels")] = Sync((api, ctx, _) => api.RemoveChannel(ctx)),
+        [("POST", "/api/channels/restart")] = Sync((api, ctx, _) => api.RestartChannel(ctx)),
+        [("POST", "/api/channels/start")] = Sync((api, ctx, _) => api.StartChannel(ctx)),
+        [("POST", "/api/channels/stop")] = Sync((api, ctx, _) => api.StopChannel(ctx)),
+
+        // free ad-supported TV (Pluto TV + playlist providers). The two proxy
+        // routes appear earlier in HandleAsync as well, for a request that
+        // carries one of this install's signatures instead of an account.
+        // Reaching them here means an account is what authorized them.
+        [("GET", "/api/tv/providers")] = Sync((api, ctx, _) => api.WriteTvProviders(ctx)),
+        [("GET", "/api/tv/lineup")] = (api, ctx, _) => api.TvLineup(ctx),
+        [("GET", "/api/tv/watch")] = (api, ctx, auth) => api.TvProxy(ctx, entry: true, auth),
+        [("GET", "/api/tv/r")] = (api, ctx, auth) => api.TvProxy(ctx, entry: false, auth),
+        [("POST", "/api/tv/pin")] = (api, ctx, _) => api.TvPin(ctx),
+        [("GET", "/api/codecs")] = Sync((api, ctx, _) => api.WriteCodecs(ctx)),
+
+        // pinned media (quick buttons)
+        [("GET", "/api/favorites")] = Sync((api, ctx, _) => api.WriteFavorites(ctx)),
+        [("POST", "/api/favorites")] = Sync((api, ctx, _) => api.AddFavorite(ctx)),
+        [("DELETE", "/api/favorites")] = Sync((api, ctx, _) => api.RemoveFavorite(ctx)),
+
+        // library root folders
+        [("GET", "/api/library")] = Sync((api, ctx, _) => api.WriteLibraryFolders(ctx)),
+        [("GET", "/api/library/search")] = Sync((api, ctx, _) => api.SearchLibrary(ctx)),
+        [("POST", "/api/library")] = Sync((api, ctx, _) => api.AddLibraryFolder(ctx)),
+        [("DELETE", "/api/library")] = Sync((api, ctx, _) => api.RemoveLibraryFolder(ctx)),
+        [("GET", "/api/thumb")] = Sync((api, ctx, auth) => api.ServeThumbnail(ctx, auth)),
+
+        // remembered playlists (media library folders)
+        [("GET", "/api/playlists")] = Sync((api, ctx, _) => api.WritePlaylists(ctx)),
+        [("POST", "/api/playlists")] = Sync((api, ctx, _) => api.SavePlaylist(ctx)),
+        [("DELETE", "/api/playlists")] = Sync((api, ctx, _) => api.RemovePlaylist(ctx)),
+
+        // attach a subtitle file the user picked to an existing stream
+        [("POST", "/api/subtitles")] = Sync((api, ctx, _) => api.AttachSubtitle(ctx)),
+        [("GET", "/api/image")] = Sync((api, ctx, auth) => api.ServeImage(ctx, auth)),
+        [("POST", "/api/mounts")] = Sync((api, ctx, _) => api.AddMount(ctx)),
+        [("DELETE", "/api/mounts")] = Sync((api, ctx, _) => api.RemoveMount(ctx)),
+        [("DELETE", "/api/hls")] = Sync((api, ctx, _) => api.RemoveHlsStream(ctx)),
+        [("POST", "/api/hls/retranscode")] = Sync((api, ctx, _) => api.RetranscodeStream(ctx)),
+    };
+
+    /// <summary>
+    /// The routes whose path carries an id on the end, so that no exact key
+    /// can match them. Ordered, and read only after the exact table has
+    /// missed, which is where the StartsWith test sat in the chain this
+    /// replaced. Today there is one; the shape is here so the next one does
+    /// not go back to being an if at the bottom of the dispatcher.
+    /// </summary>
+    private static readonly (string Method, string Prefix, PrefixRoute Handler)[] PrefixRoutes =
+    {
+        ("DELETE", "/api/sessions/",
+            (api, ctx, _, path) => { api.TerminateSession(ctx, path); return Task.CompletedTask; }),
+    };
+
+    /// <summary>GET /api/status - identity, uptime, and every live counter the dashboard polls.</summary>
+    private void WriteStatus(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        WriteJson(res, 200, new
+        {
+            server = _serverConfig.ServerName,
+            version = typeof(ControlApi).Assembly.GetName().Version?.ToString(3),
+            running = _services.Running,
+            uptimeSeconds = (int)(DateTime.UtcNow - _startedUtc).TotalSeconds,
+            // the machine's own clock, for the dashboard's header:
+            // an instant, the offset that turns it into local time
+            // here, and what this zone is called
+            timeUtc = DateTime.UtcNow,
+            utcOffsetMinutes = (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.Now).TotalMinutes,
+            timeZone = ZoneAbbreviation(),
+            timeZoneFull = TimeZoneInfo.Local.IsDaylightSavingTime(DateTime.Now)
+                ? TimeZoneInfo.Local.DaylightName
+                : TimeZoneInfo.Local.StandardName,
+            rtsp = new
+            {
+                enabled = _serverConfig.Rtsp.Enabled,
+                port = _serverConfig.Rtsp.Port,
+                sessions = RtspServer?.Sessions.Count ?? 0,
+                maxSessions = _serverConfig.Rtsp.MaxSessions,
+            },
+            hls = new
+            {
+                enabled = _serverConfig.Hls.Enabled,
+                port = _serverConfig.Hls.Port,
+                // people watching over HTTP right now; RTSP
+                // sessions above are counted separately
+                viewers = _services.Viewers.Count,
+                // every address this port answers on, so the
+                // dashboard can offer a link per network rather
+                // than only the one you happen to be browsing
+                addresses = MediaAddresses(),
+            },
+            ffmpeg = new
+            {
+                available = _ffmpeg?.Available ?? false,
+                version = _ffmpeg?.VersionLine ?? "not configured",
+                videoCodec = _ffmpeg?.VideoEncoder,
+                audioCodec = _ffmpeg?.AudioEncoder,
+            },
+            // monotonic: the dashboard differences consecutive
+            // readings into a live rate
+            bytesServed = _services.Served.TotalBytes,
+            transcodes = _ffmpeg?.ActiveVodStreams ?? (IReadOnlyList<string>)Array.Empty<string>(),
+            // the same conversions with how far each has got
+            transcoding = (_ffmpeg?.VodProgressSnapshot
+                           ?? Array.Empty<Media.FfmpegManager.VodProgress>())
+                .Select(v => new
+                {
+                    stream = v.Stream,
+                    title = v.Title,
+                    percent = v.Percent,
+                    doneSeconds = (int)v.DoneSeconds,
+                    durationSeconds = (int)v.DurationSeconds,
+                }),
+            // files waiting to convert, in order — the dashboard
+            // lists these with a remove button (running ones can't
+            // be removed here, only what hasn't started)
+            transcodeQueue = (_ffmpeg?.VodQueueSnapshot ?? (IReadOnlyList<string>)Array.Empty<string>())
+                .Select(p => new { path = p, title = Media.StreamTitle.PrettifyFile(Path.GetFileName(p)) }),
+        });
+    }
+
+    /// <summary>GET /api/config - the effective configuration, with the auth token redacted.</summary>
+    private void WriteConfig(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        // redact by replacing the value before serialization, not
+        // by string-replacing the output (which missed tokens
+        // containing +, ", or non-ASCII once JSON-escaped)
+        var savedToken = _serverConfig.Control.AuthToken;
+        _serverConfig.Control.AuthToken = savedToken.Length > 0 ? "***" : "";
+        JsonElement redacted;
+        try { redacted = JsonSerializer.Deserialize<JsonElement>(_serverConfig.ToJson()); }
+        finally { _serverConfig.Control.AuthToken = savedToken; }
+        WriteJson(res, 200, new { config = redacted, note = "control.authToken redacted" });
+    }
+
+    /// <summary>GET /api/mounts - the configured RTSP mounts and the URIs they answer on.</summary>
+    private void WriteMounts(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        WriteJson(res, 200, new
+        {
+            mounts = _serverConfig.MountsSnapshot().Select(m => new
+            {
+                path = m.Path,
+                source = m.Source,
+                description = m.Description,
+                dynamic = _serverConfig.IsDynamicMount(m.Path),
+                uri = $"rtsp://<host>:{_serverConfig.Rtsp.Port}{m.Path}",
+            }),
+            announcementService = _serverConfig.Services.AnnouncementEnabled
+                ? $"rtsp://<host>:{_serverConfig.Rtsp.Port}/annc?play=<clip>"
+                : null,
+        });
+    }
+
+    /// <summary>GET /api/sessions - who is watching, over RTSP and over HTTP alike.</summary>
+    private void WriteSessions(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        // Both kinds of viewing in one list. RTSP has real
+        // sessions; HLS viewers are inferred from request
+        // traffic, which is the only thing plain HTTP gives us.
+        WriteJson(res, 200, new
+        {
+            sessions = (RtspServer?.Sessions.All ?? Array.Empty<RtspSession>()).Select(s => new
+            {
+                protocol = "rtsp",
+                id = s.Id,
+                mount = s.MountPath,
+                // an RTSP mount path is already the readable name
+                title = s.MountPath,
+                state = s.State.ToString().ToLowerInvariant(),
+                client = s.ClientAddress,
+                player = "",
+                user = "",
+                startedUtc = (DateTime?)null,
+                lastActivityUtc = s.LastActivity,
+                bytes = s.Sender.Stats.octets,
+                // a real session can be torn down; an HTTP
+                // viewer has nothing to tear down
+                terminable = true,
+                rtp = new { packetsSent = s.Sender.Stats.packets, octetsSent = s.Sender.Stats.octets },
+            }).Concat<object>(_services.Viewers.Active.Select(v => new
+            {
+                protocol = v.Protocol,
+                id = v.Id,
+                // a DLNA viewing is identified by the file itself;
+                // the folder above it is the useful part to show
+                mount = v.File is not null ? Path.GetFileName(v.File) : v.Stream,
+                // "vod-skyfall-2012-1080p-brrip-df019bf7" tells
+                // you nothing at a glance; "Skyfall (2012)" does,
+                // and a free-TV channel is named by its lineup
+                title = v.File is not null
+                    ? Media.StreamTitle.PrettifyFile(Path.GetFileName(v.File))
+                    : v.Protocol == "tv"
+                        ? _tvNames.TryGetValue(v.Stream, out var chName) ? chName : v.Stream
+                        : Media.StreamTitle.Prettify(v.Stream),
+                state = v.State,
+                client = v.Client,
+                player = v.Player,
+                user = v.User,
+                startedUtc = (DateTime?)v.StartedUtc,
+                lastActivityUtc = v.LastSeenUtc,
+                bytes = v.Bytes,
+                terminable = false,
+                rtp = new { packetsSent = 0L, octetsSent = v.Bytes },
+            })),
+        });
+    }
+
+    // A media token for the caller's own playback. The dashboard
+    // takes one all-streams token at startup and appends it to every
+    // HLS URL it builds; ?stream= narrows it to a single stream for
+    // a link you mean to hand to VLC, a TV, or someone else.
+    private void MintMediaToken(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var stream = ctx.Request.QueryString["stream"];
+        var scope = string.IsNullOrWhiteSpace(stream) ? Auth.MediaLink.AllStreams : stream.Trim();
+        var hours = _serverConfig.Hls.LinkLifetimeHours;
+        var minted = _mediaLinks.Sign(scope, TimeSpan.FromHours(hours));
+        // also split out, because JSON escapes the '&' in `token`
+        // and a shell script shouldn't have to un-escape it
+        var pieces = minted.Split('&');
+        WriteJson(res, 200, new
+        {
+            token = minted,
+            exp = pieces[0]["exp=".Length..],
+            sig = pieces[1]["sig=".Length..],
+            scope,
+            expiresUtc = DateTime.UtcNow.AddHours(hours),
+            port = _serverConfig.Hls.Port,
+        });
+    }
+
+    /// <summary>POST /api/server/start - bring the streaming services up.</summary>
+    private void StartStreamingServices(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        try { _services.StartServices(); }
+        catch (Exception ex) { WriteJson(res, 500, new { error = ex.Message }); return; }
+        Log.Info("control", "services started via dashboard");
+        WriteJson(res, 200, new { running = _services.Running });
+    }
+
+    // Restarting the *process*, not the streaming services: the
+    // settings that only apply at startup — the control port, TLS —
+    // otherwise leave the dashboard telling someone to go and do it
+    // themselves, which on a tray-mode server means hunting for the
+    // icon. Not on Unix: there the server belongs to systemd or
+    // launchd, and relaunching itself would fight whatever supervises
+    // it.
+    private void RestartProcess(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        if (!OperatingSystem.IsWindows())
+        {
+            WriteJson(res, 501, new { error = "restart the service through systemd/launchd on this platform" });
+            return;
+        }
+        var comeBackTo = Services.NetworkInfo.DashboardUrls(_config.BindAddress, _config.Port)[0];
+        if (!ScheduleRestart())
+        {
+            WriteJson(res, 500, new { error = "could not schedule the restart — start the server again yourself" });
+            return;
+        }
+        // answered before the shutdown begins, or the caller sees the
+        // connection drop instead of the address to come back to
+        WriteJson(res, 200, new { restarting = true, url = comeBackTo });
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(400);      // let the response reach the browser
+            Log.Info("control", "restarting at the dashboard's request");
+            _requestShutdown?.Invoke();
+        });
+    }
+
+    /// <summary>POST /api/server/stop - take the streaming services down.</summary>
+    private void StopStreamingServices(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        _services.StopServices();
+        Log.Info("control", "services stopped via dashboard");
+        WriteJson(res, 200, new { running = _services.Running });
+    }
+
+    /// <summary>GET /api/settings - everything the Config dialog shows, configured and actual.</summary>
+    private void WriteSettings(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        WriteJson(res, 200, new
+        {
+            serverName = _serverConfig.ServerName,
+            bindAddress = _serverConfig.Rtsp.BindAddress,
+            rtspPort = _serverConfig.Rtsp.Port,
+            hlsPort = _serverConfig.Hls.Port,
+            controlPort = _serverConfig.Control.Port,
+            minimizeToTray = _serverConfig.MinimizeToTray,
+            linkLifetimeHours = _serverConfig.Hls.LinkLifetimeHours,
+            // where transcodes and live-channel streams are written; the
+            // resolved path is what Browse opens at and what the box shows
+            mediaRoot = _serverConfig.Hls.MediaRoot,
+            mediaRootResolved = MediaRootPath(),
+            // what removing a stream link does with an existing conversion
+            streamRemoveAction = _serverConfig.StreamRemoveAction,
+            // the tray lives in the Windows notification area
+            traySupported = OperatingSystem.IsWindows(),
+            // network announcement, and the name it publishes, so the
+            // dialog can show the .local address the switch produces
+            discoveryEnabled = _serverConfig.Discovery.Enabled,
+            discoveryHostName = Discovery?.HostName ?? _serverConfig.Discovery.HostName,
+            dlnaEnabled = _serverConfig.Discovery.Dlna,
+            // what is configured, and what is actually being served
+            // right now — they differ between saving and restarting
+            httpsEnabled = _serverConfig.Https.Enabled,
+            httpsActive = Services.UrlScheme.Https,
+            httpsOwnCertificate = string.IsNullOrWhiteSpace(_serverConfig.Https.Certificate),
+            // DLNA serves the library folders and nothing else, so an
+            // empty library is worth saying before the switch is
+            // thrown rather than after a TV shows an empty list
+            dlnaFolders = _library.All.Count,
+            // logging: level, the rotating file sink, and what it has
+            // written so far, so the dialog can show the real cost
+            logLevel = _serverConfig.Logging.Level,
+            logToFile = _serverConfig.Logging.ToFile,
+            logDirectory = _serverConfig.Logging.Directory,
+            logDirectoryResolved = _serverConfig.Logging.ResolveDirectory(_baseDirectory),
+            logRotateSizeMb = _serverConfig.Logging.RotateSizeMb,
+            logRotatePeriod = _serverConfig.Logging.RotatePeriod,
+            logMaxFiles = _serverConfig.Logging.MaxFiles,
+            logFiles = Log.Files(_serverConfig.Logging.ResolveDirectory(_baseDirectory))
+                .Select(f => new { name = f.Name, bytes = f.Bytes, modified = f.Modified }),
+            // what "0.0.0.0" actually resolves to right now, so the
+            // Config dialog can show which addresses are reachable
+            interfaces = Services.NetworkInfo.Active().Select(i => new
+            {
+                name = i.Name,
+                address = i.Address,
+                kind = i.Kind,
+                primary = i.Primary,
+            }),
+        });
+    }
+
+    /// <summary>GET /api/log - the live ring buffer since the sequence number the caller holds.</summary>
+    private void WriteLogTail(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        _ = long.TryParse(ctx.Request.QueryString["since"], out var since);
+        var take = int.TryParse(ctx.Request.QueryString["max"], out var m) ? Math.Clamp(m, 1, 500) : 200;
+        var (entries, last, missed) = Log.Since(since, take);
+        WriteJson(res, 200, new
+        {
+            entries = entries.Select(e => new
+            {
+                seq = e.Seq,
+                level = e.Level,
+                area = e.Area,
+                message = e.Message,
+                at = e.At.ToString("HH:mm:ss.fff"),
+            }),
+            last,
+            // the ring wrapped past what they had — there is a hole
+            missed,
+            level = _serverConfig.Logging.Level,
+            file = Log.FilePath,
+        });
+    }
+
+    // The rotated history on disk, so the log window can review earlier
+    // sessions — the crash last night, say — not only the live ring
+    // buffer, which starts empty on every restart. Newest first; the
+    // active file is flagged so the UI can label it "current".
+    private void WriteLogFileList(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var dir = _serverConfig.Logging.ResolveDirectory(_baseDirectory);
+        var activeName = Log.FilePath is null ? null : Path.GetFileName(Log.FilePath);
+        WriteJson(res, 200, new
+        {
+            dir,
+            files = Log.Files(dir).Select(f => new
+            {
+                name = f.Name,
+                bytes = f.Bytes,
+                modified = f.Modified,
+                active = f.Name.Equals(activeName, StringComparison.OrdinalIgnoreCase),
+            }),
+        });
+    }
+
+    // One rotated file's tail, as raw text. Raw, not parsed into
+    // entries: a crash's stack trace spans many lines and is the whole
+    // reason to read history, so it is shown exactly as written rather
+    // than flattened into one message per line.
+    private void WriteLogFileText(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var name = ctx.Request.QueryString["name"] ?? "";
+        var take = int.TryParse(ctx.Request.QueryString["max"], out var mx) ? Math.Clamp(mx, 50, 5000) : 2000;
+        var dir = _serverConfig.Logging.ResolveDirectory(_baseDirectory);
+
+        // Only a file the listing actually offers — no path the caller
+        // typed. This blocks "../" and any name that is not a real log
+        // file in the log directory.
+        var known = Log.Files(dir).FirstOrDefault(f =>
+            f.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (known.Name is null)
+        {
+            NotFound(res, "no such log file");
+            return;
+        }
+
+        var full = Path.Combine(dir, known.Name);
+        string[] lines;
+        try
+        {
+            // shared read: the active file is being written to right now
+            using var fs = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var sr = new StreamReader(fs);
+            lines = sr.ReadToEnd().Split('\n');
+        }
+        catch (Exception ex)
+        {
+            WriteJson(res, 500, new { error = "could not read: " + ex.Message });
+            return;
+        }
+
+        var truncated = lines.Length > take;
+        var tail = truncated ? lines[^take..] : lines;
+        WriteJson(res, 200, new
+        {
+            name = known.Name,
+            bytes = known.Bytes,
+            truncated,
+            shown = tail.Length,
+            text = string.Join("\n", tail),
+        });
+    }
+
+    /// <summary>GET /api/history - what this account has watched lately, newest first.</summary>
+    private void WriteHistory(HttpListenerContext ctx, AuthResult auth)
+    {
+        var res = ctx.Response;
+        var take = int.TryParse(ctx.Request.QueryString["count"], out var n) ? Math.Clamp(n, 1, 50) : 10;
+        WriteJson(res, 200, new
+        {
+            history = _history.Recent(auth.Name, take).Select(e => new
+            {
+                name = e.Name,
+                path = e.Path,
+                stream = e.Stream,
+                kind = e.Kind,
+                plays = e.Plays,
+                startedUtc = e.StartedUtc,
+                // empty = watched with no account, which today means
+                // a television over DLNA; the list says so rather
+                // than leaving it looking like the caller's own play
+                viaDlna = e.User.Length == 0,
+                // a file that has been deleted, or a stream that has
+                // since been evicted from the cache: either way there
+                // is nothing left to replay
+                missing = e.Kind == "file"
+                    ? !File.Exists(e.Path)
+                    : !StreamExists(e.Stream),
+            }),
+        });
+    }
+
+    /// <summary>DELETE /api/history - forget one entry, or the caller's whole history.</summary>
+    private void ForgetHistory(HttpListenerContext ctx, AuthResult auth)
+    {
+        var res = ctx.Response;
+        // no path clears the caller's whole history
+        var target = ctx.Request.QueryString["path"] ?? "";
+        WriteJson(res, 200, new { removed = _history.Forget(auth.Name, target) });
+    }
+
+    /// <summary>GET /api/play - whether a conversion has produced enough to start playing.</summary>
+    private void WriteVodReady(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var stream = ctx.Request.QueryString["stream"] ?? "";
+        WriteJson(res, 200, new { stream, ready = _ffmpeg?.IsVodReady(stream) ?? false });
+    }
+
+    /// <summary>GET /api/channels - the live restreams and how each one is faring.</summary>
+    private void WriteChannels(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        WriteJson(res, 200, new
+        {
+            ffmpegAvailable = _ffmpeg?.Available ?? false,
+            channels = (_ffmpeg?.Channels ?? new List<(Media.FfmpegManager.ChannelDef, string, string)>())
+                // subtitles: whether the restream is writing a
+                // subtitle rendition, so the dashboard links the
+                // master playlist that names it rather than the bare
+                // media one. Channels are not in the HLS listing —
+                // this card is the only place that can report it.
+                .Select(c => new { name = c.Item1.Name, url = c.Item1.Url, stream = c.Item2,
+                                   status = c.Item3, started = c.Item1.Started,
+                                   subtitles = HasSubtitleRendition(c.Item2) }),
+        });
+    }
+
+    /// <summary>GET /api/dlna - the switch, the port, and which library folders are shared.</summary>
+    private void WriteDlnaShare(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var roots = _library.All;
+        var shared = _dlnaShare.Shared(roots).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        WriteJson(res, 200, new
+        {
+            enabled = _serverConfig.Discovery.Dlna,
+            port = DlnaPort,
+            // true when DLNA sits on a plain-HTTP port of its own
+            // because the rest of the server moved to TLS
+            plainPort = Services.DlnaEndpoint.IsSeparate(_serverConfig),
+            sharingAll = _dlnaShare.SharingAll(roots),
+            folders = roots.Select(f => new
+            {
+                path = f,
+                name = Path.GetFileName(Path.TrimEndingDirectorySeparator(f)) is { Length: > 0 } n ? n : f,
+                shared = shared.Contains(f),
+                missing = !Directory.Exists(f),
+            }),
+        });
+    }
+
+    /// <summary>DELETE /api/channels - drop a live channel by name.</summary>
+    private void RemoveChannel(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var name = ctx.Request.QueryString["name"] ?? "";
+        if (_ffmpeg?.RemoveChannel(name) == true)
+        {
+            Log.Info("control", $"channel removed: {name}");
+            WriteJson(res, 200, new { removed = name });
+        }
+        else NotFound(res, "unknown channel");
+    }
+
+    /// <summary>POST /api/channels/restart - bounce one channel's restream.</summary>
+    private void RestartChannel(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var name = ctx.Request.QueryString["name"] ?? "";
+        if (_ffmpeg?.RestartChannel(name) == true) WriteJson(res, 200, new { restarted = name });
+        else NotFound(res, "unknown channel");
+    }
+
+    /// <summary>POST /api/channels/start - start a stopped channel.</summary>
+    private void StartChannel(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var name = ctx.Request.QueryString["name"] ?? "";
+        if (_ffmpeg?.StartChannel(name) == true)
+        {
+            Log.Info("control", $"channel started: {name}");
+            WriteJson(res, 200, new { started = name });
+        }
+        else NotFound(res, "unknown channel");
+    }
+
+    /// <summary>POST /api/channels/stop - stop a running channel without removing it.</summary>
+    private void StopChannel(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var name = ctx.Request.QueryString["name"] ?? "";
+        if (_ffmpeg?.StopChannel(name) == true)
+        {
+            Log.Info("control", $"channel stopped: {name}");
+            WriteJson(res, 200, new { stopped = name });
+        }
+        else NotFound(res, "unknown channel");
+    }
+
+    /// <summary>GET /api/tv/providers - the free-TV lineups that are switched on.</summary>
+    private void WriteTvProviders(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        WriteJson(res, 200, new
+        {
+            providers = _providers.All
+                .Where(p => p.Enabled)
+                .Select(p => new { id = p.Id, name = p.Name }),
+        });
+    }
+
+    /// <summary>GET /api/codecs - what ffmpeg is using now and everything it could use.</summary>
+    private void WriteCodecs(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        WriteJson(res, 200, new
+        {
+            active = new { video = _ffmpeg?.VideoEncoder, audio = _ffmpeg?.AudioEncoder },
+            videoEncoders = _ffmpeg?.VideoEncoders.OrderBy(x => x) ?? Enumerable.Empty<string>(),
+            audioEncoders = _ffmpeg?.AudioEncoders.OrderBy(x => x) ?? Enumerable.Empty<string>(),
+            note = "set ffmpeg.videoCodec / ffmpeg.audioCodec in the config (friendly name, raw encoder name, or 'copy')",
+        });
+    }
+
+    /// <summary>GET /api/favorites - the pinned media, for the quick buttons.</summary>
+    private void WriteFavorites(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        WriteJson(res, 200, new
+        {
+            favorites = _favorites.All.Select(f => new { name = f.Name, path = f.Path }),
+        });
+    }
+
+    /// <summary>DELETE /api/favorites - unpin one by path.</summary>
+    private void RemoveFavorite(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var favPath = ctx.Request.QueryString["path"] ?? "";
+        if (_favorites.Remove(favPath))
+        {
+            Log.Info("control", $"favorite removed: {favPath}");
+            WriteJson(res, 200, new { removed = favPath });
+        }
+        else NotFound(res, "unknown favorite");
+    }
+
+    /// <summary>GET /api/library - the library root folders.</summary>
+    private void WriteLibraryFolders(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        WriteJson(res, 200, new { folders = _library.All });
+    }
+
+    /// <summary>DELETE /api/library - stop offering one root folder.</summary>
+    private void RemoveLibraryFolder(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var folder = ctx.Request.QueryString["folder"] ?? "";
+        if (_library.Remove(folder))
+        {
+            Log.Info("control", $"library folder removed: {folder}");
+            WriteJson(res, 200, new { removed = folder });
+        }
+        else NotFound(res, "unknown library folder");
+    }
+
+    /// <summary>GET /api/playlists - the remembered media folders.</summary>
+    private void WritePlaylists(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        WriteJson(res, 200, new
+        {
+            playlists = _playlists.All.Select(p => new { name = p.Name, folder = p.Folder }),
+        });
+    }
+
+    /// <summary>DELETE /api/playlists - forget one remembered folder by name.</summary>
+    private void RemovePlaylist(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var plName = ctx.Request.QueryString["name"] ?? "";
+        if (_playlists.Remove(plName))
+        {
+            Log.Info("control", $"playlist removed: {plName}");
+            WriteJson(res, 200, new { removed = plName });
+        }
+        else NotFound(res, "unknown playlist");
+    }
+
+    /// <summary>DELETE /api/mounts - remove one RTSP mount.</summary>
+    private void RemoveMount(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var mountPath = ctx.Request.QueryString["path"] ?? "";
+        if (_serverConfig.RemoveMount(mountPath))
+        {
+            Log.Info("control", $"mount removed via dashboard: {mountPath}");
+            WriteJson(res, 200, new { removed = mountPath });
+        }
+        else
+        {
+            NotFound(res, "unknown mount");
+        }
+    }
+
+    // Convert this media again from scratch: for a conversion that
+    // came out wrong, or one made before the codec settings changed.
+    // Unlinking keeps a conversion precisely because rebuilding it
+    // would produce the same bytes — this is the case where that is
+    // not true and the old one has to go.
+    private void RetranscodeStream(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        var stream = ctx.Request.QueryString["stream"] ?? "";
+        if (stream.Length == 0 || stream.Contains("..") || stream.Contains('/') || stream.Contains('\\'))
+        {
+            BadRequest(res, "invalid stream name");
+            return;
+        }
+        var root = MediaRootPath();
+        var sdir = Path.GetFullPath(Path.Combine(root, stream));
+        if (!sdir.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            || !Directory.Exists(sdir))
+        {
+            NotFound(res, "unknown stream");
+            return;
+        }
+        // the source is only knowable from inside the directory, so
+        // read it before the directory is removed
+        string source;
+        try { source = File.ReadAllText(Path.Combine(sdir, "source.txt")).Trim(); }
+        catch { source = ""; }
+        if (source.Length == 0 || !File.Exists(source))
+        {
+            WriteJson(res, 400, new
+            {
+                error = "this stream has no source file on record, so it cannot be rebuilt — "
+                      + "removing it would lose it for good",
+            });
+            return;
+        }
+
+        _ffmpeg?.DiscardVod(stream);
+        var (rebuilt, ready) = _ffmpeg?.StartVod(source) ?? (stream, false);
+        _links.Show(rebuilt);
+        Log.Info("control", $"retranscoding {stream} from {Path.GetFileName(source)}");
+        WriteJson(res, 200, new { stream = rebuilt, ready });
+    }
+
+    /// <summary>DELETE /api/sessions/{id} - tear one RTSP session down from the dashboard.</summary>
+    private void TerminateSession(HttpListenerContext ctx, string path)
+    {
+        var res = ctx.Response;
+        var id = path["/api/sessions/".Length..];
+        // capture once — a concurrent /api/server/stop can null Rtsp
+        var rtsp = RtspServer;
+        var session = rtsp?.Sessions.Get(id);
+        if (session is null)
+        {
+            NotFound(res, "session not found");
+            return;
+        }
+        rtsp!.Sessions.Remove(id);
+        Log.Info("control", $"session {id} terminated via control API");
+        WriteJson(res, 200, new { terminated = id });
     }
 
     /// <summary>
@@ -1825,7 +1914,7 @@ public sealed partial class ControlApi : IDisposable
             string.Equals(m.Path, mountPath, StringComparison.OrdinalIgnoreCase));
         if (mount is null)
         {
-            WriteJson(res, 404, new { error = "unknown mount" });
+            NotFound(res, "unknown mount");
             return;
         }
 
@@ -1930,23 +2019,18 @@ public sealed partial class ControlApi : IDisposable
     private void SaveSettings(HttpListenerContext ctx)
     {
         var res = ctx.Response;
-        ServerConfig.SettingsOverrides? s;
-        try
+        if (!TryReadJsonBody<ServerConfig.SettingsOverrides>(ctx, out var s, out var bodyError))
         {
-            s = JsonSerializer.Deserialize<ServerConfig.SettingsOverrides>(ReadBody(ctx), BodyJson);
-        }
-        catch (Exception ex)
-        {
-            WriteJson(res, 400, new { error = "bad JSON: " + ex.Message });
+            BadRequest(res, bodyError);
             return;
         }
-        if (s is null) { WriteJson(res, 400, new { error = "empty body" }); return; }
+        if (s is null) { BadRequest(res, "empty body"); return; }
 
         foreach (var (port, name) in new[] { (s.RtspPort, "rtspPort"), (s.HlsPort, "hlsPort"), (s.ControlPort, "controlPort") })
         {
             if (port is int p and (< 1 or > 65535))
             {
-                WriteJson(res, 400, new { error = $"{name} must be 1–65535" });
+                BadRequest(res, $"{name} must be 1–65535");
                 return;
             }
         }
@@ -1954,7 +2038,7 @@ public sealed partial class ControlApi : IDisposable
             !System.Net.IPAddress.TryParse(s.BindAddress, out _) &&
             !s.BindAddress.Equals("localhost", StringComparison.OrdinalIgnoreCase))
         {
-            WriteJson(res, 400, new { error = "bindAddress must be an IP address (0.0.0.0 = all interfaces) or 'localhost'" });
+            BadRequest(res, "bindAddress must be an IP address (0.0.0.0 = all interfaces) or 'localhost'");
             return;
         }
 
@@ -1962,7 +2046,7 @@ public sealed partial class ControlApi : IDisposable
         // end is effectively "never expires", which is the caller's call
         if (s.LinkLifetimeHours is int lifetime and (< 1 or > 8760))
         {
-            WriteJson(res, 400, new { error = "link lifetime must be 1–8760 hours (up to a year)" });
+            BadRequest(res, "link lifetime must be 1–8760 hours (up to a year)");
             return;
         }
 
@@ -1970,25 +2054,25 @@ public sealed partial class ControlApi : IDisposable
         if (s.LogLevel is { Length: > 0 } lvl &&
             lvl.ToLowerInvariant() is not ("trace" or "debug" or "info" or "warn" or "error"))
         {
-            WriteJson(res, 400, new { error = "log level must be trace, debug, info, warn, or error" });
+            BadRequest(res, "log level must be trace, debug, info, warn, or error");
             return;
         }
         if (s.LogRotatePeriod is { Length: > 0 } per &&
             per.ToLowerInvariant() is not ("none" or "hourly" or "daily" or "weekly" or "monthly"))
         {
-            WriteJson(res, 400, new { error = "rotation period must be none, hourly, daily, weekly, or monthly" });
+            BadRequest(res, "rotation period must be none, hourly, daily, weekly, or monthly");
             return;
         }
         // 0 means "don't rotate on size"; 4 GB is past anything a text log
         // should reach before the period or the file count catches it
         if (s.LogRotateSizeMb is int mb and (< 0 or > 4096))
         {
-            WriteJson(res, 400, new { error = "rotation size must be 0–4096 MB (0 = no size limit)" });
+            BadRequest(res, "rotation size must be 0–4096 MB (0 = no size limit)");
             return;
         }
         if (s.LogMaxFiles is int keep and (< 0 or > 1000))
         {
-            WriteJson(res, 400, new { error = "kept log files must be 0–1000" });
+            BadRequest(res, "kept log files must be 0–1000");
             return;
         }
         // an unwritable directory has to fail here, not silently later
@@ -2001,7 +2085,7 @@ public sealed partial class ControlApi : IDisposable
             }
             catch (Exception ex)
             {
-                WriteJson(res, 400, new { error = "log directory unusable: " + ex.Message });
+                BadRequest(res, "log directory unusable: " + ex.Message);
                 return;
             }
         }
@@ -2019,14 +2103,14 @@ public sealed partial class ControlApi : IDisposable
             }
             catch (Exception ex)
             {
-                WriteJson(res, 400, new { error = "transcodes directory unusable: " + ex.Message });
+                BadRequest(res, "transcodes directory unusable: " + ex.Message);
                 return;
             }
         }
         if (s.StreamRemoveAction is { Length: > 0 } sra &&
             sra.ToLowerInvariant() is not ("ask" or "keep" or "delete"))
         {
-            WriteJson(res, 400, new { error = "stream remove action must be ask, keep, or delete" });
+            BadRequest(res, "stream remove action must be ask, keep, or delete");
             return;
         }
 
@@ -2040,7 +2124,7 @@ public sealed partial class ControlApi : IDisposable
         var ports = new[] { s.RtspPort ?? _serverConfig.Rtsp.Port, s.HlsPort ?? _serverConfig.Hls.Port, s.ControlPort ?? _serverConfig.Control.Port };
         if (ports.Distinct().Count() != 3)
         {
-            WriteJson(res, 400, new { error = "rtsp, hls, and control ports must all be different" });
+            BadRequest(res, "rtsp, hls, and control ports must all be different");
             return;
         }
 
@@ -2170,24 +2254,22 @@ public sealed partial class ControlApi : IDisposable
         var name = ctx.Request.QueryString["stream"] ?? "";
         if (name.Length == 0 || name.Contains("..") || name.Contains('/') || name.Contains('\\'))
         {
-            WriteJson(res, 400, new { error = "invalid stream name" });
+            BadRequest(res, "invalid stream name");
             return;
         }
 
         if (_ffmpeg?.Channels.Any(c => c.stream.Equals(name, StringComparison.OrdinalIgnoreCase)) == true)
         {
-            WriteJson(res, 400, new { error = "that stream is a live channel — remove the channel instead" });
+            BadRequest(res, "that stream is a live channel — remove the channel instead");
             return;
         }
 
-        var mediaRoot = Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
-            ? _serverConfig.Hls.MediaRoot
-            : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
+        var mediaRoot = MediaRootPath();
         var dir = Path.GetFullPath(Path.Combine(mediaRoot, name));
         if (!dir.StartsWith(mediaRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
             !Directory.Exists(dir))
         {
-            WriteJson(res, 404, new { error = "unknown stream" });
+            NotFound(res, "unknown stream");
             return;
         }
 
@@ -2258,18 +2340,18 @@ public sealed partial class ControlApi : IDisposable
             var req = JsonSerializer.Deserialize<FavoriteRequest>(ReadBody(ctx), BodyJson);
             if (string.IsNullOrWhiteSpace(req?.path))
             {
-                WriteJson(res, 400, new { error = "body must be { \"path\": \"...\", \"name\": \"optional\" }" });
+                BadRequest(res, "body must be { \"path\": \"...\", \"name\": \"optional\" }");
                 return;
             }
             if (!TryLocalPath(req.path, out var full))
             {
-                WriteJson(res, 400, new { error = "network paths are not allowed" });
+                BadRequest(res, "network paths are not allowed");
                 return;
             }
             var isFolder = Directory.Exists(full);
             if (!isFolder && !System.IO.File.Exists(full))
             {
-                WriteJson(res, 404, new { error = "file or folder not found" });
+                NotFound(res, "file or folder not found");
                 return;
             }
             var name = !string.IsNullOrWhiteSpace(req.name) ? req.name.Trim()
@@ -2285,7 +2367,7 @@ public sealed partial class ControlApi : IDisposable
         }
         catch (Exception ex)
         {
-            WriteJson(res, 400, new { error = ex.Message });
+            BadRequest(res, ex.Message);
         }
     }
 
@@ -2309,28 +2391,26 @@ public sealed partial class ControlApi : IDisposable
             var req = JsonSerializer.Deserialize<SubtitleRequest>(ReadBody(ctx), BodyJson);
             if (string.IsNullOrWhiteSpace(req?.stream) || string.IsNullOrWhiteSpace(req?.file))
             {
-                WriteJson(res, 400, new { error = "body must be { \"stream\": \"...\", \"file\": \"...\" }" });
+                BadRequest(res, "body must be { \"stream\": \"...\", \"file\": \"...\" }");
                 return;
             }
             if (req.stream.Contains("..") || req.stream.Contains('/') || req.stream.Contains('\\'))
             {
-                WriteJson(res, 400, new { error = "invalid stream name" });
+                BadRequest(res, "invalid stream name");
                 return;
             }
 
-            var mediaRoot = Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
-                ? _serverConfig.Hls.MediaRoot
-                : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
+            var mediaRoot = MediaRootPath();
             var streamDir = Path.GetFullPath(Path.Combine(mediaRoot, req.stream));
             if (!streamDir.StartsWith(mediaRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
                 || !Directory.Exists(streamDir))
             {
-                WriteJson(res, 404, new { error = "unknown stream" });
+                NotFound(res, "unknown stream");
                 return;
             }
             if (!TryLocalPath(req.file, out var file))
             {
-                WriteJson(res, 400, new { error = "network paths are not allowed" });
+                BadRequest(res, "network paths are not allowed");
                 return;
             }
             // only accept real subtitle files, so this can't be used to read
@@ -2338,19 +2418,19 @@ public sealed partial class ControlApi : IDisposable
             var subExt = Path.GetExtension(file).ToLowerInvariant();
             if (subExt is not (".srt" or ".vtt" or ".ass" or ".ssa" or ".sub" or ".smi" or ".sbv" or ".ttml" or ".dfxp"))
             {
-                WriteJson(res, 400, new { error = "not a subtitle file (.srt, .ass, .vtt, .sub, .ssa, .smi)" });
+                BadRequest(res, "not a subtitle file (.srt, .ass, .vtt, .sub, .ssa, .smi)");
                 return;
             }
             if (!System.IO.File.Exists(file))
             {
-                WriteJson(res, 404, new { error = "subtitle file not found" });
+                NotFound(res, "subtitle file not found");
                 return;
             }
 
             var track = _subtitles.AttachFile(file, Path.Combine(streamDir, "subs"), req.label);
             if (track is null)
             {
-                WriteJson(res, 400, new { error = "could not convert that file to WebVTT — is it a subtitle file?" });
+                BadRequest(res, "could not convert that file to WebVTT — is it a subtitle file?");
                 return;
             }
             Log.Info("control", $"subtitle attached to {req.stream}: {Path.GetFileName(file)}");
@@ -2358,7 +2438,7 @@ public sealed partial class ControlApi : IDisposable
         }
         catch (Exception ex)
         {
-            WriteJson(res, 400, new { error = ex.Message });
+            BadRequest(res, ex.Message);
         }
     }
 
@@ -2382,7 +2462,7 @@ public sealed partial class ControlApi : IDisposable
         var query = (ctx.Request.QueryString["q"] ?? "").Trim();
         if (query.Length < 2)
         {
-            WriteJson(res, 400, new { error = "search needs at least two characters" });
+            BadRequest(res, "search needs at least two characters");
             return;
         }
 
@@ -2396,7 +2476,7 @@ public sealed partial class ControlApi : IDisposable
         {
             if (!TryLocalPath(scope, out var full) || !IsShared(full) || !Directory.Exists(full))
             {
-                WriteJson(res, 400, new { error = "that folder is not in the library" });
+                BadRequest(res, "that folder is not in the library");
                 return;
             }
             roots = new[] { full };
@@ -2501,17 +2581,17 @@ public sealed partial class ControlApi : IDisposable
             var req = JsonSerializer.Deserialize<LibraryRequest>(ReadBody(ctx), BodyJson);
             if (string.IsNullOrWhiteSpace(req?.folder))
             {
-                WriteJson(res, 400, new { error = "body must be { \"folder\": \"...\" }" });
+                BadRequest(res, "body must be { \"folder\": \"...\" }");
                 return;
             }
             if (!TryLocalPath(req.folder, out var folder))
             {
-                WriteJson(res, 400, new { error = "network paths are not allowed" });
+                BadRequest(res, "network paths are not allowed");
                 return;
             }
             if (!Directory.Exists(folder))
             {
-                WriteJson(res, 404, new { error = "folder not found" });
+                NotFound(res, "folder not found");
                 return;
             }
             if (!_library.Add(folder))
@@ -2527,7 +2607,7 @@ public sealed partial class ControlApi : IDisposable
         }
         catch (Exception ex)
         {
-            WriteJson(res, 400, new { error = ex.Message });
+            BadRequest(res, ex.Message);
         }
     }
 
@@ -2544,14 +2624,14 @@ public sealed partial class ControlApi : IDisposable
         {
             if (!TryLocalPath(path, out var full))
             {
-                WriteJson(res, 400, new { error = "network paths are not allowed" });
+                BadRequest(res, "network paths are not allowed");
                 return;
             }
             if (DenyUnshared(ctx, auth, full)) return;
             var thumb = _ffmpeg?.GetThumbnail(full);
             if (thumb is null)
             {
-                WriteJson(res, 404, new { error = "no thumbnail" });
+                NotFound(res, "no thumbnail");
                 return;
             }
             res.StatusCode = 200;
@@ -2563,7 +2643,7 @@ public sealed partial class ControlApi : IDisposable
         }
         catch (Exception ex)
         {
-            WriteJson(res, 400, new { error = ex.Message });
+            BadRequest(res, ex.Message);
         }
     }
 
@@ -2578,17 +2658,17 @@ public sealed partial class ControlApi : IDisposable
             var req = JsonSerializer.Deserialize<PlaylistRequest>(ReadBody(ctx), BodyJson);
             if (string.IsNullOrWhiteSpace(req?.name) || string.IsNullOrWhiteSpace(req?.folder))
             {
-                WriteJson(res, 400, new { error = "body must be { \"name\": \"...\", \"folder\": \"...\" }" });
+                BadRequest(res, "body must be { \"name\": \"...\", \"folder\": \"...\" }");
                 return;
             }
             if (!TryLocalPath(req.folder, out var folder))
             {
-                WriteJson(res, 400, new { error = "network paths are not allowed" });
+                BadRequest(res, "network paths are not allowed");
                 return;
             }
             if (!Directory.Exists(folder))
             {
-                WriteJson(res, 404, new { error = "folder not found" });
+                NotFound(res, "folder not found");
                 return;
             }
             _playlists.Save(req.name.Trim(), folder);
@@ -2597,7 +2677,7 @@ public sealed partial class ControlApi : IDisposable
         }
         catch (Exception ex)
         {
-            WriteJson(res, 400, new { error = ex.Message });
+            BadRequest(res, ex.Message);
         }
     }
 
@@ -2619,18 +2699,18 @@ public sealed partial class ControlApi : IDisposable
             var req = JsonSerializer.Deserialize<PlayRequest>(ReadBody(ctx), BodyJson);
             if (string.IsNullOrWhiteSpace(req?.file))
             {
-                WriteJson(res, 400, new { error = "body must be { \"file\": \"...\", \"height\": 0|360|480|720|1080 }" });
+                BadRequest(res, "body must be { \"file\": \"...\", \"height\": 0|360|480|720|1080 }");
                 return;
             }
             var height = req.height ?? 0;
             if (height is not (0 or 360 or 480 or 720 or 1080))
             {
-                WriteJson(res, 400, new { error = "height must be 0 (source), 360, 480, 720, or 1080" });
+                BadRequest(res, "height must be 0 (source), 360, 480, 720, or 1080");
                 return;
             }
             if (!TryLocalPath(req.file, out var file))
             {
-                WriteJson(res, 400, new { error = "network paths are not allowed" });
+                BadRequest(res, "network paths are not allowed");
                 return;
             }
             if (DenyUnshared(ctx, auth, file)) return;
@@ -2647,11 +2727,11 @@ public sealed partial class ControlApi : IDisposable
         }
         catch (FileNotFoundException)
         {
-            WriteJson(res, 404, new { error = "file not found" });
+            NotFound(res, "file not found");
         }
         catch (Exception ex)
         {
-            WriteJson(res, 400, new { error = ex.Message });
+            BadRequest(res, ex.Message);
         }
     }
 
@@ -2688,7 +2768,7 @@ public sealed partial class ControlApi : IDisposable
         var provider = _providers.Get(id);
         if (provider is null || !provider.Enabled)
         {
-            WriteJson(res, 404, new { error = $"unknown provider '{id}'" });
+            NotFound(res, $"unknown provider '{id}'");
             return;
         }
 
@@ -2779,7 +2859,7 @@ public sealed partial class ControlApi : IDisposable
             var provider = _providers.Get(id);
             if (provider is null || !provider.Enabled)
             {
-                WriteJson(res, 404, new { error = $"unknown provider '{id}'" });
+                NotFound(res, $"unknown provider '{id}'");
                 return;
             }
 
@@ -2794,7 +2874,7 @@ public sealed partial class ControlApi : IDisposable
 
             if (resolved is null)
             {
-                WriteJson(res, 404, new { error = "unknown channel" });
+                NotFound(res, "unknown channel");
                 return;
             }
             url = resolved;
@@ -2832,7 +2912,7 @@ public sealed partial class ControlApi : IDisposable
         if (!Uri.TryCreate(url, UriKind.Absolute, out var target) ||
             target.Scheme is not ("http" or "https"))
         {
-            WriteJson(res, 400, new { error = "target must be an http(s) URL" });
+            BadRequest(res, "target must be an http(s) URL");
             return;
         }
 
@@ -2928,12 +3008,11 @@ public sealed partial class ControlApi : IDisposable
     private void SetDlnaShare(HttpListenerContext ctx)
     {
         var res = ctx.Response;
-        DlnaShareRequest? req;
-        try { req = JsonSerializer.Deserialize<DlnaShareRequest>(ReadBody(ctx), BodyJson); }
-        catch (Exception ex) { WriteJson(res, 400, new { error = "bad JSON: " + ex.Message }); return; }
+        if (!TryReadJsonBody<DlnaShareRequest>(ctx, out var req, out var bodyError))
+        { BadRequest(res, bodyError); return; }
         if (req?.folders is null)
         {
-            WriteJson(res, 400, new { error = "body must be { \"folders\": [ \"C:\\\\path\", … ] }" });
+            BadRequest(res, "body must be { \"folders\": [ \"C:\\\\path\", … ] }");
             return;
         }
 
@@ -3188,7 +3267,7 @@ public sealed partial class ControlApi : IDisposable
         var host = Media.Providers.HdhrTuner.NormalizeHost(ctx.Request.QueryString["host"]);
         if (host is null)
         {
-            WriteJson(res, 400, new { error = "host must be a tuner address, e.g. 192.168.1.50 or hdhomerun.local" });
+            BadRequest(res, "host must be a tuner address, e.g. 192.168.1.50 or hdhomerun.local");
             return;
         }
         // A tuner is a box on this network: not the internet (where this
@@ -3263,14 +3342,13 @@ public sealed partial class ControlApi : IDisposable
             return;
         }
 
-        ImportRequest? req;
-        try { req = JsonSerializer.Deserialize<ImportRequest>(ReadBody(ctx), BodyJson); }
-        catch (Exception ex) { WriteJson(res, 400, new { error = "bad JSON: " + ex.Message }); return; }
+        if (!TryReadJsonBody<ImportRequest>(ctx, out var req, out var bodyError))
+        { BadRequest(res, bodyError); return; }
 
         var wanted = req?.channels ?? new List<ChannelRequest>();
         if (wanted.Count == 0)
         {
-            WriteJson(res, 400, new { error = "body must be { \"channels\": [ { \"name\": \"…\", \"url\": \"…\" } ] }" });
+            BadRequest(res, "body must be { \"channels\": [ { \"name\": \"…\", \"url\": \"…\" } ] }");
             return;
         }
 
@@ -3320,7 +3398,7 @@ public sealed partial class ControlApi : IDisposable
             var provider = _providers.Get(providerId);
             if (provider is null || !provider.Enabled || string.IsNullOrWhiteSpace(channelId))
             {
-                WriteJson(res, 400, new { error = "body must be { \"provider\": \"…\", \"id\": \"…\" }" });
+                BadRequest(res, "body must be { \"provider\": \"…\", \"id\": \"…\" }");
                 return;
             }
 
@@ -3328,7 +3406,7 @@ public sealed partial class ControlApi : IDisposable
             var channel = lineup.FirstOrDefault(c => c.Id == channelId);
             if (channel is null)
             {
-                WriteJson(res, 404, new { error = "unknown channel" });
+                NotFound(res, "unknown channel");
                 return;
             }
 
@@ -3346,7 +3424,7 @@ public sealed partial class ControlApi : IDisposable
             WriteJson(res, 200, new { stream, playlist = $"/{stream}/index.m3u8", name, started = false });
         }
         catch (InvalidOperationException ex) { WriteJson(res, 409, new { error = ex.Message }); }
-        catch (Exception ex) { WriteJson(res, 400, new { error = ex.Message }); }
+        catch (Exception ex) { BadRequest(res, ex.Message); }
     }
 
     /// <summary>POST /api/channels {name,url} — add and start a live channel.</summary>
@@ -3363,13 +3441,13 @@ public sealed partial class ControlApi : IDisposable
             var req = JsonSerializer.Deserialize<ChannelRequest>(ReadBody(ctx), BodyJson);
             if (string.IsNullOrWhiteSpace(req?.name) || string.IsNullOrWhiteSpace(req?.url))
             {
-                WriteJson(res, 400, new { error = "body must be { \"name\": \"...\", \"url\": \"...\" }" });
+                BadRequest(res, "body must be { \"name\": \"...\", \"url\": \"...\" }");
                 return;
             }
             var scheme = Uri.TryCreate(req.url, UriKind.Absolute, out var u) ? u.Scheme.ToLowerInvariant() : "";
             if (scheme is not ("http" or "https" or "rtsp" or "rtmp" or "udp" or "rtp" or "srt"))
             {
-                WriteJson(res, 400, new { error = "url must be http(s)/rtsp/rtmp/udp/rtp/srt" });
+                BadRequest(res, "url must be http(s)/rtsp/rtmp/udp/rtp/srt");
                 return;
             }
             var stream = _ffmpeg.AddChannel(req.name.Trim(), req.url.Trim());
@@ -3377,7 +3455,7 @@ public sealed partial class ControlApi : IDisposable
             WriteJson(res, 200, new { stream, playlist = $"/{stream}/index.m3u8" });
         }
         catch (InvalidOperationException ex) { WriteJson(res, 409, new { error = ex.Message }); }
-        catch (Exception ex) { WriteJson(res, 400, new { error = ex.Message }); }
+        catch (Exception ex) { BadRequest(res, ex.Message); }
     }
 
     private static readonly Dictionary<string, string> ImageTypes = new(StringComparer.OrdinalIgnoreCase)
@@ -3396,13 +3474,13 @@ public sealed partial class ControlApi : IDisposable
         {
             if (!TryLocalPath(path, out var full))
             {
-                WriteJson(res, 400, new { error = "network paths are not allowed" });
+                BadRequest(res, "network paths are not allowed");
                 return;
             }
             if (DenyUnshared(ctx, auth, full)) return;
             if (!System.IO.File.Exists(full) || !ImageTypes.TryGetValue(Path.GetExtension(full), out var mime))
             {
-                WriteJson(res, 404, new { error = "not an image" });
+                NotFound(res, "not an image");
                 return;
             }
             res.StatusCode = 200;
@@ -3413,7 +3491,7 @@ public sealed partial class ControlApi : IDisposable
         }
         catch (Exception ex)
         {
-            WriteJson(res, 400, new { error = ex.Message });
+            BadRequest(res, ex.Message);
         }
     }
 
@@ -3427,31 +3505,26 @@ public sealed partial class ControlApi : IDisposable
     private void AddMount(HttpListenerContext ctx)
     {
         var res = ctx.Response;
-        MountConfig? mount;
-        try
+        if (!TryReadJsonBody<MountConfig>(ctx, out var mount, out var bodyError))
         {
-            mount = JsonSerializer.Deserialize<MountConfig>(ReadBody(ctx), BodyJson);
-        }
-        catch (Exception ex)
-        {
-            WriteJson(res, 400, new { error = "bad JSON: " + ex.Message });
+            BadRequest(res, bodyError);
             return;
         }
 
         if (mount is null || string.IsNullOrWhiteSpace(mount.Path) || !mount.Path.StartsWith('/'))
         {
-            WriteJson(res, 400, new { error = "mount path must start with '/'" });
+            BadRequest(res, "mount path must start with '/'");
             return;
         }
         mount.Path = "/" + mount.Path.Trim().Trim('/');
         if (mount.Path == "/" || mount.Path.Any(char.IsWhiteSpace))
         {
-            WriteJson(res, 400, new { error = "invalid mount path" });
+            BadRequest(res, "invalid mount path");
             return;
         }
         if (mount.Path.Equals("/annc", StringComparison.OrdinalIgnoreCase))
         {
-            WriteJson(res, 400, new { error = "/annc is reserved for the announcement service" });
+            BadRequest(res, "/annc is reserved for the announcement service");
             return;
         }
 
@@ -3460,7 +3533,7 @@ public sealed partial class ControlApi : IDisposable
             case "tone":
                 if (mount.ToneFrequencyHz is < 20 or > 4000)
                 {
-                    WriteJson(res, 400, new { error = "tone frequency must be 20–4000 Hz (8 kHz sampling)" });
+                    BadRequest(res, "tone frequency must be 20–4000 Hz (8 kHz sampling)");
                     return;
                 }
                 break;
@@ -3468,18 +3541,18 @@ public sealed partial class ControlApi : IDisposable
             case "file":
                 if (string.IsNullOrWhiteSpace(mount.File))
                 {
-                    WriteJson(res, 400, new { error = "file source requires a file path" });
+                    BadRequest(res, "file source requires a file path");
                     return;
                 }
                 var rawFile = Path.IsPathRooted(mount.File) ? mount.File : Path.Combine(_baseDirectory, mount.File);
                 if (!TryLocalPath(rawFile, out var full))
                 {
-                    WriteJson(res, 400, new { error = "network paths are not allowed" });
+                    BadRequest(res, "network paths are not allowed");
                     return;
                 }
                 if (!System.IO.File.Exists(full))
                 {
-                    WriteJson(res, 400, new { error = "file not found: " + full });
+                    BadRequest(res, "file not found: " + full);
                     return;
                 }
                 // RTSP mounts stream the file as-is (raw G.711 µ-law) —
@@ -3500,7 +3573,7 @@ public sealed partial class ControlApi : IDisposable
                 break;
 
             default:
-                WriteJson(res, 400, new { error = "source must be 'tone' or 'file'" });
+                BadRequest(res, "source must be 'tone' or 'file'");
                 return;
         }
 
@@ -3554,7 +3627,7 @@ public sealed partial class ControlApi : IDisposable
         {
             if (!TryLocalPath(path, out var full))
             {
-                WriteJson(res, 400, new { error = "network paths are not allowed" });
+                BadRequest(res, "network paths are not allowed");
                 return;
             }
             if (!Directory.Exists(full))
@@ -3594,7 +3667,7 @@ public sealed partial class ControlApi : IDisposable
         }
         catch (Exception ex)
         {
-            WriteJson(res, 400, new { error = ex.Message });
+            BadRequest(res, ex.Message);
         }
     }
 
@@ -3658,7 +3731,7 @@ public sealed partial class ControlApi : IDisposable
         {
             if (!TryLocalPath(path, out var full))
             {
-                WriteJson(res, 400, new { error = "network paths are not allowed" });
+                BadRequest(res, "network paths are not allowed");
                 return;
             }
             if (!Directory.Exists(full))
@@ -3733,7 +3806,7 @@ public sealed partial class ControlApi : IDisposable
             WriteJson(res, 200, new { path = full, parent = dir.Parent?.FullName, entries, driveName, freeBytes, totalBytes });
         }
         catch (UnauthorizedAccessException) { WriteJson(res, 403, new { error = "access denied" }); }
-        catch (Exception ex) { WriteJson(res, 400, new { error = ex.Message }); }
+        catch (Exception ex) { BadRequest(res, ex.Message); }
     }
 
     /// <summary>
@@ -3791,6 +3864,25 @@ public sealed partial class ControlApi : IDisposable
         new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
+    /// How long a directory that has just been walked is left alone. The
+    /// dashboard asks for a probe every time a folder is listed, and clicking
+    /// back and forth between two folders would otherwise re-walk both of them
+    /// several times a minute for nothing, since what is on disk does not
+    /// change that fast. Forty-five seconds is short enough that a file dropped
+    /// into a folder someone is looking at still turns up on their next visit.
+    /// </summary>
+    private static readonly TimeSpan ProbeRewalkSuppressed = TimeSpan.FromSeconds(45);
+
+    /// <summary>
+    /// How old an entry in that record has to be before it is thrown away when
+    /// the table is trimmed. It exists only to suppress repeats, so anything
+    /// past the suppression window above is already doing nothing; ten minutes
+    /// leaves a wide margin over it while still keeping the table from growing
+    /// for as long as the server runs.
+    /// </summary>
+    private static readonly TimeSpan ProbeRecordExpiry = TimeSpan.FromMinutes(10);
+
+    /// <summary>
     /// Asks the background prober to look at this directory next. Cheap and
     /// non-blocking - the listing that triggered it must not wait for ffprobe.
     /// </summary>
@@ -3799,11 +3891,11 @@ public sealed partial class ControlApi : IDisposable
         if (_tvCodecs is null || string.IsNullOrWhiteSpace(dir)) return;
         if (_probeQueued.Count > 500) return;                 // already plenty to do
         // walked recently: nothing has changed in the seconds since
-        if (_probeDone.TryGetValue(dir, out var done) && DateTime.UtcNow - done < TimeSpan.FromSeconds(45)) return;
+        if (_probeDone.TryGetValue(dir, out var done) && DateTime.UtcNow - done < ProbeRewalkSuppressed) return;
         // this only exists to suppress repeats, so old entries are worthless;
         // left alone it grows for as long as the server runs
         if (_probeDone.Count > 2000)
-            foreach (var stale in _probeDone.Where(e => DateTime.UtcNow - e.Value > TimeSpan.FromMinutes(10)).Select(e => e.Key).ToList())
+            foreach (var stale in _probeDone.Where(e => DateTime.UtcNow - e.Value > ProbeRecordExpiry).Select(e => e.Key).ToList())
                 _probeDone.TryRemove(stale, out _);
         if (!_probeQueued.TryAdd(dir, 0)) return;             // asked for already
         _probeWanted.Enqueue(dir);
@@ -3820,6 +3912,28 @@ public sealed partial class ControlApi : IDisposable
     /// is a dictionary hit, not a probe), and saves the cache as it goes so the
     /// work survives a restart rather than starting over.
     /// </summary>
+    /// <summary>
+    /// How long the prefetch waits before its first file. Everything that
+    /// happens at startup - the dashboard opening, channels being restored, the
+    /// library being read - wants the disk more than this does, and ten seconds
+    /// is enough for that rush to be over. Nothing depends on the exact value;
+    /// it only has to be long enough that the first ffprobe is not competing
+    /// with the parts of startup the user is waiting on.
+    /// </summary>
+    private static readonly TimeSpan ProbePrefetchStartDelay = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// The gap between rounds of the prefetch, and the tick it waits in. Half
+    /// an hour is a guess at how often a library gains files, and it is cheap
+    /// to be wrong about: a round with nothing new is a walk of dictionary
+    /// lookups. The wait is broken into two-second ticks rather than one long
+    /// sleep so that a folder being browsed can cut it short - otherwise the
+    /// "checking..." pills someone is looking at right now would sit there
+    /// until the full period expired.
+    /// </summary>
+    private const int ProbeRoundSeconds = 1800;
+    private const int ProbeIdleTickSeconds = 2;
+
     private void StartCodecPrefetch()
     {
         if (_tvCodecs is null) return;
@@ -3828,7 +3942,7 @@ public sealed partial class ControlApi : IDisposable
             // Let startup finish first: the dashboard opening, channels being
             // restored and the library being read all want the disk more than
             // this does.
-            await Task.Delay(TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+            await Task.Delay(ProbePrefetchStartDelay).ConfigureAwait(false);
 
             var opts = new EnumerationOptions
             {
@@ -3966,8 +4080,8 @@ public sealed partial class ControlApi : IDisposable
                 // Woken early by a folder being browsed: waiting out the full
                 // half hour would leave the pills someone is looking at right
                 // now saying "checking..." until it expired.
-                for (var waited = 0; waited < 1800 && _probeWanted.IsEmpty; waited += 2)
-                    await Task.Delay(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+                for (var waited = 0; waited < ProbeRoundSeconds && _probeWanted.IsEmpty; waited += ProbeIdleTickSeconds)
+                    await Task.Delay(TimeSpan.FromSeconds(ProbeIdleTickSeconds)).ConfigureAwait(false);
             }
         });
     }
@@ -3988,10 +4102,9 @@ public sealed partial class ControlApi : IDisposable
             return;
         }
 
-        TranscodeRequest? req;
-        try { req = JsonSerializer.Deserialize<TranscodeRequest>(ReadBody(ctx), BodyJson); }
-        catch (Exception ex) { WriteJson(res, 400, new { error = "bad JSON: " + ex.Message }); return; }
-        if (req?.Paths is null || req.Paths.Count == 0) { WriteJson(res, 400, new { error = "no paths given" }); return; }
+        if (!TryReadJsonBody<TranscodeRequest>(ctx, out var req, out var bodyError))
+        { BadRequest(res, bodyError); return; }
+        if (req?.Paths is null || req.Paths.Count == 0) { BadRequest(res, "no paths given"); return; }
 
         var files = new List<string>();
         foreach (var p in req.Paths)
@@ -4114,10 +4227,9 @@ public sealed partial class ControlApi : IDisposable
     private void TranscodeDelete(HttpListenerContext ctx)
     {
         var res = ctx.Response;
-        TranscodeRequest? req;
-        try { req = JsonSerializer.Deserialize<TranscodeRequest>(ReadBody(ctx), BodyJson); }
-        catch (Exception ex) { WriteJson(res, 400, new { error = "bad JSON: " + ex.Message }); return; }
-        if (req?.Paths is null || req.Paths.Count == 0) { WriteJson(res, 400, new { error = "no paths given" }); return; }
+        if (!TryReadJsonBody<TranscodeRequest>(ctx, out var req, out var bodyError))
+        { BadRequest(res, bodyError); return; }
+        if (req?.Paths is null || req.Paths.Count == 0) { BadRequest(res, "no paths given"); return; }
 
         var configDir = Path.GetFullPath(_baseDirectory);
         int deleted = 0; var errors = new List<string>();
@@ -4154,9 +4266,8 @@ public sealed partial class ControlApi : IDisposable
         var res = ctx.Response;
         if (_ffmpeg is null) { WriteJson(res, 503, new { error = "ffmpeg is not available" }); return; }
 
-        TranscodeRemoveRequest? req;
-        try { req = JsonSerializer.Deserialize<TranscodeRemoveRequest>(ReadBody(ctx), BodyJson); }
-        catch (Exception ex) { WriteJson(res, 400, new { error = "bad JSON: " + ex.Message }); return; }
+        if (!TryReadJsonBody<TranscodeRemoveRequest>(ctx, out var req, out var bodyError))
+        { BadRequest(res, bodyError); return; }
 
         if (req?.Clear == true)
         {
@@ -4171,7 +4282,7 @@ public sealed partial class ControlApi : IDisposable
             WriteJson(res, 200, new { cancelled });
             return;
         }
-        if (string.IsNullOrWhiteSpace(req?.Path)) { WriteJson(res, 400, new { error = "no path or stream given" }); return; }
+        if (string.IsNullOrWhiteSpace(req?.Path)) { BadRequest(res, "no path or stream given"); return; }
         var removed = _ffmpeg.RemoveFromVodQueue(req.Path);
         WriteJson(res, 200, new { removed });
     }
@@ -4188,9 +4299,8 @@ public sealed partial class ControlApi : IDisposable
 
         if (write)
         {
-            TranscodeConfigRequest? req;
-            try { req = JsonSerializer.Deserialize<TranscodeConfigRequest>(ReadBody(ctx), BodyJson); }
-            catch (Exception ex) { WriteJson(res, 400, new { error = "bad JSON: " + ex.Message }); return; }
+            if (!TryReadJsonBody<TranscodeConfigRequest>(ctx, out var req, out var bodyError))
+            { BadRequest(res, bodyError); return; }
             _ffmpeg.SetQueueSettings(req?.MaxParallel, req?.StaggerSeconds);
             Log.Info("control", $"transcode queue: {_ffmpeg.MaxConcurrentVod} at a time, "
                 + $"{_ffmpeg.VodStaggerSeconds}s between starts");
@@ -4237,287 +4347,24 @@ public sealed partial class ControlApi : IDisposable
     /// user gesture and a tab opened from a click does not reliably carry
     /// one, so a refusal is expected rather than exceptional: the page is
     /// already edge-to-edge, and the first click anywhere tries again.
+    ///
+    /// The markup itself is wwwroot/player.html, embedded in the assembly the
+    /// same way the dashboard is; all this does is fill in its placeholders.
+    ///
+    /// Internal rather than private only so the test project can render it and
+    /// check that no placeholder was left behind; nothing outside calls it.
     /// </summary>
-    private static string PlayerPage(string src, string title)
+    internal static string PlayerPage(string src, string title)
     {
         var srcJs = JsonSerializer.Serialize(src);
         var shown = System.Net.WebUtility.HtmlEncode(
             string.IsNullOrWhiteSpace(title) ? "j0kers Media Server" : title);
-        return $$"""
-            <!doctype html>
-            <html lang="en">
-            <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>{{shown}} — j0kers</title>
-            <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🃏</text></svg>">
-            <style>
-              html, body { margin: 0; height: 100%; background: #000; color: #ddd;
-                           font-family: system-ui, sans-serif; overflow: hidden; }
-              video { width: 100vw; height: 100vh; display: block; background: #000; }
-              #msg {
-                position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
-                font-size: 14px; color: #bbb; text-align: center; pointer-events: none;
-              }
-              /* only until the first click, which is also what earns fullscreen */
-              #hint {
-                position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
-                background: rgba(0,0,0,.6); border: 1px solid rgba(255,255,255,.18);
-                border-radius: 999px; padding: 6px 14px; font-size: 12.5px; color: #ddd;
-                transition: opacity .4s; pointer-events: none;
-              }
-              /* Skip buttons of our own. The browser's controls have none,
-                 and its arrow keys move by an amount it chooses — which is
-                 why skipping felt different from one film to the next. These
-                 are a fixed 30 seconds, the same in every stream. Placed
-                 above the native control bar so they do not cover the
-                 scrubber, and faded until the pointer is near. */
-              #skip {
-                position: fixed; left: 50%; bottom: 76px; transform: translateX(-50%);
-                display: flex; gap: 10px; opacity: .25; transition: opacity .25s;
-              }
-              #skip:hover, body.busy #skip { opacity: 1; }
-              #skip button {
-                background: rgba(0,0,0,.62); color: #eee; cursor: pointer;
-                border: 1px solid rgba(255,255,255,.22); border-radius: 999px;
-                padding: 7px 15px; font-size: 13px; font-family: inherit;
-              }
-              #skip button:hover { background: rgba(0,0,0,.85); border-color: rgba(255,255,255,.45); }
-              /* a moment's confirmation of where a skip landed */
-              #seeknote {
-                position: fixed; left: 50%; top: 12%; transform: translateX(-50%);
-                background: rgba(0,0,0,.7); border-radius: 8px; padding: 8px 16px;
-                color: #fff; font-size: 20px; opacity: 0; transition: opacity .25s;
-                pointer-events: none;
-              }
-            </style>
-            <script src="/hls.min.js"></script>
-            </head>
-            <body>
-            <video id="v" controls autoplay playsinline></video>
-            <div id="msg">loading…</div>
-            <div id="seeknote"></div>
-            <div id="skip">
-              <button id="sk-back" title="Back 15 seconds (← or J)">⏪ 15s</button>
-              <button id="sk-fwd" title="Forward 15 seconds (→ or L)">15s ⏩</button>
-            </div>
-            <div id="hint">click for fullscreen</div>
-            <script>
-              const src = {{srcJs}}, v = document.getElementById("v");
-              const msg = document.getElementById("msg"), hint = document.getElementById("hint");
-              const done = () => { msg.style.display = "none"; };
-
-              // A live channel, where falling behind is fatal and going back
-              // to where you were is the wrong answer. Guessed from the URL
-              // so it is known before the first playlist arrives, then
-              // corrected from the playlist itself, which actually knows.
-              let live = /\/ch-[^/]*\//.test(src) || src.indexOf("/api/tv/") === 0;
-
-              // hls.js first. Chromium answers "maybe" to the native HLS
-              // question and then cannot play it — asking politely gets a
-              // black screen and a MEDIA_ELEMENT_ERROR. Native is the
-              // fallback, which is where Safari lands.
-              if (window.Hls && Hls.isSupported()) {
-                const hls = new Hls({
-                  enableWorker: true,
-                  // a channel left on all evening keeps every played-out
-                  // second otherwise; half an hour is a generous DVR
-                  backBufferLength: 1800,
-                });
-                hls.loadSource(src);
-                hls.attachMedia(v);
-
-                // Autoplay with sound — exactly the way the first build did it:
-                // the <video autoplay> attribute alone, with NO programmatic
-                // play() here. A deferred programmatic play() suppresses the
-                // browser's own declarative autoplay, which is what stopped the
-                // auto-start; and a muted fallback is what silenced it. Both are
-                // deliberately absent. hls.js attaches the media above and the
-                // autoplay attribute starts it, with audio, as it always did.
-
-                hls.on(Hls.Events.LEVEL_LOADED, (_, d) => {
-                  if (d && d.details) live = !!d.details.live;
-                });
-
-                /* Recover, rather than announce the death.
-                   A fatal hls.js error is usually a moment — one segment that
-                   timed out, one playlist reload that missed — and the fix is
-                   the same one the dashboard's own player has always used.
-                   Without it a single hiccup ends playback for good, which on
-                   a live channel with a 25-second window happens within the
-                   first minute almost every time. */
-                let recoveries = 0, healthy = 0;
-                v.addEventListener("playing", () => {
-                  // a spell of real playback means the last trouble is over,
-                  // so a channel watched for hours is not slowly spending a
-                  // fixed allowance of retries
-                  clearTimeout(healthy);
-                  healthy = setTimeout(() => { recoveries = 0; }, 60000);
-                });
-
-                hls.on(Hls.Events.ERROR, (_, d) => {
-                  if (!d || !d.fatal) return;            // non-fatal: hls.js copes
-                  if (++recoveries > 6) {
-                    msg.style.display = "";
-                    msg.textContent = "playback failed: " + (d.details || d.type);
-                    return;
-                  }
-                  const was = v.currentTime;
-                  msg.style.display = "";
-                  msg.textContent = "reconnecting…";
-                  try {
-                    if (d.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
-                    else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
-                    else { msg.textContent = "playback failed: " + (d.details || d.type); return; }
-                  } catch { return; }
-                  // A recording resumes where it was. A channel does not:
-                  // the position it stopped at has already fallen out of the
-                  // playlist, and asking for it again is how it stops twice.
-                  if (!live && was > 1) {
-                    v.addEventListener("canplay", function restore() {
-                      v.removeEventListener("canplay", restore);
-                      if (Math.abs(v.currentTime - was) > 2) { try { v.currentTime = was; } catch {} }
-                    });
-                  }
-                });
-
-                /* Falling off the back of the window.
-                   Pluto's playlists hold about five segments — twenty-five
-                   seconds of live — so a stall of any length leaves the
-                   player asking for segments the playlist no longer lists,
-                   and it stops with no error worth the name. Every few
-                   seconds, if we are live and further behind than the window
-                   is long, skip to the edge: a jump forward is what watching
-                   live means, and the alternative is a frozen picture. */
-                setInterval(() => {
-                  if (!live || v.paused || v.seekable.length === 0) return;
-                  const edge = v.seekable.end(v.seekable.length - 1);
-                  if (edge - v.currentTime > 30) {
-                    try { v.currentTime = edge - 6; } catch {}
-                  }
-                }, 5000);
-              } else {
-                v.src = src;
-              }
-              v.addEventListener("playing", done);
-              v.addEventListener("loadeddata", done);
-
-              // Try immediately — some browsers honour the opener's click —
-              // and fall back to earning it from the first one here.
-              function goFullscreen() {
-                const el = document.documentElement;
-                const ask = el.requestFullscreen || el.webkitRequestFullscreen;
-                if (!ask || document.fullscreenElement) return;
-                try { const p = ask.call(el); if (p && p.catch) p.catch(() => {}); } catch {}
-              }
-              /* Skipping: a fixed 30 seconds, the same in every stream.
-                 The browser's own arrow keys move by an amount of its
-                 choosing, and with HLS a seek lands on a segment boundary —
-                 so on a film whose segments are uneven, "a little forward"
-                 could be minutes. This asks for an exact position, and the
-                 note says where it landed, so a stream that still snaps is
-                 visible rather than mystifying. */
-              const SKIP = 15;   // same as the dashboard player: one skip, everywhere
-              const note = document.getElementById("seeknote");
-              let noteTimer = 0;
-              const clock = s => {
-                s = Math.max(0, Math.floor(s));
-                const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
-                return (h ? h + ":" + String(m).padStart(2, "0") : String(m))
-                       + ":" + String(x).padStart(2, "0");
-              };
-              /* How far playback can actually go right now.
-                 seekable first, duration only as a fallback — and that order
-                 is the whole point. While a file is still being converted the
-                 playlist grows as ffmpeg writes it, and duration is the
-                 optimistic figure: it names an end that has not been written
-                 yet. Clamping a skip to it seeks onto a fragment that does
-                 not exist, hls.js raises a fatal error, the recovery above
-                 reloads and restores the position, and the next press does it
-                 again — forward a few times, then a stall, a pause and a
-                 restart. seekable is the honest bound; the dashboard player
-                 and the watch page both take it, and this one now agrees. */
-              function playableEnd() {
-                if (v.seekable && v.seekable.length) return v.seekable.end(v.seekable.length - 1);
-                return isFinite(v.duration) ? v.duration : Infinity;
-              }
-              function skip(by) {
-                if (!isFinite(v.duration) && by > 0 && live) return;   // no seeking past a live edge
-                if (by < 0) {
-                  const back = Math.max(0, v.currentTime + by);
-                  try { v.currentTime = back; } catch { return; }
-                  showNote(by, back);
-                  return;
-                }
-                // Skip anywhere in the film, converted or not. The playlist
-                // covers the whole length from the start now, and a segment
-                // that has not been made yet is made when the player asks
-                // for it — so there is no converted edge to stop at and
-                // nothing to clamp to. The only bound left is the film.
-                const end = isFinite(v.duration) ? v.duration : playableEnd();
-                const want = Math.min(Math.max(0, v.currentTime + by),
-                                      isFinite(end) ? Math.max(0, end - 0.5) : v.currentTime + by);
-                try { v.currentTime = want; } catch { return; }
-                showNote(by, want);
-              }
-              function showNote(by, want) {
-                note.textContent = (by > 0 ? "⏩ +" : "⏪ −") + Math.abs(by) + "s · " + clock(want);
-                note.style.opacity = "1";
-                clearTimeout(noteTimer);
-                noteTimer = setTimeout(() => { note.style.opacity = "0"; }, 1100);
-              }
-              document.getElementById("sk-back").addEventListener("click", e => { e.stopPropagation(); skip(-SKIP); });
-              document.getElementById("sk-fwd").addEventListener("click", e => { e.stopPropagation(); skip(SKIP); });
-
-              goFullscreen();
-              addEventListener("click", () => { goFullscreen(); hint.style.opacity = "0"; }, { once: true });
-              // Capture phase, and an intention held for half a second.
-              //
-              // Measured in Chrome 148: a keydown reaches document capture,
-              // then any listener on the video, then document bubble. This
-              // was a bubble listener, so the video's own control bar had
-              // already toggled play/pause by the time it ran — it then read
-              // the state the video had just changed and toggled it straight
-              // back. Press space while paused and it started, then stopped.
-              // Capture reads the state before anything else touches it, and
-              // holding the intention undoes a second toggle from either
-              // side, whoever fires it.
-              let want = null, wantAt = 0;
-              function hold() {
-                if (want === "play") { if (v.paused) v.play().catch(() => {}); }
-                else if (want === "pause") { if (!v.paused) v.pause(); }
-              }
-              for (const ev of ["play", "pause"]) v.addEventListener(ev, () => {
-                if (!want) return;
-                if (performance.now() - wantAt > 500) { want = null; return; }
-                hold();
-              });
-              v.addEventListener("pointerdown", () => { want = null; });  // a click outranks the key
-
-              addEventListener("keydown", e => {
-                if (e.key === "f") { goFullscreen(); return; }
-                const t = e.target;
-                if (t && (t.tagName === "SELECT" || t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
-                // preventDefault, or the browser adds its own 5-second seek
-                // on top of ours and the skip is neither 15 nor predictable
-                if (e.key === "ArrowLeft"  || e.key === "j" || e.key === "J") { e.preventDefault(); if (!e.repeat) skip(-SKIP); }
-                if (e.key === "ArrowRight" || e.key === "l" || e.key === "L") { e.preventDefault(); if (!e.repeat) skip(SKIP); }
-                if (e.key === " " || e.key === "Spacebar" || e.key === "k" || e.key === "K") {
-                  e.preventDefault();
-                  if (e.repeat) return;
-                  want = v.paused ? "play" : "pause";
-                  wantAt = performance.now();
-                  hold();
-                }
-              }, true);
-              // it stops being useful the moment fullscreen happens
-              document.addEventListener("fullscreenchange",
-                () => { if (document.fullscreenElement) hint.style.display = "none"; });
-              setTimeout(() => { hint.style.opacity = "0"; }, 6000);
-            </script>
-            </body>
-            </html>
-            """;
+        // __TITLE__ lands in HTML text and __SRC_JS__ inside the <script>,
+        // which is why one is HTML-encoded and the other JSON-encoded. Entities
+        // are not decoded inside a script element, so an HTML-encoded src would
+        // arrive there as the literal "&amp;" and ask for the wrong playlist.
+        return Services.PageTemplate.Fill(PlayerTemplate.Value,
+            ("__TITLE__", shown), ("__SRC_JS__", srcJs));
     }
 
     /// <summary>
@@ -4565,9 +4412,7 @@ public sealed partial class ControlApi : IDisposable
             || stream.Contains('/') || stream.Contains('\\')) return false;
         try
         {
-            var root = Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
-                ? _serverConfig.Hls.MediaRoot
-                : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
+            var root = MediaRootPath();
             return File.Exists(Path.Combine(root, stream, "index.m3u8"));
         }
         catch
@@ -4646,6 +4491,53 @@ public sealed partial class ControlApi : IDisposable
 
     private static InvalidDataException TooLarge() =>
         new($"request body is larger than {MaxBodyBytes / 1024} KB");
+
+    /// <summary>
+    /// The read-parse-or-say-why step the POST handlers in this file all
+    /// repeated by hand: read the body, deserialize it, and on any failure
+    /// hand back the sentence the caller reports as a 400. Anything the read
+    /// or the parser throws is folded into that one message, because to the
+    /// client a body too large to accept and a body that is not JSON are the
+    /// same refusal.
+    ///
+    /// This is deliberately separate from the TryReadJson the auth endpoints
+    /// use even though the two look alike. That one turns an empty or null
+    /// body into its own "empty body" error, while the handlers here let an
+    /// empty body come back out of the parser as "bad JSON" and test for a
+    /// null result themselves afterwards. Both wordings are already what
+    /// their clients see, so neither can be made to follow the other.
+    /// </summary>
+    private static bool TryReadJsonBody<T>(HttpListenerContext ctx, out T? value, out string error)
+        where T : class
+    {
+        try
+        {
+            value = JsonSerializer.Deserialize<T>(ReadBody(ctx), BodyJson);
+            error = "";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            value = null;
+            error = "bad JSON: " + ex.Message;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The two refusals this API sends more than a hundred times between
+    /// them, each one a status and a body holding nothing but the sentence.
+    /// They exist to name the shape, not to change it: what goes on the wire
+    /// is byte for byte what WriteJson produced for the anonymous object
+    /// every one of those call sites used to build inline. A response that
+    /// carries anything else, a second field or a different status, keeps
+    /// its explicit WriteJson.
+    /// </summary>
+    private void BadRequest(HttpListenerResponse res, string message)
+        => WriteJson(res, 400, new { error = message });
+
+    private void NotFound(HttpListenerResponse res, string message)
+        => WriteJson(res, 404, new { error = message });
 
     private void WriteJson(HttpListenerResponse res, int status, object body)
     {

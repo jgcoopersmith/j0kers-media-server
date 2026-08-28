@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!-- The assembly name is what the server's InternalsVisibleTo names, so it
+         has to stay exactly this even if the folder is ever renamed. -->
+    <AssemblyName>J0kersMediaServer.Tests</AssemblyName>
+    <RootNamespace>J0kersMediaServer.Tests</RootNamespace>
+    <!-- The server sets InvariantGlobalization, which changes how strings
+         compare and how numbers format. Tests that assert on its output have to
+         run under the same rules or they would pass here and lie about there. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <!-- The server is an OutputType WinExe. Referencing it is still fine: the
+       reference brings in its library half and the two entry points never meet,
+       because the generated test entry point lives in this assembly and the
+       server's Main lives in its own. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\J0kersMediaServer.csproj" />
+  </ItemGroup>
+
+</Project>

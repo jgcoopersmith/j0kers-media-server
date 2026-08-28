@@ -45,11 +45,9 @@ public sealed class WatchHistory
     }
 
     /// <summary>
-    /// The most recent entries for one account, newest first. Everyone sees
-    /// their own history and no one else's — what somebody watched is theirs.
-    /// </summary>
-    /// <summary>
-    /// One account's history, plus everything watched without an account.
+    /// The most recent entries for one account, newest first, plus
+    /// everything watched without an account. Everyone sees their own
+    /// history and no one else's — what somebody watched is theirs.
     ///
     /// DLNA is the reason for the second half: a television browsing the
     /// library presents no credential — the protocol has none — so those
