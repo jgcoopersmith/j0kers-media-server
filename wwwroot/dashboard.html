@@ -2013,6 +2013,7 @@ function renderSessions(list) {
    shows whether a TV needs it converted and whether a conversion exists, is
    running, or has never been made. */
 const tcState = { path: "", parent: null, booted: false, selected: new Set(), converting: false, search: "" };
+let tcCheckTimer = 0, tcCheckTries = 0;   // re-poll while any pill still says "checking..."
 const TC_FOLDER_KEY = "j0kers-tc-folder";   // last folder browsed, remembered per browser
 
 async function tcBoot() {
@@ -2138,7 +2139,7 @@ function tcShowEmpty() {
 }
 
 let tcReloadGen = 0;
-async function tcReload(path) {
+async function tcReload(path, quiet) {
   if (!path) { tcShowEmpty(); return; }   // boot, and Up past a drive root
   const gen = ++tcReloadGen;              // ignore a slow response a newer one has replaced
   // Moving to a different folder ends any search; refreshing the same folder
@@ -2149,9 +2150,14 @@ async function tcReload(path) {
     const sc = $("tc-search-clear"); if (sc) sc.style.display = "none";
   }
   const list = $("tc-list"), msg = $("tc-msg");
-  msg.textContent = "";
-  tcState.selected.clear();
-  tcSyncGo();
+  // A quiet refresh is the "checking..." poll coming back for fresh pills.
+  // It must not disturb what the person is doing: keep their ticks, and do
+  // not clear a message they may be reading.
+  if (!quiet) {
+    msg.textContent = "";
+    tcState.selected.clear();
+    tcSyncGo();
+  }
   let data;
   try {
     const url = "/api/transcode/scan?path=" + encodeURIComponent(path)
@@ -2267,6 +2273,23 @@ function tcRender(entries) {
     list.appendChild(row);
   }
   tcSyncGo();
+
+  /* "checking..." means the server has not read those files' codecs yet. It
+     is doing so in the background, but this listing was fetched once and
+     would otherwise sit with the same stale pills until somebody navigated
+     away and back - which is what "they never refresh" was. Come back for a
+     fresh listing while any remain, quietly and with a ceiling, so a folder
+     of unreadable files cannot poll forever. */
+  clearTimeout(tcCheckTimer);
+  const stillChecking = entries.some(e => e.summary && e.summary.unknown > 0);
+  if (!stillChecking) { tcCheckTries = 0; return; }
+  if (tcCheckTries >= 40) return;                 // ~4 minutes, then leave it alone
+  tcCheckTries++;
+  const at = tcState.path;
+  tcCheckTimer = setTimeout(() => {
+    // only if the panel is still showing the same folder
+    if (tcState.path === at) tcReload(at, true);
+  }, 6000);
 }
 
 /* Select all / clear — ticks or unticks every checkbox currently listed

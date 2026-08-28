@@ -3868,34 +3868,86 @@ public sealed partial class ControlApi : IDisposable
         }
 
         var unique = files.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
         // Only convert what a TV can't already play. Selecting a folder that
         // holds a film plus its existing H.264 copies should convert the one
         // that needs it, not re-encode the copies too. Unprobeable files are
         // left alone (NeedsConversion answers false), matching the pills.
-        var needsConv = unique.Where(f => _tvCodecs?.NeedsConversion(f) ?? true).ToList();
-        var alreadyGood = unique.Count - needsConv.Count;
-        var queued = _ffmpeg.QueueVod(needsConv);
-
-        // A conversion started from the Transcode panel is not a stream the
-        // user asked to publish. It writes its output into the media root like
-        // any other, and the HLS list shows every directory there, so batch
-        // converting a library filled that list with rows nobody added - one
-        // per file, each with a link. Unlink them as they are queued: the
-        // conversion is kept and does all its work, it simply is not listed.
         //
-        // Nothing is lost by this. Preparing or playing the media calls
-        // StreamLinks.Show, so adding it from the media library - the one
-        // action that means "publish this" - brings the row back with the
-        // conversion already finished.
-        foreach (var f in needsConv)
+        // Deciding that costs a probe per file that isn't cached yet, and
+        // deciding it for *every* file before queueing *any* is why picking a
+        // folder of 700 sat for a minute with nothing converting: the work was
+        // all in front of the first job rather than beside it. Settle a first
+        // handful, queue them so a conversion starts at once, and let the rest
+        // arrive behind it.
+        const int firstBatch = 12;
+        var head = unique.Take(firstBatch).ToList();
+        var tail = unique.Skip(firstBatch).ToList();
+
+        var needsConv = head.Where(f => _tvCodecs?.NeedsConversion(f) ?? true).ToList();
+        var queued = _ffmpeg.QueueVod(needsConv);
+        foreach (var f in needsConv) HideConversion(f);
+
+        // The rest, off the request thread. Queued in small groups so the
+        // panel fills in steadily instead of in one lump at the end, and so a
+        // long walk never holds the conversion queue empty.
+        if (tail.Count > 0)
         {
-            var name = _ffmpeg.VodStreamName(f);
-            if (name is not null) _links.Hide(name);
+            var ffmpeg = _ffmpeg;
+            _ = Task.Run(() =>
+            {
+                var group = new List<string>();
+                var added = 0;
+                try
+                {
+                    foreach (var f in tail)
+                    {
+                        if (_tvCodecs?.NeedsConversion(f) ?? true) group.Add(f);
+                        if (group.Count < 10) continue;
+                        added += ffmpeg.QueueVod(group);
+                        foreach (var g in group) HideConversion(g);
+                        group.Clear();
+                    }
+                    if (group.Count > 0)
+                    {
+                        added += ffmpeg.QueueVod(group);
+                        foreach (var g in group) HideConversion(g);
+                    }
+                }
+                catch (Exception ex) { Log.Warn("control", $"transcode: queueing the rest failed: {ex.Message}"); }
+                if (added > 0)
+                    Log.Info("control", $"transcode: {added} more file(s) queued after the first {queued}");
+            });
         }
 
+        var alreadyGood = head.Count - needsConv.Count;
         Log.Info("control", $"transcode: {queued} file(s) queued from {req.Paths.Count} selection(s) "
-            + $"({unique.Count} video file(s) found, {alreadyGood} already play on a TV)");
-        WriteJson(res, 200, new { queued, found = unique.Count, needs = needsConv.Count, alreadyGood });
+            + $"({unique.Count} video file(s) found; the remaining {tail.Count} are being added)");
+        WriteJson(res, 200, new
+        {
+            queued,
+            found = unique.Count,
+            needs = needsConv.Count,
+            alreadyGood,
+            // still arriving, so the panel can say so rather than looking done
+            pending = tail.Count,
+        });
+    }
+
+    /// <summary>
+    /// Keeps a batch conversion out of the HLS list. It writes its output into
+    /// the media root like any other, and that list shows every directory
+    /// there, so converting a library would otherwise fill it with rows nobody
+    /// added. The conversion itself is kept and does all its work.
+    ///
+    /// Nothing is lost: preparing or playing the media calls StreamLinks.Show,
+    /// so adding it from the media library - the action that means "publish
+    /// this" - brings the row back with the conversion already finished.
+    /// </summary>
+    private void HideConversion(string file)
+    {
+        var name = _ffmpeg?.VodStreamName(file);
+        if (name is not null) _links.Hide(name);
     }
 
     private sealed class TranscodeRequest
