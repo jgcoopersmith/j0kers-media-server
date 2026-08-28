@@ -3487,6 +3487,14 @@ public sealed partial class ControlApi : IDisposable
                 return;
             }
 
+            // Probe what is being looked at. The prefetch sweep walks the media
+            // library, but this panel browses anywhere on the machine - the
+            // folder on screen is often not a library folder at all, and its
+            // pills would then say "checking..." for good. Asking for a
+            // listing is the signal that these are the files someone wants
+            // answers about, so put the directory at the front of the queue.
+            RequestCodecProbe(full);
+
             var dir = new DirectoryInfo(full);
             var entries = new List<object>();
             foreach (var d in dir.EnumerateDirectories().OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase))
@@ -3689,6 +3697,26 @@ public sealed partial class ControlApi : IDisposable
         return new { media, needs, done, ready, unknown, capped };
     }
 
+
+    /// Directories the transcode panel has been asked to list, waiting to be
+    /// probed. Bounded: a queue that grows without limit because somebody
+    /// clicked through a hundred folders is a leak, and the sweep will reach
+    /// the rest anyway.
+    private readonly System.Collections.Concurrent.ConcurrentQueue<string> _probeWanted = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _probeQueued =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Asks the background prober to look at this directory next. Cheap and
+    /// non-blocking - the listing that triggered it must not wait for ffprobe.
+    /// </summary>
+    private void RequestCodecProbe(string dir)
+    {
+        if (_tvCodecs is null || string.IsNullOrWhiteSpace(dir)) return;
+        if (_probeQueued.Count > 500) return;                 // already plenty to do
+        if (!_probeQueued.TryAdd(dir, 0)) return;             // asked for already
+        _probeWanted.Enqueue(dir);
+    }
     /// <summary>
     /// Walks the library in the background and probes what the codec cache
     /// doesn't know yet, so the transcode panel's "checking..." pills settle
@@ -3709,7 +3737,7 @@ public sealed partial class ControlApi : IDisposable
             // Let startup finish first: the dashboard opening, channels being
             // restored and the library being read all want the disk more than
             // this does.
-            await Task.Delay(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+            await Task.Delay(TimeSpan.FromSeconds(10)).ConfigureAwait(false);
 
             var opts = new EnumerationOptions
             {
@@ -3718,11 +3746,39 @@ public sealed partial class ControlApi : IDisposable
                 AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System,
             };
 
+            // One file: probe it if the answer is not already known. Returns
+            // whether a probe actually ran, so only real work is paced.
+            async Task<bool> ProbeOne(string file)
+            {
+                if (!TranscodableExt.Contains(Path.GetExtension(file))) return false;
+                if (_tvCodecs.NeedsConversionCached(file) is not null) return false;
+                _tvCodecs.Codecs(file);
+                await Task.Delay(250).ConfigureAwait(false);
+                return true;
+            }
+
             while (true)
             {
                 var probed = 0;
                 try
                 {
+                    // Whatever is on screen first - somebody is waiting on those
+                    // pills - then the library sweep for everything else.
+                    while (_probeWanted.TryDequeue(out var wanted))
+                    {
+                        _probeQueued.TryRemove(wanted, out _);
+                        if (!Directory.Exists(wanted)) continue;
+                        foreach (var file in Directory.EnumerateFiles(wanted, "*", opts))
+                        {
+                            if (await ProbeOne(file).ConfigureAwait(false))
+                            {
+                                probed++;
+                                if (probed % 25 == 0) _tvCodecs.Save();
+                            }
+                        }
+                        _tvCodecs.Save();
+                    }
+
                     foreach (var root in _library.All)
                     {
                         if (!Directory.Exists(root)) continue;
@@ -3752,7 +3808,15 @@ public sealed partial class ControlApi : IDisposable
 
                 // Round again later for whatever has been added since. Nothing
                 // to do is cheap: the second pass is dictionary lookups.
-                await Task.Delay(TimeSpan.FromMinutes(30)).ConfigureAwait(false);
+                //
+                // Woken early by a folder being browsed: waiting out the full
+                // half hour would leave the pills someone is looking at right
+                // now saying "checking..." until it expired.
+                for (var waited = 0; waited < 1800; waited += 2)
+                {
+                    if (!_probeWanted.IsEmpty) break;
+                    await Task.Delay(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+                }
             }
         });
     }
