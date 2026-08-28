@@ -25,6 +25,14 @@ UPGRADING AN EXISTING INSTALL
   Nothing you configured is overwritten. Ports, the transcodes directory, and
   every other edit survive the upgrade.
 
+  Stream links keep working. Share and cast links are signed with signing.key,
+  so replacing that file would silently invalidate every link already handed
+  out - it is never touched. The media library keeps its folders, and saved
+  channels come back on the next start.
+
+  Verified on each release: a library folder, a saved channel, an edited port
+  and a link minted before the upgrade are all still good afterwards.
+
 WHAT'S INSTALLED
   j0kers-media-server.exe   the server - the .NET runtime is bundled, so
                             nothing has to be installed first
