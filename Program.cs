@@ -367,6 +367,11 @@ try
             // events, so if one is ever dropped this re-arms it. Kept apart from
             // the channel check above so an exception in one cannot skip the
             // other — a channel fault must never be what stalls conversion.
+            // A conversion that is running but producing nothing holds its slot
+            // for ever; judged by output rather than by existence, so the queue
+            // cannot be stopped for good by a wedged encode.
+            try { ffmpeg.CheckVodJobs(); }
+            catch (Exception ex) { Log.Warn("ffmpeg", $"conversion watchdog: {ex.Message}"); }
             try { ffmpeg.KickVodQueue(); }
             catch (Exception ex) { Log.Warn("ffmpeg", $"queue watchdog: {ex.Message}"); }
         }, null, dueTime: 30_000, period: 30_000);

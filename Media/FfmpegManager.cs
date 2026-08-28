@@ -551,6 +551,7 @@ public sealed class FfmpegManager : IDisposable
                 });
             _vodJobs[stream] = job;
             _vodJobCount = _vodJobs.Count;
+            _vodStarted[stream] = DateTime.UtcNow;
             started = stream;
         }
 
@@ -837,11 +838,24 @@ public sealed class FfmpegManager : IDisposable
         catch { return; }
 
         var total = entries.Sum(e => e.size);
+
+        // Which conversions are running, taken once under the lock.
+        //
+        // This used to ask _vodJobs directly, here, with no lock at all - a
+        // plain Dictionary read racing the starts and exits that mutate it
+        // under _lock. This sweep runs immediately after every conversion
+        // starts, which is exactly when others are starting and finishing, and
+        // an unsynchronised read of a dictionary being written is not merely
+        // stale: it can throw, or walk a half-rebuilt bucket chain. It is the
+        // same fault as the "Collection was modified" that ended an overnight
+        // batch, seen again in this run's log.
+        var running = new HashSet<string>(ActiveVodStreams, StringComparer.OrdinalIgnoreCase);
+
         foreach (var (dir, size) in entries.OrderBy(e => e.dir.LastWriteTimeUtc))
         {
             if (total <= budget) break;
             if (dir.Name.Equals(keep, StringComparison.OrdinalIgnoreCase)) continue;
-            if (_vodJobs.TryGetValue(dir.Name, out var p) && !p.HasExited) continue;
+            if (running.Contains(dir.Name)) continue;
             try
             {
                 dir.Delete(recursive: true);
@@ -897,9 +911,21 @@ public sealed class FfmpegManager : IDisposable
     {
         get
         {
-            lock (_lock)
-                return _vodJobs.Where(kv => { try { return !kv.Value.HasExited; } catch { return false; } })
-                               .Select(kv => kv.Key).ToList();
+            // Snapshot first, ask afterwards.
+            //
+            // Process.HasExited raises the Exited event on the calling thread
+            // when it finds the process gone. The handler removes the job from
+            // this very dictionary, and a lock is re-entrant for the thread
+            // that already holds it - so asking HasExited *during* the
+            // enumeration let the handler mutate the collection being walked,
+            // which is the "Collection was modified" that has been ending
+            // overnight batches. Materialising the pairs finishes the
+            // enumeration before any of that can happen.
+            KeyValuePair<string, Process>[] snapshot;
+            lock (_lock) snapshot = _vodJobs.ToArray();
+            return snapshot
+                .Where(kv => { try { return !kv.Value.HasExited; } catch { return false; } })
+                .Select(kv => kv.Key).ToList();
         }
     }
 
@@ -2190,6 +2216,79 @@ public sealed class FfmpegManager : IDisposable
         }
     }
 
+
+    /// <summary>When each conversion started, so one that has not produced
+    /// anything yet is not mistaken for one that has stopped producing.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _vodStarted =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The same watch the live channels get, for batch conversions - and the
+    /// reason the queue could stop for good.
+    ///
+    /// A slot is held for as long as its ffmpeg process exists, and "exists"
+    /// is not "is working". A conversion left wedged - by the machine
+    /// suspending under it, by a drive that went away and came back, by
+    /// ffmpeg simply hanging on a read - keeps its process, keeps its slot,
+    /// and writes nothing ever again. With two slots, two of those and the
+    /// queue never advances: hundreds of files still listed, nothing
+    /// converting, and no error anywhere, because from the queue's point of
+    /// view the machine is busy.
+    ///
+    /// So judge them by output, not by existence. A conversion whose
+    /// directory has not grown in ten minutes is not slow, it is stuck: kill
+    /// it, and the exit handler cleans up the half-finished directory and
+    /// starts the next file. Ten minutes is far longer than any gap a working
+    /// encode leaves - even a slow one writes a segment every few seconds -
+    /// and the file it gives up on is left in the queue's own record, so
+    /// nothing is silently skipped.
+    /// </summary>
+    public void CheckVodJobs()
+    {
+        if (!Available || _disposed) return;
+        var stuck = new List<string>();
+        // Snapshot before asking: HasExited runs the exit handler on this
+        // thread, and that handler removes from _vodJobs - which, mid-foreach
+        // and with a re-entrant lock, is a collection modified while walked.
+        KeyValuePair<string, Process>[] jobs;
+        lock (_lock) jobs = _vodJobs.ToArray();
+        {
+            foreach (var (stream, p) in jobs)
+            {
+                bool gone;
+                try { gone = p.HasExited; } catch { gone = true; }
+                if (gone) continue;                       // the exit handler owns it
+
+                if (_vodStarted.TryGetValue(stream, out var started)
+                    && DateTime.UtcNow - started < TimeSpan.FromMinutes(2))
+                    continue;                             // still getting going
+
+                DateTime newest;
+                try
+                {
+                    var dir = new DirectoryInfo(Path.Combine(_mediaRoot, stream));
+                    if (!dir.Exists) continue;
+                    newest = dir.EnumerateFiles()
+                                .Select(f => f.LastWriteTimeUtc)
+                                .DefaultIfEmpty(DateTime.MinValue).Max();
+                }
+                catch { continue; }
+
+                if (DateTime.UtcNow - newest > TimeSpan.FromMinutes(10)) stuck.Add(stream);
+            }
+        }
+
+        foreach (var stream in stuck)
+        {
+            Log.Warn("ffmpeg", $"conversion {stream}: running but wrote nothing for 10 minutes - " +
+                               "killing it so the queue can carry on");
+            Process? p;
+            lock (_lock) _vodJobs.TryGetValue(stream, out p);
+            // Kill only: the Exited handler clears the slot, tidies the
+            // half-written directory and starts the next file.
+            try { if (p is not null && !p.HasExited) p.Kill(entireProcessTree: true); } catch { }
+        }
+    }
     /// <summary>
     /// Catches the failure mode the exit handler cannot: a job that is still
     /// running and producing nothing.
@@ -2204,9 +2303,12 @@ public sealed class FfmpegManager : IDisposable
     public void CheckLiveJobs()
     {
         List<(string stream, string name)> stale = new();
-        lock (_lock)
+        // Snapshot for the same reason as the conversion watchdog above:
+        // HasExited can run the exit handler inline and mutate this table.
+        KeyValuePair<string, Process>[] live;
+        lock (_lock) live = _liveJobs.ToArray();
         {
-            foreach (var (stream, p) in _liveJobs)
+            foreach (var (stream, p) in live)
             {
                 // A listed process that has already exited is not "not stale",
                 // it is a channel nobody is going to restart: the exit handler
@@ -2222,8 +2324,10 @@ public sealed class FfmpegManager : IDisposable
                     EnsureRestartWorker();
                     continue;
                 }
-                if (_liveStarted.TryGetValue(stream, out var started)
-                    && DateTime.UtcNow - started < TimeSpan.FromSeconds(90))
+                DateTime started;
+                bool known;
+                lock (_lock) known = _liveStarted.TryGetValue(stream, out started);
+                if (known && DateTime.UtcNow - started < TimeSpan.FromSeconds(90))
                     continue;                                    // still coming up
 
                 var dir = Path.Combine(_mediaRoot, stream);
@@ -2245,7 +2349,11 @@ public sealed class FfmpegManager : IDisposable
                 // job that was busy recovering. The watchdog is for jobs that
                 // are gone, not jobs that are slow.
                 if (DateTime.UtcNow - newest > TimeSpan.FromSeconds(210))
-                    stale.Add((stream, _channels.FirstOrDefault(c => ChannelStream(c.Name) == stream)?.Name ?? stream));
+                {
+                    string label;
+                    lock (_lock) label = _channels.FirstOrDefault(c => ChannelStream(c.Name) == stream)?.Name ?? stream;
+                    stale.Add((stream, label));
+                }
             }
         }
 
@@ -2313,11 +2421,22 @@ public sealed class FfmpegManager : IDisposable
         };
         if (trace is not null)
             p.Exited += (_, _) => { try { lock (trace) trace.Dispose(); } catch { } };
-        p.Exited += (_, _) =>
+        p.Exited += (_, _) => Task.Run(() =>
         {
-            // This runs on a thread-pool thread: an escaping exception would
-            // terminate the whole server. Kill()+Dispose() elsewhere can make
-            // ExitCode throw, so guard everything.
+            // Always on a thread-pool thread of our own, never inline.
+            //
+            // Process.HasExited raises this event on whatever thread noticed
+            // the exit - and this server asks HasExited from inside lock(_lock).
+            // Left to run inline, the handler then took _pumpLock while its
+            // caller already held _lock, in the opposite order to the pump
+            // path, and the two deadlocked: the whole server frozen, no
+            // conversions starting, nothing in the log. Reproduced exactly
+            // that way. Handing the work to the pool costs nothing and makes
+            // the comment below true rather than assumed.
+            //
+            // An escaping exception here would terminate the server, and
+            // Kill()+Dispose() elsewhere can make ExitCode throw, so
+            // everything is guarded.
             try
             {
                 if (_disposed) return;
@@ -2334,7 +2453,7 @@ public sealed class FfmpegManager : IDisposable
             // caller's cleanup, guarded for the same reason
             try { onExited?.Invoke(p); }
             catch (Exception ex) { Log.Warn("ffmpeg", $"{label}: exit handler failed: {ex.Message}"); }
-        };
+        });
         p.Start();
         // Immediately, before it can do any work: a child that outlives a
         // hard kill of this server becomes a second writer in the same
