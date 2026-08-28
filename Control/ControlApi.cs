@@ -3759,15 +3759,44 @@ public sealed partial class ControlApi : IDisposable
             // takes hours to come round, which is what "the pills never change"
             // actually was. Someone waiting on a folder they just opened gets
             // the short gap; the background sweep keeps a longer one.
-            async Task<bool> ProbeOne(string file, int gapMs)
+            // Probe a batch at once.
+            //
+            // The original pacing assumed a probe was expensive, so it left a
+            // gap between files and a library took hours. Measured, ffprobe
+            // reads stream headers and nothing else: about 90ms per file, and
+            // the same for a 1.6 GB film as for a 40 KB clip - the file's size
+            // does not come into it. The cost is process startup, which is
+            // exactly the kind of work that overlaps.
+            //
+            // So run several together and drop the gap. Four at a time is a
+            // handful of short-lived processes, nothing next to an encode, and
+            // it turns a thousand-file folder from minutes into seconds.
+            const int probeWidth = 4;
+            async Task<int> ProbeMany(IEnumerable<string> files)
             {
-                if (!TranscodableExt.Contains(Path.GetExtension(file))) return false;
-                if (_tvCodecs.NeedsConversionCached(file) is not null) return false;
-                _tvCodecs.Codecs(file);
-                probed++;
-                if (probed % 25 == 0) _tvCodecs.Save();
-                if (gapMs > 0) await Task.Delay(gapMs).ConfigureAwait(false);
-                return true;
+                var batch = new List<string>(probeWidth);
+                var done = 0;
+
+                async Task Flush()
+                {
+                    if (batch.Count == 0) return;
+                    var work = batch.ToArray();
+                    batch.Clear();
+                    await Task.WhenAll(work.Select(f => Task.Run(() => _tvCodecs.Codecs(f)))).ConfigureAwait(false);
+                    done += work.Length;
+                    probed += work.Length;
+                    _tvCodecs.Save();
+                }
+
+                foreach (var file in files)
+                {
+                    if (!TranscodableExt.Contains(Path.GetExtension(file))) continue;
+                    if (_tvCodecs.NeedsConversionCached(file) is not null) continue;
+                    batch.Add(file);
+                    if (batch.Count >= probeWidth) await Flush().ConfigureAwait(false);
+                }
+                await Flush().ConfigureAwait(false);
+                return done;
             }
 
             // Folders the panel has been asked to list, cleared before anything
@@ -3782,8 +3811,7 @@ public sealed partial class ControlApi : IDisposable
                     if (!Directory.Exists(wanted)) continue;
                     try
                     {
-                        foreach (var file in Directory.EnumerateFiles(wanted, "*", opts))
-                            await ProbeOne(file, 20).ConfigureAwait(false);
+                        await ProbeMany(Directory.EnumerateFiles(wanted, "*", opts)).ConfigureAwait(false);
                     }
                     catch { /* a folder that vanished or refused: on to the next */ }
                     _tvCodecs.Save();
@@ -3799,12 +3827,18 @@ public sealed partial class ControlApi : IDisposable
                     foreach (var root in _library.All)
                     {
                         if (!Directory.Exists(root)) continue;
+                        // In chunks, so an open folder can cut in: the sweep is
+                        // background work and the pills on screen are not.
+                        var chunk = new List<string>(64);
                         foreach (var file in Directory.EnumerateFiles(root, "*", opts))
                         {
-                            // an open folder outranks the sweep, always
+                            chunk.Add(file);
+                            if (chunk.Count < 64) continue;
+                            await ProbeMany(chunk).ConfigureAwait(false);
+                            chunk.Clear();
                             if (!_probeWanted.IsEmpty) await DrainRequested().ConfigureAwait(false);
-                            await ProbeOne(file, 60).ConfigureAwait(false);
                         }
+                        if (chunk.Count > 0) await ProbeMany(chunk).ConfigureAwait(false);
                     }
                 }
                 catch (Exception ex)
