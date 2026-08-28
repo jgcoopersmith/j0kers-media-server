@@ -123,14 +123,64 @@ if (-not $Quiet) {
 $running = @(Get-CimInstance Win32_Process -Filter "Name='$exeName'" -ErrorAction SilentlyContinue |
              Where-Object { $_.ExecutablePath -and (Split-Path -Parent $_.ExecutablePath) -eq $TargetDir.TrimEnd('\') })
 if ($running.Count -gt 0) {
-    Write-Step ("Stopping the running server ({0} instance(s))..." -f $running.Count)
+    # Name what is actually running. "Stopping the running server" when the
+    # person is sure they shut it down is confusing rather than informative:
+    # the process id and path say which copy is still up, and whether it is a
+    # tray icon still sitting there or something that relaunched itself.
+    Write-Step "Stopping the running server:"
+    foreach ($p in $running) { Write-Step ("    pid " + $p.ProcessId + "  " + $p.ExecutablePath) }
     foreach ($p in $running) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
-    Start-Sleep -Milliseconds 1200
+    # Stop-Process asks; it does not wait. Windows releases the file handle
+    # when the process has actually gone, which is a moment later - long
+    # enough that copying straight afterwards failed with "being used by
+    # another process". Wait for each one to really exit.
+    foreach ($p in $running) {
+        for ($i = 0; $i -lt 100; $i++) {
+            if (-not (Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue)) { break }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    Start-Sleep -Milliseconds 300
 }
 
 New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
 
-$copied = 0; $kept = 0
+# Clear out anything a previous upgrade had to rename aside (see below).
+foreach ($old in Get-ChildItem -LiteralPath $TargetDir -Filter '*.replaced-*' -ErrorAction SilentlyContinue) {
+    try { Remove-Item -LiteralPath $old.FullName -Force -ErrorAction Stop } catch { }
+}
+
+<#
+  Copies one payload file over whatever is there, and copes with the file
+  still being locked.
+
+  Even after the server has gone, a virus scanner or Explorer can hold a
+  freshly-closed executable open for a second or two. Retry for a while, and
+  if it is still locked, rename the old file out of the way instead: Windows
+  allows renaming a running or open executable even when it refuses to
+  overwrite it, so the new one can be put in place regardless. The renamed
+  file is deleted by the next upgrade.
+#>
+function Copy-Payload($source, $dest) {
+    for ($i = 0; $i -lt 25; $i++) {
+        try { Copy-Item -LiteralPath $source -Destination $dest -Force -ErrorAction Stop; return $true }
+        catch { Start-Sleep -Milliseconds 400 }
+    }
+    try {
+        if (Test-Path -LiteralPath $dest) {
+            $aside = "$dest.replaced-" + (Get-Random)
+            Move-Item -LiteralPath $dest -Destination $aside -Force -ErrorAction Stop
+        }
+        Copy-Item -LiteralPath $source -Destination $dest -Force -ErrorAction Stop
+        return $true
+    }
+    catch {
+        Write-Step ("Could not replace " + (Split-Path -Leaf $dest) + ": " + $_.Exception.Message)
+        return $false
+    }
+}
+
+$copied = 0; $kept = 0; $failed = 0
 foreach ($item in Get-ChildItem -LiteralPath $payload -File) {
     $dest = Join-Path $TargetDir $item.Name
     # Not the program, and already there: it belongs to the running server.
@@ -138,12 +188,12 @@ foreach ($item in Get-ChildItem -LiteralPath $payload -File) {
         $kept++
         continue
     }
-    Copy-Item -LiteralPath $item.FullName -Destination $dest -Force
-    $copied++
+    if (Copy-Payload $item.FullName $dest) { $copied++ } else { $failed++ }
 }
 
 Write-Step ("Installed {0} file(s)." -f $copied)
 if ($kept -gt 0) { Write-Step ("Kept {0} existing configuration file(s) untouched." -f $kept) }
+if ($failed -gt 0) { throw "$failed file(s) could not be replaced - close anything using the server and run this again." }
 
 # media\ and logs\ are the server's own working directories. They are never in
 # the payload, so an upgrade leaves converted media and log history in place;
