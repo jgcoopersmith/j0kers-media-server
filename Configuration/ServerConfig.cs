@@ -132,6 +132,7 @@ public sealed class ServerConfig
         [JsonPropertyName("logRotateSizeMb")] public int? LogRotateSizeMb { get; set; }
         [JsonPropertyName("logRotatePeriod")] public string? LogRotatePeriod { get; set; }
         [JsonPropertyName("logMaxFiles")] public int? LogMaxFiles { get; set; }
+        [JsonPropertyName("mediaRoot")] public string? MediaRoot { get; set; }
     }
 
     private SettingsOverrides _persistedSettings = new();
@@ -176,6 +177,7 @@ public sealed class ServerConfig
         if (s.LogRotateSizeMb is not null) _persistedSettings.LogRotateSizeMb = s.LogRotateSizeMb;
         if (s.LogRotatePeriod is not null) _persistedSettings.LogRotatePeriod = s.LogRotatePeriod;
         if (s.LogMaxFiles is not null) _persistedSettings.LogMaxFiles = s.LogMaxFiles;
+        if (s.MediaRoot is not null) _persistedSettings.MediaRoot = s.MediaRoot;
         WriteAtomic(SettingsFile, JsonSerializer.Serialize(_persistedSettings, JsonOpts), "settings");
     }
 
@@ -206,6 +208,9 @@ public sealed class ServerConfig
         if (s.LogRotateSizeMb is int mb) Logging.RotateSizeMb = mb;
         if (!string.IsNullOrWhiteSpace(s.LogRotatePeriod)) Logging.RotatePeriod = s.LogRotatePeriod;
         if (s.LogMaxFiles is int keep) Logging.MaxFiles = keep;
+        // takes effect at the next start: the media root is read once, when the
+        // transcoder and HLS server are constructed
+        if (!string.IsNullOrWhiteSpace(s.MediaRoot)) Hls.MediaRoot = s.MediaRoot;
     }
 
     private sealed class MountSidecar

@@ -475,6 +475,8 @@
   }
   #cfg h3 { margin: 0 0 14px; font-size: 15px; }
   #cfg label { display: block; color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; margin: 10px 0 4px; }
+  /* section titles: bold and a little larger, in the foreground ink */
+  #cfg label.sect { font-size: 13.5px; font-weight: 700; color: var(--ink); }
   #cfg .am-in { width: 100%; }
 
   /* A row of fields whose captions run to different lengths: let the
@@ -1121,7 +1123,7 @@
 <div id="cfg-overlay">
   <div id="cfg" role="dialog" aria-modal="true">
     <h3>⚙ Server configuration</h3>
-    <label>Hostname / bind address <span style="text-transform:none">(0.0.0.0 = all interfaces, 127.0.0.1 = this machine only)</span></label>
+    <label class="sect">Hostname / bind address <span style="text-transform:none;font-weight:400;font-size:11.5px">(0.0.0.0 = all interfaces, 127.0.0.1 = this machine only)</span></label>
     <input id="cfg-bind" class="am-in" placeholder="0.0.0.0">
     <div id="cfg-ifaces" style="margin-top:6px"></div>
     <div style="display:flex;gap:10px">
@@ -1129,7 +1131,7 @@
       <div style="flex:1"><label>HLS port</label><input id="cfg-hls" class="am-in" type="number" min="1" max="65535"></div>
       <div style="flex:1"><label>Control port</label><input id="cfg-ctl" class="am-in" type="number" min="1" max="65535"></div>
     </div>
-    <label style="margin-top:12px">Share links expire after</label>
+    <label class="sect" style="margin-top:12px">Share links expire after</label>
     <div style="display:flex;gap:8px;align-items:center">
       <input id="cfg-link" class="am-in" type="number" min="1" max="8760" style="width:100px">
       <span style="color:var(--muted);font-size:12px">hours <span id="cfg-link-h"></span></span>
@@ -1139,28 +1141,28 @@
       Applies to links issued from now on.
     </div>
 
-    <label style="margin-top:12px">Background mode</label>
+    <label class="sect" style="margin-top:12px">Background mode</label>
     <label id="cfg-tray-row" style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;color:var(--ink);font-size:13px;cursor:pointer;margin:0">
       <input id="cfg-tray" type="checkbox" style="width:16px;height:16px">
       <span>Minimize to the system tray (hide the console window)</span>
     </label>
     <div id="cfg-tray-note" style="color:var(--muted);font-size:11.5px;margin-top:3px"></div>
 
-    <label style="margin-top:12px">Network announcement</label>
+    <label class="sect" style="margin-top:12px">Network announcement</label>
     <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;color:var(--ink);font-size:13px;cursor:pointer;margin:0">
       <input id="cfg-announce" type="checkbox" style="width:16px;height:16px">
       <span>Announce this server on the local network</span>
     </label>
     <div id="cfg-announce-note" style="color:var(--muted);font-size:11.5px;margin-top:3px"></div>
 
-    <label style="margin-top:12px">HTTPS</label>
+    <label class="sect" style="margin-top:12px">HTTPS</label>
     <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;color:var(--ink);font-size:13px;cursor:pointer;margin:0">
       <input id="cfg-https" type="checkbox" style="width:16px;height:16px" onchange="renderHttpsNote()">
       <span>Serve the dashboard and media over TLS</span>
     </label>
     <div id="cfg-https-note" style="color:var(--muted);font-size:11.5px;margin-top:3px"></div>
 
-    <label style="margin-top:12px">DLNA (TVs and players with no browser)</label>
+    <label class="sect" style="margin-top:12px">DLNA (TVs and players with no browser)</label>
     <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;color:var(--ink);font-size:13px;cursor:pointer;margin:0">
       <input id="cfg-dlna" type="checkbox" style="width:16px;height:16px" onchange="renderDlnaNote()">
       <span>Serve the library over DLNA</span>
@@ -1168,7 +1170,17 @@
     <div id="cfg-dlna-note" style="color:var(--muted);font-size:11.5px;margin-top:3px"></div>
     <div id="cfg-dlna-folders" style="margin-top:6px"></div>
 
-    <label style="margin-top:12px">Logging</label>
+    <label class="sect" style="margin-top:12px">Transcodes directory</label>
+    <div style="display:flex;gap:8px">
+      <input id="cfg-mediaroot" class="am-in" placeholder="media" style="flex:1">
+      <button id="cfg-mediaroot-browse" onclick="browseMediaDir()" style="white-space:nowrap">Browse…</button>
+    </div>
+    <div style="color:var(--muted);font-size:11.5px;margin-top:3px">
+      Where transcoded media and live-channel streams are written. Point it at a
+      drive with room to spare. Takes effect after the server restarts.
+    </div>
+
+    <label class="sect" style="margin-top:12px">Logging</label>
     <div style="display:flex;gap:10px;align-items:flex-end">
       <div style="flex:1">
         <label>Detail</label>
@@ -3792,6 +3804,13 @@ async function openConfig() {
     s.logDirectory = $("cfg-logdir").value;
     cfgLogFiles = s.logFiles || [];
     renderLogging();
+
+    // transcodes directory: show the resolved path (what Browse opens at), and
+    // make the "what changed?" baseline that same path so an untouched save
+    // doesn't look like a directory change
+    $("cfg-mediaroot").value = s.mediaRootResolved || s.mediaRoot || "media";
+    cfgMediaResolved = s.mediaRootResolved || "";
+    s.mediaRoot = $("cfg-mediaroot").value;
   } catch (e) {
     $("cfg-msg").textContent = "could not load settings: " + e.message;
   }
@@ -4013,6 +4032,7 @@ async function saveDlnaShare() {
 
 /* ---- logging section of the config dialog ---- */
 let cfgLogResolved = "", cfgLogFiles = [];
+let cfgMediaResolved = "";
 
 function renderLogging() {
   const on = $("cfg-logfile").checked;
@@ -4051,6 +4071,12 @@ async function browseLogDir() {
   const start = $("cfg-logdir").value.trim() || cfgLogResolved;
   const p = await pickPath({ mode: "folder", title: "Folder for the log files", startPath: start });
   if (p) { $("cfg-logdir").value = p; renderLogging(); }
+}
+
+async function browseMediaDir() {
+  const start = $("cfg-mediaroot").value.trim() || cfgMediaResolved;
+  const p = await pickPath({ mode: "folder", title: "Choose the transcodes directory", startPath: start });
+  if (p) $("cfg-mediaroot").value = p;
 }
 
 /* 168 means nothing at a glance; "7 days" does */
@@ -4092,6 +4118,7 @@ async function saveConfig() {
     logRotateSizeMb: parseInt($("cfg-logsize").value, 10) || 0,
     logRotatePeriod: $("cfg-logperiod").value,
     logMaxFiles: parseInt($("cfg-logkeep").value, 10) || 0,
+    mediaRoot: $("cfg-mediaroot").value.trim() || "media",
   };
   // only send fields the user actually changed, so untouched settings
   // keep following server.json instead of being frozen in settings.json
@@ -4120,6 +4147,8 @@ async function saveConfig() {
     // it rather than leaving someone to hunt for the tray icon — and say
     // where they will end up, since the address changes scheme.
     if (data.httpsChanged) await offerRestart(data.httpsEnabled);
+    else if (data.mediaRootChanged)
+      alert("Transcodes directory saved. New transcodes and live-channel streams write there after the server restarts.");
     mountsLoaded = 0; channelsLoaded = 0;
     // a new lifetime only reaches URLs via a freshly minted token
     if (body.linkLifetimeHours !== undefined) await refreshMediaToken();

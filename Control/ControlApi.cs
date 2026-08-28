@@ -1167,6 +1167,10 @@ public sealed partial class ControlApi : IDisposable
                     controlPort = _serverConfig.Control.Port,
                     minimizeToTray = _serverConfig.MinimizeToTray,
                     linkLifetimeHours = _serverConfig.Hls.LinkLifetimeHours,
+                    // where transcodes and live-channel streams are written; the
+                    // resolved path is what Browse opens at and what the box shows
+                    mediaRoot = _serverConfig.Hls.MediaRoot,
+                    mediaRootResolved = MediaRootPath(),
                     // the tray lives in the Windows notification area
                     traySupported = OperatingSystem.IsWindows(),
                     // network announcement, and the name it publishes, so the
@@ -1917,6 +1921,30 @@ public sealed partial class ControlApi : IDisposable
             }
         }
 
+        // the transcodes directory has to be creatable now, not fail silently
+        // after a restart when the first conversion tries to write into it
+        if (s.MediaRoot is { Length: > 0 })
+        {
+            try
+            {
+                var probe = Path.IsPathRooted(s.MediaRoot)
+                    ? s.MediaRoot
+                    : Path.Combine(_baseDirectory, s.MediaRoot);
+                Directory.CreateDirectory(probe);
+            }
+            catch (Exception ex)
+            {
+                WriteJson(res, 400, new { error = "transcodes directory unusable: " + ex.Message });
+                return;
+            }
+        }
+        // computed before UpdateSettings swaps the value in: a real change, so
+        // the dialog can say the new directory needs a restart to take effect
+        var mediaRootChanged = s.MediaRoot is { Length: > 0 }
+            && !string.Equals(
+                Path.GetFullPath(Path.IsPathRooted(s.MediaRoot) ? s.MediaRoot : Path.Combine(_baseDirectory, s.MediaRoot)),
+                MediaRootPath(), StringComparison.OrdinalIgnoreCase);
+
         var ports = new[] { s.RtspPort ?? _serverConfig.Rtsp.Port, s.HlsPort ?? _serverConfig.Hls.Port, s.ControlPort ?? _serverConfig.Control.Port };
         if (ports.Distinct().Count() != 3)
         {
@@ -2031,6 +2059,7 @@ public sealed partial class ControlApi : IDisposable
             saved = true,
             servicesRestarted = needsRestart,
             controlPortChanged,
+            mediaRootChanged,
             httpsChanged,
             httpsEnabled = _serverConfig.Https.Enabled,
             minimizeToTray = trayNow,
