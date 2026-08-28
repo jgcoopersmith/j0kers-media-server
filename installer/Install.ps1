@@ -23,29 +23,15 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $payload = Join-Path $here 'payload'
 
-# Files the server owns once it is running. An upgrade never touches these -
-# they are the difference between "upgraded" and "wiped". Anything not on this
-# list that ships in the payload is program material and is replaced.
-$KeepOnUpgrade = @(
-    'server.json',            # ports, paths, ffmpeg settings
-    'settings.json',          # what the dashboard's Config dialog saved
-    'users.json',             # accounts and their keys
-    'sessions.json',          # who is signed in
-    'signing.key',            # invalidating this breaks every issued media link
-    'server.pfx',             # the TLS certificate this machine generated
-    'discovery-id',           # the identity TVs remember this server by
-    'providers.json',         # which free-TV providers are on
-    'channels.json',          # saved live channels
-    'library.json',           # library folders
-    'favorites.json',
-    'playlists.json',
-    'mounts.json',
-    'dlna.json',
-    'history.json',           # watch history
-    'probe-cache.json',
-    'transcode-queue.json',
-    'unlinked.json'
-)
+# What an upgrade is allowed to replace: the program, and nothing else.
+#
+# This is deliberately the opposite way round from listing the config files to
+# keep. That list has to be updated every time the server learns to save
+# something new, and the day it is not, an upgrade quietly overwrites the file
+# nobody remembered - shelf.json was already missing from it. Naming the
+# program files instead cannot go stale: anything else already in the folder
+# belongs to the running server and is left exactly as it is.
+$ProgramFiles = @('j0kers-media-server.exe', 'ffmpeg.exe', 'ffprobe.exe')
 
 function Write-Step($text) { Write-Host "  $text" }
 
@@ -147,8 +133,8 @@ New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
 $copied = 0; $kept = 0
 foreach ($item in Get-ChildItem -LiteralPath $payload -File) {
     $dest = Join-Path $TargetDir $item.Name
-    # A config file that already exists is the user's, not ours.
-    if ($upgrade -and ($KeepOnUpgrade -contains $item.Name) -and (Test-Path -LiteralPath $dest)) {
+    # Not the program, and already there: it belongs to the running server.
+    if ($upgrade -and ($ProgramFiles -notcontains $item.Name) -and (Test-Path -LiteralPath $dest)) {
         $kept++
         continue
     }
