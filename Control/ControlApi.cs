@@ -399,9 +399,22 @@ public sealed partial class ControlApi : IDisposable
         {
           try
           {
+            // Whether there is work in progress is asked here anyway, so it is
+            // also where Windows is told - a machine that sleeps mid-encode
+            // stops the work just as surely as shutting the server down did.
+            var converting = _ffmpeg is not null
+                             && (_ffmpeg.ActiveVodStreams.Count > 0 || _ffmpeg.VodQueueDepth > 0);
+            Services.KeepAwake.Busy(converting);
+
             if (!_config.ShutdownOnClose || !_sawDashboard) return;
             if (DateTime.UtcNow - _lastSeenUtc < TimeSpan.FromSeconds(30)) return;
             if (_services.Viewers.Count > 0) return;       // somebody is watching
+            // Converting counts as being in use just as much as watching does.
+            // Without this, locking the screen stopped the work: the browser
+            // stops polling behind a lock screen, nothing is streaming, and
+            // half a minute later the server shut itself down and took every
+            // running ffmpeg and the whole queue with it.
+            if (converting) return;
             _idleShutdownTimer?.Dispose();
             _idleShutdownTimer = null;
             Log.Info("control", "no dashboard for 30 s and nothing streaming - shutting down");
@@ -4685,6 +4698,7 @@ public sealed partial class ControlApi : IDisposable
         // services that are being torn down: an exception on a timer thread
         // takes the process with it rather than being caught anywhere.
         try { _idleShutdownTimer?.Dispose(); _idleShutdownTimer = null; } catch { }
+        try { Services.KeepAwake.Busy(false); } catch { }   // let the machine sleep again
         lock (_shutdownLock)
         {
             try { _closeShutdownTimer?.Dispose(); _closeShutdownTimer = null; } catch { }
