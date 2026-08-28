@@ -179,6 +179,20 @@ async function refreshChannels(force) {
     // points at that device instead. shareUrl picks an address the server
     // actually answers on. Same reasoning, same helper, as HLS Streams.
     const copyUrl = shareUrl("/" + c.stream + leaf);
+    // What Play actually opens: the channel's own source, not the re-encode.
+    //
+    // A pinned channel stores the proxy URL it came from, and that proxy passes
+    // the provider's stream through untouched - every rendition of its adaptive
+    // ladder included. The ch-* stream beside it is that same source put through
+    // ffmpeg so a television can play it over DLNA, and that costs a second
+    // lossy encode of already-compressed video, an upscale to 1080p the source
+    // never had, and the ability to drop to a lower rendition when the network
+    // dips. That is what made it look softer and stall where the provider's own
+    // site does not. A browser needs none of it, so it gets the source.
+    // Falls back to the re-encode for a channel added by hand, which has no
+    // proxy URL behind it.
+    const viaProxy = (c.url || "").match(/\/api\/tv\/(?:watch|r)\?.*/);
+    const playUrl = viaProxy ? viaProxy[0] : url;
     const live = c.status === "running";
     // idle = saved but never started (a fresh pin). It has no playlist on
     // disk yet, so offering Play would just fail — offer Start instead.
@@ -190,7 +204,7 @@ async function refreshChannels(force) {
       // which is the same choice the row's first button makes. It is its own
       // drag handle too — a tile has no spare room for a grip.
       h += '<div class="tv-tile ch-item" draggable="true" data-ch-name="' + esc(c.name) + '"'
-        + ' data-act="' + (idle ? "ch-start" : "hls-play") + '" data-arg="' + esc(idle ? c.name : url) + '"'
+        + ' data-act="' + (idle ? "ch-start" : "hls-play") + '" data-arg="' + esc(idle ? c.name : playUrl) + '"'
         + ' title="' + esc(c.name + " · " + c.status) + '">'
         + '<span class="state ' + (live ? "playing" : "ready") + '"><span class="dot"></span></span>'
         + '<span style="flex:1;min-width:0;color:var(--ink);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
@@ -218,7 +232,7 @@ async function refreshChannels(force) {
       + (idle
           ? '<button title="Start restreaming this channel from this server"'
             + ' data-act="ch-start" data-arg="' + esc(c.name) + '">▶ Start</button>'
-          : '<button data-act="hls-play" data-arg="' + esc(url) + '">▶ Play</button>'
+          : '<button data-act="hls-play" data-arg="' + esc(playUrl) + '">▶ Play</button>'
             + '<button title="Stop restreaming (keeps the channel)" data-act="ch-stop" data-arg="' + esc(c.name) + '">■ Stop</button>'
             + '<button title="Restart channel" data-act="ch-restart" data-arg="' + esc(c.name) + '">↻</button>')
       // Same place in the row as on an HLS stream — Play, Stop, Copy, ✕ — so
