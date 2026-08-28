@@ -58,6 +58,67 @@ if (-not (Test-Path -LiteralPath $payload)) {
 }
 
 $exeName  = 'j0kers-media-server.exe'
+
+# Find a copy already on this machine when the default target has none. An
+# earlier portable build was unpacked wherever the user chose, so installing
+# blindly into the default would make a second, empty install beside the real
+# one — new program, none of the accounts, channels or media. Prefer the
+# install that is actually here. Only when -TargetDir was not given: an
+# explicit target is an instruction, not a guess.
+if (-not $PSBoundParameters.ContainsKey('TargetDir') -and
+    -not (Test-Path -LiteralPath (Join-Path $TargetDir $exeName))) {
+
+    $found = @()
+    # a running server names its own location
+    $found += @(Get-CimInstance Win32_Process -Filter "Name='$exeName'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.ExecutablePath } |
+                ForEach-Object { Split-Path -Parent $_.ExecutablePath })
+    # and so does the desktop shortcut a previous install left
+    foreach ($d in @([Environment]::GetFolderPath('Desktop'),
+                     (Join-Path ([Environment]::GetFolderPath('Desktop')) 'j0ker Dev'))) {
+        if (-not (Test-Path -LiteralPath $d)) { continue }
+        foreach ($l in Get-ChildItem -LiteralPath $d -Filter '*.lnk' -ErrorAction SilentlyContinue) {
+            try {
+                $t = (New-Object -ComObject WScript.Shell).CreateShortcut($l.FullName).TargetPath
+                if ($t -and (Split-Path -Leaf $t) -eq $exeName) { $found += (Split-Path -Parent $t) }
+            } catch { }
+        }
+    }
+    $found = @($found | Where-Object { $_ -and (Test-Path -LiteralPath (Join-Path $_ $exeName)) } | Select-Object -Unique)
+
+    if ($found.Count -eq 1) {
+        Write-Host ('Found an existing installation:  ' + $found[0]) -ForegroundColor Yellow
+        Write-Host 'Upgrading it keeps its accounts, channels, library and media;'
+        Write-Host 'installing fresh elsewhere would leave all of that behind.'
+        Write-Host ''
+        if ($Quiet) { $TargetDir = $found[0] }
+        else {
+            $ans = Read-Host ("Upgrade it? [Y/n]")
+            if (-not $ans -or $ans -match '^(y|yes)$') { $TargetDir = $found[0] }
+        }
+    }
+    elseif ($found.Count -gt 1) {
+        # More than one copy on this machine — a build directory beside a real
+        # install, say. Picking one unprompted upgrades something the user did
+        # not mean to touch, so choose deliberately or not at all.
+        Write-Host 'More than one installation was found:' -ForegroundColor Yellow
+        for ($i = 0; $i -lt $found.Count; $i++) { Write-Host ("  [{0}] {1}" -f ($i + 1), $found[$i]) }
+        Write-Host ("  [0] none of these — install to {0}" -f $TargetDir)
+        Write-Host ''
+        if ($Quiet) {
+            Write-Host 'Ambiguous, and running unattended: none chosen. Re-run with'
+            Write-Host '  Install.cmd -TargetDir "<the folder you mean>"'
+            Write-Host ''
+        }
+        else {
+            $ans = Read-Host 'Which one should be upgraded?'
+            if ($ans -match '^\d+$' -and [int]$ans -ge 1 -and [int]$ans -le $found.Count) {
+                $TargetDir = $found[[int]$ans - 1]
+            }
+        }
+    }
+}
+
 $targetExe = Join-Path $TargetDir $exeName
 $upgrade  = Test-Path -LiteralPath $targetExe
 
