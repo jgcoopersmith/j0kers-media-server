@@ -2447,6 +2447,9 @@ public sealed partial class ControlApi : IDisposable
                 return;
             }
             Log.Info("control", $"library folder added: {folder}");
+            // A folder added now should have its codecs read now, not in
+            // half an hour when the sweep next comes round.
+            RequestCodecProbe(folder);
             WriteJson(res, 200, new { added = folder });
         }
         catch (Exception ex)
@@ -3746,52 +3749,61 @@ public sealed partial class ControlApi : IDisposable
                 AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System,
             };
 
-            // One file: probe it if the answer is not already known. Returns
-            // whether a probe actually ran, so only real work is paced.
-            async Task<bool> ProbeOne(string file)
+            var probed = 0;
+
+            // One file, if its answer is not already known. The pause is what
+            // keeps this in the background - ffprobe is one short process at a
+            // time, and the gap is there so a sweep never competes with
+            // playback. It was 250ms, which is fine for a folder and hopeless
+            // for a library: at four files a second, a collection of any size
+            // takes hours to come round, which is what "the pills never change"
+            // actually was. Someone waiting on a folder they just opened gets
+            // the short gap; the background sweep keeps a longer one.
+            async Task<bool> ProbeOne(string file, int gapMs)
             {
                 if (!TranscodableExt.Contains(Path.GetExtension(file))) return false;
                 if (_tvCodecs.NeedsConversionCached(file) is not null) return false;
                 _tvCodecs.Codecs(file);
-                await Task.Delay(250).ConfigureAwait(false);
+                probed++;
+                if (probed % 25 == 0) _tvCodecs.Save();
+                if (gapMs > 0) await Task.Delay(gapMs).ConfigureAwait(false);
                 return true;
+            }
+
+            // Folders the panel has been asked to list, cleared before anything
+            // else and *during* the sweep as well. Draining only between sweeps
+            // would put a folder somebody just opened behind however many hours
+            // the library takes - the same wait this is meant to remove.
+            async Task DrainRequested()
+            {
+                while (_probeWanted.TryDequeue(out var wanted))
+                {
+                    _probeQueued.TryRemove(wanted, out _);
+                    if (!Directory.Exists(wanted)) continue;
+                    try
+                    {
+                        foreach (var file in Directory.EnumerateFiles(wanted, "*", opts))
+                            await ProbeOne(file, 20).ConfigureAwait(false);
+                    }
+                    catch { /* a folder that vanished or refused: on to the next */ }
+                    _tvCodecs.Save();
+                }
             }
 
             while (true)
             {
-                var probed = 0;
                 try
                 {
-                    // Whatever is on screen first - somebody is waiting on those
-                    // pills - then the library sweep for everything else.
-                    while (_probeWanted.TryDequeue(out var wanted))
-                    {
-                        _probeQueued.TryRemove(wanted, out _);
-                        if (!Directory.Exists(wanted)) continue;
-                        foreach (var file in Directory.EnumerateFiles(wanted, "*", opts))
-                        {
-                            if (await ProbeOne(file).ConfigureAwait(false))
-                            {
-                                probed++;
-                                if (probed % 25 == 0) _tvCodecs.Save();
-                            }
-                        }
-                        _tvCodecs.Save();
-                    }
+                    await DrainRequested().ConfigureAwait(false);
 
                     foreach (var root in _library.All)
                     {
                         if (!Directory.Exists(root)) continue;
                         foreach (var file in Directory.EnumerateFiles(root, "*", opts))
                         {
-                            if (!TranscodableExt.Contains(Path.GetExtension(file))) continue;
-                            // already known - no probe, no wait
-                            if (_tvCodecs.NeedsConversionCached(file) is not null) continue;
-
-                            _tvCodecs.Codecs(file);      // probes, and caches the answer
-                            probed++;
-                            if (probed % 25 == 0) _tvCodecs.Save();
-                            await Task.Delay(250).ConfigureAwait(false);
+                            // an open folder outranks the sweep, always
+                            if (!_probeWanted.IsEmpty) await DrainRequested().ConfigureAwait(false);
+                            await ProbeOne(file, 60).ConfigureAwait(false);
                         }
                     }
                 }
@@ -3804,6 +3816,7 @@ public sealed partial class ControlApi : IDisposable
                 {
                     _tvCodecs.Save();
                     Log.Info("probe", $"codec prefetch: read {probed} file(s) the transcode list was unsure about");
+                    probed = 0;
                 }
 
                 // Round again later for whatever has been added since. Nothing
@@ -3812,11 +3825,8 @@ public sealed partial class ControlApi : IDisposable
                 // Woken early by a folder being browsed: waiting out the full
                 // half hour would leave the pills someone is looking at right
                 // now saying "checking..." until it expired.
-                for (var waited = 0; waited < 1800; waited += 2)
-                {
-                    if (!_probeWanted.IsEmpty) break;
+                for (var waited = 0; waited < 1800 && _probeWanted.IsEmpty; waited += 2)
                     await Task.Delay(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
-                }
             }
         });
     }
