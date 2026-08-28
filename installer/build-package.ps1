@@ -68,7 +68,47 @@ if (-not $KeepOld) {
         ForEach-Object { Write-Host ("  removing older package: " + $_.Name); Remove-Item -LiteralPath $_.FullName -Recurse -Force }
 }
 
+
 $mb = [math]::Round(((Get-ChildItem -LiteralPath $dest -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 0)
 Write-Host ''
 Write-Host ("Built: $dest  (${mb} MB)") -ForegroundColor Green
 Write-Host ''
+# Pack it into a single archive to hand over. A folder of 534 MB is awkward to
+# copy to another machine; one file with the version in its name is not, and it
+# is the thing that actually gets carried to a media server.
+$rar = @(
+    (Join-Path $env:ProgramFiles 'WinRAR\Rar.exe'),
+    (Join-Path ${env:ProgramFiles(x86)} 'WinRAR\Rar.exe')
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+
+$archive = Join-Path $OutputRoot "$name.rar"
+if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
+
+if ($rar) {
+    Write-Host '  packing the archive...'
+    # -ep1 keeps the package folder as the archive's root rather than storing
+    # the whole path; -r recurses; -m1 is fast, since 534 MB of already
+    # compressed executables barely shrinks whatever setting is used.
+    & $rar a -r -ep1 -m1 -idq $archive (Join-Path $dest '*') | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Host ("  rar returned " + $LASTEXITCODE) }
+}
+else {
+    # No WinRAR: a zip is still one file somebody can carry.
+    Write-Host '  WinRAR not found - packing a .zip instead...'
+    $archive = [IO.Path]::ChangeExtension($archive, '.zip')
+    if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
+    Compress-Archive -Path (Join-Path $dest '*') -DestinationPath $archive -CompressionLevel Fastest
+}
+
+# One archive on the desktop at a time, same as the folder.
+Get-ChildItem -LiteralPath $OutputRoot -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like 'j0kers Media Server Setup*' -and
+                   $_.Extension -in '.rar', '.zip' -and
+                   $_.Name -ne (Split-Path -Leaf $archive) } |
+    ForEach-Object { Write-Host ("  removing older archive: " + $_.Name); Remove-Item -LiteralPath $_.FullName -Force }
+
+if (Test-Path -LiteralPath $archive) {
+    $amb = [math]::Round(((Get-Item -LiteralPath $archive).Length / 1MB), 0)
+    Write-Host ("Packed: $archive  (${amb} MB)") -ForegroundColor Green
+    Write-Host ''
+}
