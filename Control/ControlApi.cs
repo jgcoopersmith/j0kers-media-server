@@ -277,6 +277,7 @@ public sealed partial class ControlApi : IDisposable
         _ffmpeg = ffmpeg;
         _subtitles = ffmpeg is not null ? new Media.SubtitleManager(ffmpeg) : null;
         _requestShutdown = requestShutdown;
+        StartIdleShutdownWatch();
         _playlists = new Media.PlaylistStore(baseDirectory);
         _library = new Media.LibraryStore(baseDirectory);
         _links = new Media.StreamLinks(baseDirectory);
@@ -351,6 +352,46 @@ public sealed partial class ControlApi : IDisposable
     /// </summary>
     public Discovery.DiscoveryService? Discovery { get; set; }
 
+
+    // The last sign that anybody is there: a dashboard poll (every couple of
+    // seconds while a page is open) or an HLS request. Used to notice that the
+    // dashboard has gone even when it never got to say so.
+    private DateTime _lastSeenUtc = DateTime.UtcNow;
+    private bool _sawDashboard;
+    private Timer? _idleShutdownTimer;
+
+    /// <summary>
+    /// Shuts the server down once the dashboard has been gone a while, when it
+    /// is not set to run in the background.
+    ///
+    /// Closing the page is supposed to announce itself - the browser sends a
+    /// beacon on pagehide - but that is a best-effort message from a tab that
+    /// is being destroyed, and it does not always arrive. Tested: closing the
+    /// tab left the server running with no "dashboard closed" in the log at
+    /// all. Waiting to be told is therefore not enough on its own; noticing the
+    /// silence is what makes closing the browser reliably stop the server.
+    ///
+    /// Absence, not idleness: the dashboard polls every two seconds, so half a
+    /// minute without one means the page is gone rather than quiet. Streaming
+    /// counts as being there too (OnHlsActivity), so a television part way
+    /// through a film is never cut off because nobody has the dashboard open.
+    /// Nothing happens until a dashboard has been seen at least once, so a
+    /// server started headless is left alone.
+    /// </summary>
+    private void StartIdleShutdownWatch()
+    {
+        if (_requestShutdown is null) return;
+        _idleShutdownTimer = new Timer(_ =>
+        {
+            if (!_config.ShutdownOnClose || !_sawDashboard) return;
+            if (DateTime.UtcNow - _lastSeenUtc < TimeSpan.FromSeconds(30)) return;
+            if (_services.Viewers.Count > 0) return;       // somebody is watching
+            _idleShutdownTimer?.Dispose();
+            _idleShutdownTimer = null;
+            Log.Info("control", "no dashboard for 30 s and nothing streaming - shutting down");
+            _requestShutdown();
+        }, null, dueTime: 10_000, period: 10_000);
+    }
     /// <summary>
     /// Cancels a pending shutdown-on-close. Called for dashboard polls and
     /// for any HLS request, so navigating to a watch page — or a phone
@@ -358,6 +399,7 @@ public sealed partial class ControlApi : IDisposable
     /// </summary>
     public void NoteActivity()
     {
+        _lastSeenUtc = DateTime.UtcNow;
         lock (_shutdownLock)
         {
             // a refresh reconnects within a second: no shutdown, and no
@@ -902,7 +944,7 @@ public sealed partial class ControlApi : IDisposable
                 WriteJson(res, 200, new { scheduled = _config.ShutdownOnClose });
                 return;
             }
-            if (method == "GET" && path == "/api/status") NoteActivity();
+            if (method == "GET" && path == "/api/status") { _sawDashboard = true; NoteActivity(); }
 
             switch (method, path)
             {

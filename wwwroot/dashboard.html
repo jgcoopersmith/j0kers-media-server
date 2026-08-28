@@ -631,6 +631,10 @@
   .tc-row .tc-det { font-size:11px; color:var(--muted); white-space:nowrap; }
   .tc-row.folder .tc-name { cursor:pointer; color:var(--ink); }
   .tc-row input[type=checkbox] { width:15px; height:15px; flex:none; }
+  .tc-sortbtn { font: inherit; font-size: 12px; padding: 2px 9px; border-radius: 7px;
+                border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); cursor: pointer; }
+  .tc-sortbtn:hover { border-color: var(--muted); color: var(--ink); }
+  .tc-sortbtn.on { border-color: var(--series-1); color: var(--ink); font-weight: 600; }
   .tc-badge { font-size:10.5px; padding:1px 7px; border-radius:999px; white-space:nowrap; }
   .tc-dot { display:inline-block; width:9px; height:9px; border-radius:50%; vertical-align:middle; margin-right:3px; }
   .tc-need, .b-need { background: color-mix(in srgb, var(--critical) 25%, transparent); color: var(--critical); }
@@ -821,6 +825,14 @@
              onkeydown="if(event.key==='Escape')tcClearSearch();else if(event.key==='Enter')tcSearchNow()">
       <button id="tc-search-clear" onclick="tcClearSearch()" title="Clear search (Esc)"
               style="display:none;position:absolute;right:4px;top:50%;transform:translateY(-50%);border:none;background:none;color:var(--muted);cursor:pointer;font-size:14px">✕</button>
+    </div>
+    <div id="tc-sort" style="display:flex;gap:6px;align-items:center;font-size:12px;color:var(--muted);margin:0 0 6px">
+      <span>Sort</span>
+      <button class="tc-sortbtn" data-sort="name"   onclick="tcSetSort('name')"   title="Sort by name">Name</button>
+      <button class="tc-sortbtn" data-sort="status" onclick="tcSetSort('status')" title="Sort by what still needs converting">Status</button>
+      <button class="tc-sortbtn" data-sort="count"  onclick="tcSetSort('count')"  title="Folders by how many files need converting; files by size">Number</button>
+      <span style="flex:1"></span>
+      <span id="tc-sort-note" style="font-size:11px"></span>
     </div>
     <div id="tc-opts" class="edit-only" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-bottom:6px">
       <label>Convert
@@ -2194,14 +2206,90 @@ function tcUpdateSpace(data) {
   }
 }
 
+
+/* ---- sorting the file explorer ----
+   Three orders, because three different questions get asked of this list:
+   what is it called, what still needs doing, and how much of it there is.
+   Clicking the button already in use reverses it. Folders stay above files
+   whichever is chosen - this is a directory listing, and burying the way out
+   of a folder among its files makes it hard to navigate. */
+const TC_SORT_KEY = "j0kers-tc-sort";
+let tcSort = { key: "name", dir: 1 };
+try {
+  const saved = JSON.parse(localStorage.getItem(TC_SORT_KEY) || "null");
+  if (saved && saved.key) tcSort = saved;
+} catch { /* private mode, or nonsense in storage: keep the default */ }
+
+/* Where a row belongs when sorting by status: what needs attention first,
+   what is settled last. A folder is ranked by the same question as a file -
+   is there anything in here still to do. */
+function tcStatusRank(e) {
+  if (e.type === "folder") {
+    const s = e.summary || {};
+    if (!s.media) return 5;                 // nothing in it
+    if (s.needs > 0) return 0;              // work to do
+    if (s.unknown > 0) return 2;            // still being read
+    return 4;                               // TV-ready
+  }
+  if (e.state === "converting") return 1;
+  if (e.needs) return 0;
+  if (e.state === "done") return 3;
+  return 4;                                 // plays as-is
+}
+
+/* The number each row shows: for a folder, how many files inside still need
+   converting; for a file, its size. Different units, but the same question -
+   how much is here - and they never mix, because folders sort among folders. */
+function tcSortNumber(e) {
+  if (e.type === "folder") { const s = e.summary || {}; return (s.needs || 0) * 1e12 + (s.media || 0); }
+  const m = /([\d.]+)\s*(KB|MB|GB)/i.exec(e.detail || "");
+  if (!m) return 0;
+  const mult = { kb: 1024, mb: 1048576, gb: 1073741824 }[m[2].toLowerCase()] || 1;
+  return parseFloat(m[1]) * mult;
+}
+
+function tcSortEntries(entries) {
+  const rank = e => (e.type === "drive" ? 0 : e.type === "folder" ? 1 : 2);
+  const name = e => (e.name || "").toLowerCase();
+  return entries.slice().sort((a, b) => {
+    const g = rank(a) - rank(b);
+    if (g) return g;                        // drives, then folders, then files
+    let c = 0;
+    if (tcSort.key === "status") c = tcStatusRank(a) - tcStatusRank(b);
+    else if (tcSort.key === "count") c = tcSortNumber(b) - tcSortNumber(a);   // most first
+    if (!c) c = name(a).localeCompare(name(b), undefined, { numeric: true });
+    else c *= tcSort.dir;
+    return c;
+  });
+}
+
+function tcSetSort(key) {
+  tcSort = (tcSort.key === key) ? { key, dir: -tcSort.dir } : { key, dir: 1 };
+  try { localStorage.setItem(TC_SORT_KEY, JSON.stringify(tcSort)); } catch { }
+  if (tcState.lastEntries) tcRender(tcState.lastEntries);
+}
+
+function tcSyncSortButtons() {
+  for (const b of document.querySelectorAll(".tc-sortbtn"))
+    b.classList.toggle("on", b.dataset.sort === tcSort.key);
+  const note = $("tc-sort-note");
+  if (note) {
+    note.textContent = tcSort.key === "name" ? (tcSort.dir > 0 ? "A–Z" : "Z–A")
+      : tcSort.key === "status" ? (tcSort.dir > 0 ? "needs converting first" : "settled first")
+      : (tcSort.dir > 0 ? "most first" : "fewest first");
+  }
+}
 function tcRender(entries) {
   const list = $("tc-list");
   tcState.converting = false;
   tcState.lastEntries = entries;      // kept so Select all can re-render checkboxes
   tcState.selectable = [];            // full paths of the rows that have a checkbox
+  tcSyncSortButtons();
   if (!entries.length) { list.innerHTML = '<div class="tc-row" style="color:var(--muted)">nothing here</div>'; tcSyncGo(); return; }
   list.innerHTML = "";
-  for (const e of entries) {
+  // the chosen order; lastEntries above keeps the server's own list intact
+  // so re-sorting never has to go back to the server
+  for (const e of tcSortEntries(entries)) {
     const isDrive = e.type === "drive";
     const isFolder = e.type === "folder";
     const openable = (isDrive || isFolder) && e.ready !== false;
@@ -5933,9 +6021,15 @@ for (const id of ["acct-overlay", "users-overlay"])
 
 /* Closing the dashboard shuts the server down cleanly (configurable via
    control.shutdownOnClose). The server waits 5 s before acting, so page
-   refreshes and other open dashboard tabs cancel it by polling. */
+   refreshes and other open dashboard tabs cancel it by polling.
+
+   The body is not decoration. sendBeacon with nothing to send posts without
+   a Content-Length, and the Windows HTTP stack answers that with 411 Length
+   Required before the server ever sees it - so closing the window left the
+   process running, which is what "it never shuts down cleanly" was. A few
+   bytes give the request a length and it arrives. */
 window.addEventListener("pagehide", () => {
-  navigator.sendBeacon("/api/server/closing");
+  navigator.sendBeacon("/api/server/closing", "bye");
 });
 
 /* Establish who we are before the first poll, so the page never briefly

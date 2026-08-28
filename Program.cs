@@ -408,7 +408,6 @@ try
         // Background/tray mode can be switched on and off while running —
         // the Config dialog calls this, and startup uses it too.
         var svc = services;                                   // for the menu callbacks
-        var shutdownOnCloseDefault = config.Control.ShutdownOnClose;
 
         bool ApplyTrayMode(bool on)
         {
@@ -450,7 +449,13 @@ try
             tray?.Dispose();   // also restores the hidden console window
             tray = null;
             config.MinimizeToTray = false;
-            config.Control.ShutdownOnClose = shutdownOnCloseDefault;
+            // Not running in the background means the dashboard is the session:
+            // closing it is how someone finishes with the server, and leaving a
+            // process behind that they believe they have exited is what makes
+            // the next upgrade report stopping a server they thought was gone.
+            // Background mode is the deliberate choice to stay running; without
+            // it, closing the page shuts the server down.
+            config.Control.ShutdownOnClose = true;
             Log.Info("main", "background mode off — console restored");
             return false;
         }
@@ -465,6 +470,10 @@ try
 
         control.SetTrayMode = ApplyTrayMode;
         if (config.MinimizeToTray) ApplyTrayMode(true);
+        // Started in the foreground and staying there: the same rule as turning
+        // background mode off. The dashboard is the session, so closing it ends
+        // the server rather than leaving one running that nobody can see.
+        else config.Control.ShutdownOnClose = true;
     }
 }
 catch (Exception ex)
