@@ -80,23 +80,23 @@ public class ServerConfigTests
     }
 
     /// <summary>
-    /// The conversion cache limit is pinned here because a config that does
-    /// not mention it is the normal case, not an unusual one: the shipped
-    /// server.json left it out, so every install ran on this default and
-    /// nobody could see what it was. At the old 10 GB a library conversion
-    /// run evicted its own output as fast as it produced it. If this value is
-    /// ever changed again it should be changed deliberately, with this test
-    /// as the place that says so.
+    /// No limit unless one is asked for, pinned here because a config that
+    /// does not mention this is the normal case rather than an unusual one:
+    /// the shipped server.json left it out, so every install ran on whatever
+    /// this default was and nobody could see what it was. At the old 10 GB a
+    /// library conversion run deleted its own output as fast as it produced
+    /// it. Any future change to this value should be a deliberate one, and
+    /// this test is where that gets noticed.
     /// </summary>
     [Fact]
-    public void A_config_that_does_not_mention_the_cache_limit_gets_fifty_gigabytes()
+    public void A_config_that_does_not_mention_the_cache_limit_has_no_limit()
     {
         using var dir = new TempDir();
         var path = WriteConfig(dir, "{\"serverName\":\"test server\"}");
 
         var cfg = ServerConfig.Load(path);
 
-        Assert.Equal(50, cfg.Ffmpeg.VodCacheMaxGb);
+        Assert.Equal(0, cfg.Ffmpeg.VodCacheMaxGb);
     }
 
     /// <summary>
@@ -117,7 +117,7 @@ public class ServerConfigTests
 
         var cfg = ServerConfig.Load(shipped!);
 
-        Assert.Equal(50, cfg.Ffmpeg.VodCacheMaxGb);
+        Assert.Equal(0, cfg.Ffmpeg.VodCacheMaxGb);
     }
 
     /// <summary>

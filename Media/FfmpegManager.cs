@@ -102,6 +102,7 @@ public sealed class FfmpegManager : IDisposable
         // rather than sharing a channel directory with its replacement
         KillOrphanedJobs();
         CleanIncompleteVodDirs();   // drop partials a crash or restart left behind
+        MarkExistingConversionsKeptOnce(Path.Combine(baseDirectory, "vod-keep-migrated"));
         LoadChannels();
         LoadQueueSettings();
     }
@@ -411,7 +412,47 @@ public sealed class FfmpegManager : IDisposable
         return $"vod-{slug}{(height > 0 ? $"-{height}p" : "")}-{key}";
     }
 
-    public (string stream, bool ready) StartVod(string file, int height = 0)
+    /// <summary>
+    /// The file that marks a conversion as one the owner asked for, rather
+    /// than one this server made by itself to play something.
+    ///
+    /// Both end up in the same directory, and until now the cache could not
+    /// tell them apart, so it deleted whichever was least recently played.
+    /// That is right for a copy made on the fly to get a film onto a
+    /// television. It is completely wrong for a library the owner sat down
+    /// and converted on purpose: an overnight run produced hundreds of files
+    /// and the cache quietly ate the older half while the newer half was
+    /// still being made, so the count went *down* over an hour of work with
+    /// nothing in the interface to say why.
+    ///
+    /// A file on disk rather than a flag in memory, so it survives restarts,
+    /// and so it is visible to anyone looking in the folder wondering which
+    /// of these the server considers disposable.
+    /// </summary>
+    public const string KeepMarker = "keep";
+
+    /// <summary>Whether this conversion is marked as one to keep for good.</summary>
+    private static bool IsKept(string dir) => File.Exists(Path.Combine(dir, KeepMarker));
+
+    private static void MarkKept(string dir, string stream)
+    {
+        try
+        {
+            var marker = Path.Combine(dir, KeepMarker);
+            if (File.Exists(marker)) return;
+            File.WriteAllText(marker,
+                "This conversion was requested from the Transcodes window and is never "
+                + "deleted to reclaim cache space. Delete this file to make it disposable.\r\n");
+        }
+        catch (Exception ex)
+        {
+            // Worth saying out loud: without the marker this conversion is
+            // evictable, which is the whole thing being prevented here.
+            Log.Warn("ffmpeg", $"could not mark {stream} as one to keep: {ex.Message}");
+        }
+    }
+
+    public (string stream, bool ready) StartVod(string file, int height = 0, bool keep = false)
     {
         if (!Available) throw new InvalidOperationException("ffmpeg is not available");
         var info = new FileInfo(file);
@@ -441,6 +482,11 @@ public sealed class FfmpegManager : IDisposable
                 && File.ReadAllText(playlist).Contains("#EXT-X-ENDLIST", StringComparison.Ordinal);
             if (complete)
             {
+                // Asking for it deliberately promotes a copy the server had
+                // made for itself: converting a library the second time round
+                // should not be punished for the first run having happened to
+                // play something.
+                if (keep) MarkKept(dir, stream);
                 Directory.SetLastWriteTimeUtc(dir, DateTime.UtcNow); // LRU touch
                 return (stream, true); // finished earlier
             }
@@ -458,6 +504,11 @@ public sealed class FfmpegManager : IDisposable
             // just as someone starts a film. It has nothing to do with
             // starting this conversion, so it runs after, off the lock.
             Directory.CreateDirectory(dir);
+            // Marked before a single segment is written, not after the job
+            // finishes: the sweep that follows every other conversion's start
+            // runs while this one is still encoding, and an unmarked directory
+            // is one the sweep is entitled to delete.
+            if (keep) MarkKept(dir, stream);
             // remember the source so subtitles can be found for this stream
             try { File.WriteAllText(Path.Combine(dir, "source.txt"), info.FullName); } catch { }
             // built as a list: a file name containing a quote must never be
@@ -851,20 +902,55 @@ public sealed class FfmpegManager : IDisposable
         // batch, seen again in this run's log.
         var running = new HashSet<string>(ActiveVodStreams, StringComparer.OrdinalIgnoreCase);
 
+        var keptBytes = 0L;
+        var evicted = 0;
+
         foreach (var (dir, size) in entries.OrderBy(e => e.dir.LastWriteTimeUtc))
         {
             if (total <= budget) break;
             if (dir.Name.Equals(keep, StringComparison.OrdinalIgnoreCase)) continue;
             if (running.Contains(dir.Name)) continue;
+            // Asked for on purpose: not this sweep's to delete, at any size.
+            if (IsKept(dir.FullName)) { keptBytes += size; continue; }
             try
             {
                 dir.Delete(recursive: true);
                 total -= size;
+                evicted++;
                 Log.Info("ffmpeg", $"evicted VOD cache entry {dir.Name} ({size / (1024.0 * 1024):0.#} MB)");
             }
             catch { /* files in use — try again next time */ }
         }
+
+        // Over budget with nothing left that may be deleted. Silence here is
+        // what made this hard to see from the outside: the sweep either ate
+        // the owner's work or did nothing, and said the same amount about
+        // both. Now it says which, and what to do about it.
+        if (total > budget)
+        {
+            Log.Warn("ffmpeg",
+                $"conversions total {Bytes(total)}, over the {Bytes(budget)} limit, and {Bytes(keptBytes)} of that "
+                + "was requested from the Transcodes window and is never deleted. "
+                + "Raise ffmpeg.vodCacheMaxGb (0 = no limit) or remove conversions you no longer want.");
+        }
+        else if (evicted > 0)
+        {
+            Log.Info("ffmpeg",
+                $"cache trimmed: {evicted} conversion(s) removed, now {Bytes(total)} of {Bytes(budget)}");
+        }
     }
+
+    /// <summary>
+    /// A size a person can read. Fixed GB made every message about a small
+    /// cache read "0 GB, over the 0 GB limit", which says nothing at all.
+    /// </summary>
+    private static string Bytes(long b) => b switch
+    {
+        >= 1024L * 1024 * 1024 => $"{b / (1024.0 * 1024 * 1024):0.##} GB",
+        >= 1024 * 1024 => $"{b / (1024.0 * 1024):0.#} MB",
+        >= 1024 => $"{b / 1024.0:0.#} KB",
+        _ => $"{b} B",
+    };
 
     public bool IsVodReady(string stream) =>
         File.Exists(Path.Combine(_mediaRoot, stream, "index.m3u8"));
@@ -1222,7 +1308,10 @@ public sealed class FfmpegManager : IDisposable
                 {
                     if (VodStatusFor(file) is VodState.Done or VodState.Converting) continue;
                     if (!File.Exists(file)) continue;
-                    StartVod(file);   // registers the job; its exit pumps the queue again
+                    // keep: everything in this queue was put there from the
+                    // Transcodes window, which is somebody asking for a file
+                    // to exist - not the server making itself a copy to play.
+                    StartVod(file, keep: true);   // registers the job; its exit pumps the queue again
                     _lastVodStartUtc = DateTime.UtcNow;
                 }
                 catch (Exception ex)
@@ -1238,6 +1327,52 @@ public sealed class FfmpegManager : IDisposable
                 // actually still owed.
                 if (dequeued) SaveQueueState();
             }
+        }
+    }
+
+    /// <summary>
+    /// Marks every conversion already on disk as one to keep, once.
+    ///
+    /// The marker did not exist before this build, so every conversion this
+    /// server has ever finished is unmarked - which, under the new rule,
+    /// means disposable. The one thing that must not happen on upgrade is the
+    /// first sweep deleting the library the owner spent nights converting,
+    /// which is exactly the fault being fixed.
+    ///
+    /// There is no way to tell now which of these were deliberate and which
+    /// the server made for itself, so they are all treated as deliberate.
+    /// Keeping something disposable costs disk; deleting something wanted
+    /// costs hours of encoding and cannot be undone. Only conversions from
+    /// this point on are sorted properly, and only new play-time copies are
+    /// disposable.
+    /// </summary>
+    private void MarkExistingConversionsKeptOnce(string markerFile)
+    {
+        if (File.Exists(markerFile)) return;
+        var marked = 0;
+        try
+        {
+            if (Directory.Exists(_mediaRoot))
+            {
+                foreach (var dir in Directory.EnumerateDirectories(_mediaRoot, "vod-*"))
+                {
+                    var playlist = Path.Combine(dir, "index.m3u8");
+                    // only finished ones: a partial is rebuilt anyway
+                    if (!File.Exists(playlist)) continue;
+                    if (!File.ReadAllText(playlist).Contains("#EXT-X-ENDLIST", StringComparison.Ordinal)) continue;
+                    if (IsKept(dir)) continue;
+                    MarkKept(dir, Path.GetFileName(dir));
+                    marked++;
+                }
+            }
+            File.WriteAllText(markerFile, DateTime.UtcNow.ToString("O"));
+            if (marked > 0)
+                Log.Info("ffmpeg", $"{marked} existing conversion(s) marked as ones to keep — "
+                    + "the cache will not delete work that was already done");
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("ffmpeg", $"could not mark existing conversions as kept: {ex.Message}");
         }
     }
 

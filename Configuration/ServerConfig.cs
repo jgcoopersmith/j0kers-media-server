@@ -521,18 +521,25 @@ public sealed class FfmpegConfig
     /// </summary>
     /// <summary>
     /// How much disk converted copies may occupy before the least recently
-    /// played are deleted. 0 = never evict.
+    /// played are deleted. 0 - the default - means no limit: nothing is ever
+    /// deleted to reclaim space.
     ///
-    /// The default matters more than it looks, because the shipped
-    /// server.json did not name this value at all and so every install ran on
-    /// whatever was written here. At the old 10 GB that is about twenty films:
-    /// a library conversion run spent hours producing copies and then threw
-    /// most of them away as fast as it made them, and the log filled with
-    /// "evicted VOD cache entry" for work that had just finished. Nothing was
-    /// broken - the cache was doing exactly what it was told - but the number
-    /// it was told was one nobody had chosen.
+    /// It defaulted to 10 GB, and the shipped server.json never named the
+    /// setting, so every install ran on that number without it appearing
+    /// anywhere the owner could see. Ten gigabytes is about twenty films. An
+    /// overnight library conversion therefore spent hours producing copies
+    /// and deleting the older ones as fast as it made the new ones - the
+    /// count going down over an hour of work, with nothing in the interface
+    /// to say why. Nothing was broken; the cache did exactly what it was
+    /// told, and what it was told was a number nobody had chosen.
+    ///
+    /// A conversion is expensive to make and cheap to keep, and this server
+    /// converts a library on purpose rather than only caching what it plays.
+    /// Deleting that work to save disk is the wrong trade by default. Set a
+    /// number here to put a limit back; conversions requested from the
+    /// Transcodes window are still never deleted, whatever it is set to.
     /// </summary>
-    [JsonPropertyName("vodCacheMaxGb")] public double VodCacheMaxGb { get; set; } = 50;
+    [JsonPropertyName("vodCacheMaxGb")] public double VodCacheMaxGb { get; set; } = 0;
 
     /// <summary>
     /// Carry a channel's subtitles through the restream.
