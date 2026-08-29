@@ -78,4 +78,62 @@ public class ServerConfigTests
         Assert.Equal(Path.GetFullPath(dir.File("mounts.json")), cfg.DynamicMountsFile);
         Assert.Equal(Path.GetFullPath(dir.File("settings.json")), cfg.SettingsFile);
     }
+
+    /// <summary>
+    /// The conversion cache limit is pinned here because a config that does
+    /// not mention it is the normal case, not an unusual one: the shipped
+    /// server.json left it out, so every install ran on this default and
+    /// nobody could see what it was. At the old 10 GB a library conversion
+    /// run evicted its own output as fast as it produced it. If this value is
+    /// ever changed again it should be changed deliberately, with this test
+    /// as the place that says so.
+    /// </summary>
+    [Fact]
+    public void A_config_that_does_not_mention_the_cache_limit_gets_fifty_gigabytes()
+    {
+        using var dir = new TempDir();
+        var path = WriteConfig(dir, "{\"serverName\":\"test server\"}");
+
+        var cfg = ServerConfig.Load(path);
+
+        Assert.Equal(50, cfg.Ffmpeg.VodCacheMaxGb);
+    }
+
+    /// <summary>
+    /// The real file the installer lays down, loaded as the server loads it.
+    ///
+    /// Not a copy of its contents pasted in here - that would only prove that
+    /// JSON parses. The point is that the file which becomes every fresh
+    /// install's server.json actually names this limit, because the whole
+    /// fault was that it did not: an unnamed setting is invisible to whoever
+    /// opens the config looking for it.
+    /// </summary>
+    [Fact]
+    public void The_shipped_default_config_names_the_cache_limit()
+    {
+        var shipped = FindRepoFile(Path.Combine("installer", "default-server.json"));
+        Assert.True(shipped is not null,
+            "installer/default-server.json was not found above the test assembly");
+
+        var cfg = ServerConfig.Load(shipped!);
+
+        Assert.Equal(50, cfg.Ffmpeg.VodCacheMaxGb);
+    }
+
+    /// <summary>
+    /// Walks up from the test assembly to find a file in the repository. The
+    /// build output sits several directories below the root and the depth is
+    /// not fixed, so the path is searched for rather than counted out.
+    /// </summary>
+    private static string? FindRepoFile(string relative)
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            var candidate = Path.Combine(dir.FullName, relative);
+            if (File.Exists(candidate)) return candidate;
+            dir = dir.Parent;
+        }
+        return null;
+    }
 }

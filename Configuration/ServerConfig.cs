@@ -519,7 +519,20 @@ public sealed class FfmpegConfig
     /// Least-recently-played conversions are evicted when exceeded. 0
     /// disables eviction.
     /// </summary>
-    [JsonPropertyName("vodCacheMaxGb")] public double VodCacheMaxGb { get; set; } = 10;
+    /// <summary>
+    /// How much disk converted copies may occupy before the least recently
+    /// played are deleted. 0 = never evict.
+    ///
+    /// The default matters more than it looks, because the shipped
+    /// server.json did not name this value at all and so every install ran on
+    /// whatever was written here. At the old 10 GB that is about twenty films:
+    /// a library conversion run spent hours producing copies and then threw
+    /// most of them away as fast as it made them, and the log filled with
+    /// "evicted VOD cache entry" for work that had just finished. Nothing was
+    /// broken - the cache was doing exactly what it was told - but the number
+    /// it was told was one nobody had chosen.
+    /// </summary>
+    [JsonPropertyName("vodCacheMaxGb")] public double VodCacheMaxGb { get; set; } = 50;
 
     /// <summary>
     /// Carry a channel's subtitles through the restream.

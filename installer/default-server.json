@@ -6,9 +6,13 @@
   "control": { "enabled": true, "bindAddress": "0.0.0.0", "port": 9090,
                "openDashboardOnStart": true, "shutdownOnClose": true },
   // ffmpeg is found on PATH, via winget, or beside this exe (bundled here)
+  // vodCacheMaxGb: how much disk converted copies may take before the least
+  // recently played are deleted. 0 = keep them all. Raise it if a conversion
+  // run is being evicted as fast as it is produced.
   "ffmpeg": { "path": "ffmpeg", "preset": "veryfast", "crf": 23,
               "liveSegmentSeconds": 4, "liveWindowSegments": 15,
-              "liveVideoMode": "transcode", "videoCodec": "h264", "audioCodec": "aac" },
+              "liveVideoMode": "transcode", "videoCodec": "h264", "audioCodec": "aac",
+              "vodCacheMaxGb": 50 },
   "minimizeToTray": false,
   // off by default so the first run has no certificate warning
   "https": { "enabled": false, "certificate": "", "password": "" },
