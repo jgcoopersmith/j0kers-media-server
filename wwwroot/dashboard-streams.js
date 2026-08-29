@@ -237,24 +237,6 @@ async function refreshHls() {
   }
 }
 
-/* One row for a file still being converted: no playlist to play yet, so it
-   reports how far along it is instead. A source whose length couldn't be
-   probed has no percentage to give, and says how much it has produced
-   rather than inventing one. */
-function convertingRow(t) {
-  const pct = typeof t.percent === "number" ? t.percent : null;
-  const label = pct !== null ? pct + "%" : fmtClock(t.doneSeconds || 0) + " done";
-  return '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--grid)">'
-    + '<span class="hls-thumb hls-thumb-fallback" style="display:flex">⏳</span>'
-    + '<div style="flex:1;min-width:0">'
-    + '<div style="color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
-    + esc(t.title || t.stream) + '</div>'
-    + '<div style="color:var(--muted);font-size:11.5px">Converting · ' + esc(label)
-    + ' — playable as soon as the first part is ready</div>'
-    + '<div class="conv-bar"><div style="width:' + (pct !== null ? pct : 0) + '%"></div></div>'
-    + '</div></div>';
-}
-
 /* Kept apart from the fetch so switching view doesn't re-hit the media port. */
 function renderHls() {
   if (!lastHls) return;
@@ -276,22 +258,24 @@ function renderHls() {
   hlsRenderDeferred = false;
   const box = $("hls");
 
-  /* Files being converted that have not reached the disk yet.
-     Clicking a video scrolls this card into view, and until ffmpeg writes
-     the first playlist there is nothing here to see — while the Transcodes
-     tile that does know about it is thousands of pixels back up the page.
-     So the conversion is shown here as well, where the click left you. */
-  const listed = new Set(lastHls.streams.map(s => s.name.toLowerCase()));
-  const pending = transcodingNow.filter(t => t && t.stream && !listed.has(t.stream.toLowerCase()));
+  /* Conversions belong to the Transcodes window and nowhere else.
+     This card used to add a row for every conversion that had not reached
+     the disk yet, on the reasoning that clicking a video scrolls you here
+     and there would otherwise be nothing to look at. The effect was that
+     every transcode appeared twice, in two windows, for the whole time it
+     ran — and precisely because the server had done its job: a queued
+     conversion is unlisted on purpose, which is exactly the condition this
+     used to treat as "missing, add it back". Server-side hiding could never
+     win against a page that re-added what was hidden. */
 
-  if (!lastHls.streams.length && !pending.length) {
+  if (!lastHls.streams.length) {
     box.className = "";
     box.innerHTML = '<div class="empty">No HLS streams. Drop segment files in a subfolder of the media root.</div>';
     return;
   }
 
   const view = cardView("hls");
-  let h = pending.map(convertingRow).join("");
+  let h = "";
 
   for (const s of hlsInChosenOrder(lastHls.streams)) {
     const url = mediaUrl(s.playlist);

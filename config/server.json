@@ -107,6 +107,13 @@
     "level": "info",                  // trace | debug | info | warn | error
     "logRtspMessages": false,
 
+    // One [access] line per request served, on every port — the dashboard
+    // and its API, the media port, and DLNA. Records who asked, from where,
+    // for what, and how much was sent. Query strings are never written down:
+    // signed media links carry their signature there. The dashboard's own
+    // two-second polls (/api/status, /api/log) are skipped as heartbeat.
+    "accessLog": true,
+
     // A copy on disk, since tray mode has no console to read. Rotation is by
     // period and by size together — whichever comes first — and "maxFiles"
     // older files are kept before the oldest is deleted. All of this is

@@ -609,6 +609,12 @@ public sealed partial class ControlApi : IDisposable
             Log.Warn("dlna", $"request failed: {ex.Message}");
             try { res.StatusCode = 500; res.Close(); } catch { }
         }
+        finally
+        {
+            // DLNA has no accounts, so there is never a name to record here -
+            // the client address is the only identity a television has.
+            Logging.AccessLog.Served("dlna", ctx);
+        }
     }
 
     private async Task AcceptLoopAsync()
@@ -795,6 +801,9 @@ public sealed partial class ControlApi : IDisposable
     private async Task HandleAsync(HttpListenerContext ctx)
     {
         var res = ctx.Response;
+        // Out here so the access-log line in the finally can name the account,
+        // however the request ended.
+        string? who = null;
         try
         {
             // configured loopback-only? enforce it even if the listener had
@@ -812,6 +821,7 @@ public sealed partial class ControlApi : IDisposable
             // Who is this? Session cookie, API key, or the legacy
             // control.authToken — all resolved to one access level.
             var auth = _auth.Authenticate(ctx);
+            who = auth.User?.Username;
 
             // The dashboard is not served to anyone who hasn't signed in —
             // they get the sign-in page instead (or, on a server with no
@@ -1116,6 +1126,12 @@ public sealed partial class ControlApi : IDisposable
         }
         finally
         {
+            // DLNA reaches the library through this same listener, so the
+            // line says which of the two it was rather than calling a
+            // television's fetch a dashboard request.
+            var isDlna = (ctx.Request.Url?.AbsolutePath ?? "/")
+                .StartsWith("/dlna/", StringComparison.OrdinalIgnoreCase);
+            Logging.AccessLog.Served(isDlna ? "dlna" : "control", ctx, who);
             try { res.Close(); } catch { }
         }
     }

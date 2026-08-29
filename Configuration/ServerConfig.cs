@@ -563,6 +563,12 @@ public sealed class LoggingConfig
     [JsonPropertyName("logRtspMessages")] public bool LogRtspMessages { get; set; } = false;
 
     /// <summary>
+    /// One line per request served, on every port — the media, the API, DLNA.
+    /// On by default; set false to keep only the event log. See AccessLog.
+    /// </summary>
+    [JsonPropertyName("accessLog")] public bool AccessLog { get; set; } = true;
+
+    /// <summary>
     /// Keep a copy of the log on disk. On by default: in tray mode there is
     /// no console at all, so without this nothing survives the session.
     /// </summary>

@@ -234,6 +234,10 @@ Log.ConfigureFile(config.Logging.ToFile, config.Logging.ResolveDirectory(baseDir
 
 Log.Info("main", $"{config.ServerName} starting (config: {(File.Exists(configPath) ? configPath : "built-in defaults")})");
 
+// Set before anything can serve a request, so the record starts at the
+// first one rather than at whatever moment the flag happened to be read.
+J0kersMediaServer.Logging.AccessLog.Enabled = config.Logging.AccessLog;
+
 // ---- TLS ----
 // Decided before anything binds, announces, or builds a URL: the scheme is
 // woven through all three, and the control and media ports move together
@@ -596,6 +600,15 @@ Console.CancelKeyPress += (_, e) =>
     }
 };
 AppDomain.CurrentDomain.ProcessExit += (_, _) => shutdown.TrySetResult();
+
+// Last, once everything that is going to bind has bound, so the summary
+// reports what is actually being served rather than what was intended.
+J0kersMediaServer.Services.StartupSummary.Write(
+    config,
+    control?.BoundHost ?? config.Control.BindAddress,
+    J0kersMediaServer.Services.DlnaEndpoint.PortFor(config),
+    mediaRoot,
+    ffmpeg?.Available == true);
 
 Log.Info("main", tray is not null
     ? "ready — right-click the tray icon to exit"

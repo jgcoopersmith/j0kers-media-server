@@ -68,7 +68,10 @@ async function tick() {
   activeTranscodes = status.transcodes || [];
   transcodingNow = status.transcoding || [];
   renderTranscodes(transcodingNow);
-  // the HLS card shows conversions in progress too — see renderHls
+  // A stream that is in the HLS list *and* converting — one started by
+  // playing a file rather than from the Transcodes window — animates its
+  // progress bar from this poll. Queued conversions are not in that list
+  // and are not drawn here at all; they belong to the Transcodes window.
   if (transcodingNow.length || hadTranscodes) renderHls();
   hadTranscodes = transcodingNow.length > 0;
   renderSessions(sessions.sessions);

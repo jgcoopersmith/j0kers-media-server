@@ -173,6 +173,9 @@ public sealed class HlsServer : IDisposable
     private void Handle(HttpListenerContext ctx)
     {
         var res = ctx.Response;
+        // Named out here so the access-log line in the finally can say who
+        // this was, whatever the request went on to do or throw.
+        string? who = null;
         try
         {
             if (HttpListenerBinder.IsLoopbackBind(_config.BindAddress) &&
@@ -232,6 +235,7 @@ public sealed class HlsServer : IDisposable
             // signed link deliberately carries no identity, so those show up
             // as a share link rather than as somebody.
             var watcher = identity?.User?.Username;
+            who = watcher;
 
             if (path == "/")
             {
@@ -505,6 +509,9 @@ public sealed class HlsServer : IDisposable
         }
         finally
         {
+            // Before Close: the status and the length are what the line
+            // reports, and a closed response no longer answers for them.
+            Logging.AccessLog.Served("hls", ctx, who);
             try { res.Close(); } catch { }
         }
     }
