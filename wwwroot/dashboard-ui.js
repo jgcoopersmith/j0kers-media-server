@@ -333,15 +333,50 @@ document.addEventListener("click", e => {
 for (const id of ["acct-overlay", "users-overlay"])
   $(id).addEventListener("mousedown", e => { if (e.target.id === id) closeOverlay(id); });
 
-/* Closing the dashboard shuts the server down cleanly (configurable via
-   control.shutdownOnClose). The server waits 5 s before acting, so page
-   refreshes and other open dashboard tabs cancel it by polling.
+/* ---- the live link: how the server knows this page is open ----
+
+   Closing the dashboard shuts the server down (unless it is set to minimize
+   to the tray, which makes it a background service instead).
+
+   This used to be announced with a pagehide beacon and nothing else, and the
+   beacon does not arrive: closing the tab reached the server as no request at
+   all, so the process hung about until a thirty-second silence timer noticed
+   — and on a machine that was converting something, not even then.
+
+   So the page holds a connection open instead. Nothing has to be announced:
+   when the browser goes, the socket goes with it, and the server's next
+   write down it fails. That is the operating system reporting the close
+   rather than the page being asked to report its own, which is why it works
+   when the beacon does not. It also keeps a locked screen or a backgrounded
+   tab — where the polling stops but the connection does not — from looking
+   like a close, which is what the thirty seconds were really guarding
+   against.
+
+   EventSource reconnects on its own after a drop, so a refresh, a blip or a
+   navigation reopens this without anything here noticing; the server allows
+   for that with a grace period before it acts. */
+let liveLink = null;
+function openLiveLink() {
+  if (liveLink) return;
+  try {
+    // EventSource cannot set an Authorization header. A cookie rides along
+    // by itself on a same-origin request; a key/token sign-in goes in the
+    // query string, which this server already accepts (?key=/?token=) and
+    // never writes to the log.
+    liveLink = new EventSource("/api/server/session"
+      + (token ? "?token=" + encodeURIComponent(token) : ""));
+  } catch {
+    liveLink = null;   // no EventSource: the beacon and the silence watch stand
+  }
+}
+
+/* Still sent, because it arrives a beat before the socket drops on the
+   browsers where it does arrive, and a beat is worth having.
 
    The body is not decoration. sendBeacon with nothing to send posts without
    a Content-Length, and the Windows HTTP stack answers that with 411 Length
-   Required before the server ever sees it - so closing the window left the
-   process running, which is what "it never shuts down cleanly" was. A few
-   bytes give the request a length and it arrives. */
+   Required before the server ever sees it. A few bytes give the request a
+   length and it arrives. */
 window.addEventListener("pagehide", () => {
   navigator.sendBeacon("/api/server/closing", "bye");
 });
@@ -526,6 +561,7 @@ initCardFolding();
 
 refreshAuth().then(async ok => {
   if (!ok) return;
+  openLiveLink();              // from here on, closing this page closes the server
   await refreshMediaToken();   // before the first render, so no media URL goes out unsigned
   tick();
 });

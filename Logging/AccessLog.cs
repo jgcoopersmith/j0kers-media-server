@@ -41,6 +41,9 @@ public static class AccessLog
     {
         "/api/status",
         "/api/log",
+        // the live link an open dashboard holds: one line per page-open, and
+        // it would be written when the page closes rather than when it opened
+        "/api/server/session",
     };
 
     /// <summary>

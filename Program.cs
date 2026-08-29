@@ -344,7 +344,12 @@ try
     {
         control = new ControlApi(config, services, baseDirectory, auth, mediaLinks, ffmpeg,
             requestShutdown: () => shutdown.TrySetResult());
-        services.OnHlsActivity = control.NoteActivity; // streaming keeps the server up
+        // Media keeps the silence watch quiet, but it is not a dashboard: it
+        // must not cancel a close that has already been seen, or a phone part
+        // way through a film leaves a server running that nobody has a page
+        // open for. Whether somebody is watching is asked again at the moment
+        // of shutting down, which is where it belongs.
+        services.OnHlsActivity = control.NoteStreaming;
         // Unlinked conversions stay on disk but leave the listing; the HLS
         // server does the filtering and the control API owns the store.
         services.Listed = control.Listed;

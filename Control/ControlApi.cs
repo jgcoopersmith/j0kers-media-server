@@ -16,6 +16,7 @@ namespace J0kersMediaServer.Control;
 /// controlling application.
 ///
 ///   GET    /api/status          server identity, uptime, resource counts
+///   GET    /api/server/session   the live link an open dashboard holds (SSE)
 ///   GET    /api/config          effective (redacted) configuration
 ///   GET    /api/mounts          configured RTSP mounts
 ///   GET    /api/sessions        live RTSP sessions with RTP stats
@@ -40,6 +41,14 @@ public sealed partial class ControlApi : IDisposable
     private readonly Action? _requestShutdown;
     private Timer? _closeShutdownTimer;
     private readonly object _shutdownLock = new();
+
+    /// <summary>
+    /// How many dashboards are holding the live link open right now — see
+    /// <see cref="ServeDashboardSession"/>. This, not a beacon and not a
+    /// gap in the polling, is how the server knows whether anybody has the
+    /// page open.
+    /// </summary>
+    private int _liveDashboards;
 
     private RtspServer? RtspServer => _services.Rtsp;
     private readonly Media.PlaylistStore _playlists;
@@ -498,9 +507,14 @@ public sealed partial class ControlApi : IDisposable
         }, null, dueTime: 10_000, period: 10_000);
     }
     /// <summary>
-    /// Cancels a pending shutdown-on-close. Called for dashboard polls and
-    /// for any HLS request, so navigating to a watch page — or a phone
-    /// streaming a movie — keeps the server alive.
+    /// A dashboard is there: cancels a pending shutdown-on-close.
+    ///
+    /// Only the page itself calls this — its poll and its live link. A media
+    /// request no longer does. Somebody watching is a reason not to shut down
+    /// *yet*, which <see cref="StreamingBlockedBy"/> answers at the moment of
+    /// deciding; it is not evidence that the dashboard is still open, and
+    /// treating it as such is what let a phone's stream cancel a close
+    /// outright and leave nothing to reconsider it afterwards.
     /// </summary>
     public void NoteActivity()
     {
@@ -515,10 +529,172 @@ public sealed partial class ControlApi : IDisposable
                 _closedNoticeTimer = null;
             }
             if (_closeShutdownTimer is null) return;
-            Log.Info("control", "activity detected — shutdown cancelled");
+            Log.Info("control", "dashboard still open — shutdown cancelled");
             _closeShutdownTimer.Dispose();
             _closeShutdownTimer = null;
         }
+    }
+
+    /// <summary>
+    /// Media was served. Keeps the silence watch quiet — a television part
+    /// way through a film is not a dead server — without pretending that a
+    /// dashboard is open.
+    /// </summary>
+    public void NoteStreaming() => _lastSeenUtc = DateTime.UtcNow;
+
+    /// <summary>
+    /// GET /api/server/session — the live link every open dashboard holds.
+    ///
+    /// This is the fix for "closing the browser does not stop the server".
+    /// The page used to announce its own death with a pagehide beacon, and
+    /// measured here, that beacon does not arrive: closing the tab produced
+    /// no request at all, and the process only went down thirty seconds
+    /// later when the silence watch noticed. Thirty seconds is not what
+    /// closing a window is supposed to feel like, and on a machine that was
+    /// converting something it did not happen at all.
+    ///
+    /// A held-open connection needs nobody to announce anything. The browser
+    /// closes, the socket goes with it, and the next heartbeat write fails —
+    /// so the server learns the page is gone from the operating system, in
+    /// about a second, whether the page got the chance to say so or not.
+    ///
+    /// It also tells apart the two states the polling never could: a page
+    /// that has *gone* (connection dropped) and a page that has merely gone
+    /// *quiet* — a locked screen, a backgrounded tab — whose connection is
+    /// still there. That distinction is why the silence watch had to wait
+    /// thirty seconds and then second-guess itself.
+    /// </summary>
+    private async Task ServeDashboardSession(HttpListenerContext ctx)
+    {
+        var res = ctx.Response;
+        res.StatusCode = 200;
+        res.ContentType = "text/event-stream";
+        res.Headers["Cache-Control"] = "no-store";
+        res.Headers["X-Accel-Buffering"] = "no";   // in case anything proxies us
+        res.SendChunked = true;
+
+        var open = Interlocked.Increment(ref _liveDashboards);
+        _sawDashboard = true;
+        NoteActivity();
+        Log.Debug("control", $"dashboard connected ({open} open)");
+
+        // "retry" is what the browser waits before reopening after a drop.
+        // Half a second, so a blip reconnects well inside the grace period
+        // below rather than looking like a close for the default three.
+        var hello = System.Text.Encoding.ASCII.GetBytes("retry: 500\n\n");
+        var beat = System.Text.Encoding.ASCII.GetBytes(":\n\n");
+        try
+        {
+            await res.OutputStream.WriteAsync(hello, _cts.Token);
+            await res.OutputStream.FlushAsync(_cts.Token);
+            while (!_cts.IsCancellationRequested)
+            {
+                // Short, because this interval is the detection time: the
+                // write after the browser has gone is the one that fails.
+                await Task.Delay(500, _cts.Token);
+                await res.OutputStream.WriteAsync(beat, _cts.Token);
+                await res.OutputStream.FlushAsync(_cts.Token);
+                // A beat that got through is proof the page is there, which
+                // is what the silence watch below is really asking. It keeps
+                // asking the polling, and the polling stops behind a lock
+                // screen or in a backgrounded tab while this connection does
+                // not — so without this line, locking the screen still looked
+                // like a closed dashboard half a minute later.
+                _lastSeenUtc = DateTime.UtcNow;
+            }
+        }
+        catch
+        {
+            // the page went away, or this server is shutting down anyway
+        }
+        finally
+        {
+            var left = Interlocked.Decrement(ref _liveDashboards);
+            Log.Debug("control", $"dashboard link dropped ({left} open)");
+            if (left <= 0 && !_cts.IsCancellationRequested)
+            {
+                Log.Info("control", "dashboard closed");
+                DashboardWentAway();
+            }
+        }
+    }
+
+    /// <summary>
+    /// The last dashboard has gone. One path for both ways of learning it —
+    /// the live link dropping and the pagehide beacon, when it arrives —
+    /// so the two can never disagree about what closing the page means.
+    ///
+    /// Not in the background: closing the page is how this server is
+    /// stopped, so it stops. The grace is only long enough for a refresh or
+    /// a navigation to bring the link back, which takes well under a second.
+    /// </summary>
+    private void DashboardWentAway()
+    {
+        if (_config.ShutdownOnClose && _requestShutdown is not null)
+        {
+            lock (_shutdownLock)
+            {
+                _closeShutdownTimer?.Dispose();
+                _closeShutdownTimer = new Timer(_ => CloseShutdownTick(), null,
+                                                CloseGraceMs, Timeout.Infinite);
+            }
+            return;
+        }
+
+        if (OnDashboardClosed is null) return;
+        // Background mode: closing the page leaves the server running, which
+        // is worth saying — it is the opposite of what closing a window
+        // usually means. Held for a moment first, because a refresh looks
+        // exactly like this for the first half second, and a balloon for
+        // every refresh would be noise.
+        lock (_shutdownLock)
+        {
+            _closedNoticeTimer?.Dispose();
+            _closedNoticeTimer = new Timer(_ =>
+            {
+                Log.Info("control", "dashboard closed — still running in the background");
+                OnDashboardClosed?.Invoke();
+            }, null, 2000, Timeout.Infinite);
+        }
+    }
+
+    /// <summary>
+    /// How long after the last dashboard goes before the server acts. Long
+    /// enough that a refresh — which drops the link and reopens it — is not
+    /// a close, and short enough that closing the browser is over before
+    /// anyone wonders whether it worked.
+    /// </summary>
+    private const int CloseGraceMs = 1500;
+
+    /// <summary>
+    /// The moment of deciding, once the grace has run out.
+    ///
+    /// Somebody else watching still holds it open — that is a film cutting
+    /// out on another person's screen this second, and it has nothing to do
+    /// with whose browser was just closed. But it is checked *again* rather
+    /// than abandoned: the old code disposed the timer and gave up for good,
+    /// so a viewer who stopped watching a minute later left a server nobody
+    /// had a dashboard for still running. A viewer is forgotten 90 s after
+    /// their last request, so this always ends.
+    ///
+    /// Conversions deliberately do not veto it — see StreamingBlockedBy.
+    /// </summary>
+    private void CloseShutdownTick()
+    {
+        lock (_shutdownLock)
+        {
+            if (_closeShutdownTimer is null) return;   // a dashboard came back
+            if (StreamingBlockedBy() is string busy)
+            {
+                Log.Info("control", $"dashboard closed, but staying up: {busy}");
+                _closeShutdownTimer.Change(5000, Timeout.Infinite);
+                return;
+            }
+            _closeShutdownTimer.Dispose();
+            _closeShutdownTimer = null;
+        }
+        Log.Info("control", "no dashboard open — shutting down");
+        _requestShutdown?.Invoke();
     }
 
     /// <summary>
@@ -1073,56 +1249,23 @@ public sealed partial class ControlApi : IDisposable
                 return;
             }
 
-            // the dashboard signals page close with a beacon; any dashboard
-            // heartbeat within the grace period cancels the shutdown (page
-            // refreshes and multi-tab setups reconnect within a second)
+            // The live link every open dashboard holds. Dropping it is how
+            // the server learns the page has gone; see ServeDashboardSession.
+            if (method == "GET" && path == "/api/server/session")
+            {
+                await ServeDashboardSession(ctx);
+                return;
+            }
+
+            // The pagehide beacon, kept as the fast path for when it does
+            // arrive — it says "closed" a beat before the socket drops. It is
+            // no longer the only signal, which is what made closing the
+            // browser a coin toss: measured, the beacon simply did not turn
+            // up. Only the last page leaving counts, so shutting one of two
+            // tabs is not a close.
             if (method == "POST" && path == "/api/server/closing")
             {
-                if (_config.ShutdownOnClose && _requestShutdown is not null)
-                {
-                    lock (_shutdownLock)
-                    {
-                        Log.Info("control", "dashboard closed — shutting down in 5 s unless it reconnects");
-                        _closeShutdownTimer?.Dispose();
-                        _closeShutdownTimer = new Timer(_ =>
-                        {
-                            // A narrower question than the idle watch asks.
-                            // Closing the dashboard is how this server is
-                            // stopped, so conversions do not veto it - see
-                            // StreamingBlockedBy. Only somebody watching does,
-                            // and only for as long as they are.
-                            if (StreamingBlockedBy() is string busy)
-                            {
-                                Log.Info("control", $"dashboard closed, but staying up: {busy}");
-                                lock (_shutdownLock)
-                                {
-                                    _closeShutdownTimer?.Dispose();
-                                    _closeShutdownTimer = null;
-                                }
-                                return;
-                            }
-                            Log.Info("control", "no dashboard reconnected — shutting down");
-                            _requestShutdown();
-                        }, null, 5000, Timeout.Infinite);
-                    }
-                }
-                else if (OnDashboardClosed is not null)
-                {
-                    // Background mode: closing the page leaves the server
-                    // running, which is worth saying — it is the opposite of
-                    // what closing a window usually means. Held for a moment
-                    // first, because this same beacon fires on a refresh and
-                    // on a tab switch, and a balloon for those would be noise.
-                    lock (_shutdownLock)
-                    {
-                        _closedNoticeTimer?.Dispose();
-                        _closedNoticeTimer = new Timer(_ =>
-                        {
-                            Log.Info("control", "dashboard closed — still running in the background");
-                            OnDashboardClosed?.Invoke();
-                        }, null, 2000, Timeout.Infinite);
-                    }
-                }
+                if (Volatile.Read(ref _liveDashboards) <= 1) DashboardWentAway();
                 WriteJson(res, 200, new { scheduled = _config.ShutdownOnClose });
                 return;
             }
