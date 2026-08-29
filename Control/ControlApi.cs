@@ -401,6 +401,35 @@ public sealed partial class ControlApi : IDisposable
     /// </summary>
     private static readonly TimeSpan DashboardGoneAfter = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// Why the server must not shut itself down right now, or null when it may.
+    ///
+    /// Both shutdown paths have to ask this, and only one of them did. The
+    /// idle timer checked for conversions and viewers; the close beacon did
+    /// not, and the beacon is the path that actually fires when someone shuts
+    /// the dashboard. Closing the page therefore stopped the server five
+    /// seconds later no matter what it was doing: Dispose killed every running
+    /// conversion, and each one's exit handler then removed its own
+    /// part-finished directory as unplayable. Work that had been converting
+    /// for hours disappeared out of the transcode folder while it was open in
+    /// Explorer. A phone midway through a film was cut off the same way.
+    ///
+    /// Closing a window is not an instruction to throw work away.
+    /// </summary>
+    private string? ShutdownBlockedBy()
+    {
+        if (_ffmpeg is not null)
+        {
+            var active = _ffmpeg.ActiveVodStreams.Count;
+            var queued = _ffmpeg.VodQueueDepth;
+            if (active > 0 || queued > 0)
+                return $"{active} conversion(s) running, {queued} queued";
+        }
+        var viewers = _services.Viewers.Count;
+        if (viewers > 0) return $"{viewers} viewer(s) streaming";
+        return null;
+    }
+
     private void StartIdleShutdownWatch()
     {
         if (_requestShutdown is null) return;
@@ -417,13 +446,16 @@ public sealed partial class ControlApi : IDisposable
 
             if (!_config.ShutdownOnClose || !_sawDashboard) return;
             if (DateTime.UtcNow - _lastSeenUtc < DashboardGoneAfter) return;
-            if (_services.Viewers.Count > 0) return;       // somebody is watching
             // Converting counts as being in use just as much as watching does.
             // Without this, locking the screen stopped the work: the browser
             // stops polling behind a lock screen, nothing is streaming, and
             // half a minute later the server shut itself down and took every
             // running ffmpeg and the whole queue with it.
-            if (converting) return;
+            if (ShutdownBlockedBy() is string busy)
+            {
+                Log.Debug("control", $"dashboard gone, but staying up: {busy}");
+                return;
+            }
             _idleShutdownTimer?.Dispose();
             _idleShutdownTimer = null;
             Log.Info("control", "no dashboard for 30 s and nothing streaming - shutting down");
@@ -1011,6 +1043,20 @@ public sealed partial class ControlApi : IDisposable
                         _closeShutdownTimer?.Dispose();
                         _closeShutdownTimer = new Timer(_ =>
                         {
+                            // Same question the idle watch asks. Closing the
+                            // page says the page is gone, not that the work is
+                            // unwanted; conversions keep running and the idle
+                            // watch stops the server once they are done.
+                            if (ShutdownBlockedBy() is string busy)
+                            {
+                                Log.Info("control", $"dashboard closed, but staying up: {busy}");
+                                lock (_shutdownLock)
+                                {
+                                    _closeShutdownTimer?.Dispose();
+                                    _closeShutdownTimer = null;
+                                }
+                                return;
+                            }
                             Log.Info("control", "no dashboard reconnected — shutting down");
                             _requestShutdown();
                         }, null, 5000, Timeout.Infinite);
@@ -2309,7 +2355,13 @@ public sealed partial class ControlApi : IDisposable
         {
             try
             {
-                Directory.Delete(dir, recursive: true);
+                // Gone already counts as removed. Deleting a directory whose
+                // files a dying ffmpeg is still releasing can throw
+                // DirectoryNotFoundException on the retry *after* the delete
+                // actually worked - and that derives from IOException, so it
+                // went round the loop and came out as "could not delete -
+                // files still in use" for a conversion that was already gone.
+                if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
                 _links.Forget(name);
                 Log.Info("control", purge
                     ? $"conversion deleted from disk: {name}"
