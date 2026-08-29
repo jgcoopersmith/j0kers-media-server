@@ -291,6 +291,28 @@
 const $ = id => document.getElementById(id);
 let setup = false;
 
+/* ---- the live link, exactly as the dashboard holds it ----
+
+   This page is a page too. Closing the browser here has to stop the server
+   for the same reason it does from the dashboard: unless the server is set to
+   minimize to the tray, the open page IS the session.
+
+   Without this, a server that had no administrator yet — every fresh install —
+   served this page instead of the dashboard, and this page announced nothing
+   when it went. No link, no beacon, and nothing to set "a dashboard has been
+   seen", so even the thirty-second silence watch never armed. The process ran
+   until it was killed, every time.
+
+   No sign-in needed: the endpoint carries no information, it only says that a
+   page is here and, by dropping, that it has gone. The server allows it
+   unauthenticated but same-origin only. */
+try { new EventSource("/api/server/session"); } catch { }
+
+/* Still sent, for the beat before the socket drops. */
+window.addEventListener("pagehide", () => {
+  try { navigator.sendBeacon("/api/server/closing", "bye"); } catch { }
+});
+
 /* 👁 reveals what's typed — a password you can't see is a password you
    can't tell you've mistyped. */
 document.addEventListener("click", e => {

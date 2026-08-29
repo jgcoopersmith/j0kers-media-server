@@ -50,6 +50,16 @@ public sealed partial class ControlApi : IDisposable
     /// </summary>
     private int _liveDashboards;
 
+    /// <summary>
+    /// The client address behind every open live link, so the log can say who
+    /// is keeping the server up when closing a page does not stop it.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _openPages = new();
+
+    /// <summary>Distinct addresses currently holding a page open.</summary>
+    private IEnumerable<string> OpenPageClients() =>
+        _openPages.Values.Distinct().OrderBy(a => a, StringComparer.Ordinal);
+
     private RtspServer? RtspServer => _services.Rtsp;
     private readonly Media.PlaylistStore _playlists;
     /// <summary>Which conversions are listed; see StreamLinks. Removing a link keeps the files.</summary>
@@ -566,9 +576,14 @@ public sealed partial class ControlApi : IDisposable
         res.SendChunked = true;
 
         var open = Interlocked.Increment(ref _liveDashboards);
+        // Who is holding it, so the log can name them when a close does not
+        // stop the server. A page on another machine keeping it alive is
+        // correct behaviour and completely invisible without this.
+        var holder = Guid.NewGuid().ToString("n");
+        _openPages[holder] = ctx.Request.RemoteEndPoint?.Address.ToString() ?? "unknown";
         _sawDashboard = true;
         NoteActivity();
-        Log.Debug("control", $"dashboard connected ({open} open)");
+        Log.Info("control", $"page opened from {_openPages[holder]} ({open} now open)");
 
         // "retry" is what the browser waits before reopening after a drop.
         // Half a second, so a blip reconnects well inside the grace period
@@ -602,11 +617,25 @@ public sealed partial class ControlApi : IDisposable
         finally
         {
             var left = Interlocked.Decrement(ref _liveDashboards);
-            Log.Debug("control", $"dashboard link dropped ({left} open)");
+            _openPages.TryRemove(holder, out _);
             if (left <= 0 && !_cts.IsCancellationRequested)
             {
-                Log.Info("control", "dashboard closed");
+                Log.Info("control", "last page closed");
                 DashboardWentAway();
+            }
+            else if (!_cts.IsCancellationRequested)
+            {
+                // The line that was missing, and it cost a day.
+                //
+                // A page closing while others are still open is correct and
+                // does nothing — but at DEBUG it said nothing either, so a
+                // server that would not stop looked like a broken shutdown
+                // rather than what it was: a forgotten tab somewhere else on
+                // the network, on another machine, quietly holding it open.
+                // The client address is here because "which page" is the only
+                // useful thing to know at that point.
+                Log.Info("control", $"a page closed, but {left} still open — staying up. " +
+                                    $"Still held from: {string.Join(", ", OpenPageClients())}");
             }
         }
     }
@@ -1228,6 +1257,31 @@ public sealed partial class ControlApi : IDisposable
                 return;
             }
 
+            // The live link every open page holds — the dashboard and the
+            // sign-in page alike. Dropping it is how the server learns the
+            // page has gone; see ServeDashboardSession.
+            //
+            // Deliberately above the sign-in gate, and this is the whole fix
+            // for "I close the browser and it keeps running". A server with no
+            // administrator yet, or one whose session has expired, serves the
+            // sign-in page rather than the dashboard — and that page held no
+            // link, sent no beacon, and never set _sawDashboard, so even the
+            // silence watch stayed disarmed. Closing it signalled nothing at
+            // all and the process ran until it was killed. On a fresh install
+            // that is not an edge case, it is every single launch.
+            //
+            // Being open costs nothing: this endpoint returns no information.
+            // It says "a page is here" while held and "it has gone" when
+            // dropped, which is exactly what an unauthenticated page needs to
+            // be able to say. Same-origin only, so a page on another site
+            // cannot open one and drop it to stop somebody's server.
+            if (method == "GET" && path == "/api/server/session")
+            {
+                if (IsCrossSite(ctx)) { res.StatusCode = 403; res.Close(); return; }
+                await ServeDashboardSession(ctx);
+                return;
+            }
+
             // Everything else is gated. Administration (configuration, the
             // power button, accounts, the filesystem picker) needs an admin;
             // watching needs any account.
@@ -1249,14 +1303,6 @@ public sealed partial class ControlApi : IDisposable
             {
                 if (HandleUserRoutes(ctx, auth, method, path)) return;
                 NotFound(res, "not found");
-                return;
-            }
-
-            // The live link every open dashboard holds. Dropping it is how
-            // the server learns the page has gone; see ServeDashboardSession.
-            if (method == "GET" && path == "/api/server/session")
-            {
-                await ServeDashboardSession(ctx);
                 return;
             }
 
