@@ -769,7 +769,12 @@
     <div class="spacer"></div>
     <button class="pill admin-only" id="powerbtn" onclick="togglePower()" title="Start or stop the streaming ports (RTSP and HLS). The server itself keeps running so you can start them again from here - to exit it, close this page.">⏻ …</button>
     <button class="pill admin-only" id="cfgbtn" onclick="openConfig()" title="Configure hostname and ports">⚙ Config</button>
-    <button class="pill admin-only" id="usersbtn" onclick="openUsers()" title="Add, edit, and remove user accounts">👥 Users</button>
+    <button class="pill admin-only" id="usersbtn" onclick="openUsers()" title="Add, edit, and remove user accounts">👥 <span id="users-count">Users</span></button>
+    <!-- Two deliberate lines, "4 Users" over "Logged In", so the break is
+         where it belongs rather than wherever the row happens to run out of
+         width. The count is its own span because the script sets only that
+         half; the label is markup and stays put. -->
+    <span class="pill admin-only" id="loggedinpill" style="white-space:nowrap;text-align:center;line-height:1.25" title="Accounts with somebody signed in right now. Two browsers and a phone on the same account count once."><span id="loggedin-count">–</span><br>Logged In</span>
     <button class="pill" id="acctbtn" onclick="openAccount()" title="Your account, password, and keys">👤 <span id="acct-pill">…</span></button>
     <button class="pill" id="themebtn" onclick="toggleTheme()" title="Switch theme">🌗</button>
     <span class="pill" id="clockpill" style="font-variant-numeric:tabular-nums;font-weight:700">–</span>

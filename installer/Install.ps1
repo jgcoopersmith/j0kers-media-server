@@ -316,20 +316,46 @@ foreach ($d in @('media', 'logs')) {
 }
 
 if (-not $NoShortcut) {
-    try {
-        # the real desktop, which may be redirected into OneDrive
-        $desktop = [Environment]::GetFolderPath('Desktop')
-        $lnk = Join-Path $desktop 'j0kers Media Server.lnk'
-        $shell = New-Object -ComObject WScript.Shell
-        $s = $shell.CreateShortcut($lnk)
-        $s.TargetPath       = $targetExe
-        $s.Arguments        = '"server.json"'
-        $s.WorkingDirectory = $TargetDir
-        $s.Description      = 'j0kers Media Server'
-        $s.Save()
-        Write-Step ("Desktop shortcut: " + $lnk)
+    # Refresh every shortcut that already exists, and only create one if none
+    # does.
+    #
+    # This wrote a single fixed path on the desktop root and nothing else,
+    # which is not where the shortcut people actually use ends up. Moving it
+    # into a folder - "j0ker Dev" here - left the installer writing a fresh
+    # one at the root on every upgrade while the moved copy was never touched
+    # again. It kept working only because an in-place upgrade does not change
+    # the target path; the day the install moves, the icon somebody clicks
+    # points at nothing, and there is a stray duplicate at the root besides.
+    #
+    # So: update what is there, wherever it is, and add one only when the user
+    # has none. Nothing is created beside a shortcut they have already put
+    # where they want it, and nothing they rely on goes stale.
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    $lnkName = 'j0kers Media Server.lnk'
+    $places  = @($desktop, (Join-Path $desktop 'j0ker Dev'))
+
+    $existing = @()
+    foreach ($d in $places) {
+        if (-not (Test-Path -LiteralPath $d)) { continue }
+        $p = Join-Path $d $lnkName
+        if (Test-Path -LiteralPath $p) { $existing += $p }
     }
-    catch { Write-Step ("Could not create the desktop shortcut: " + $_.Exception.Message) }
+    # None anywhere: put one on the desktop, as before.
+    if ($existing.Count -eq 0) { $existing = @(Join-Path $desktop $lnkName) }
+
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($lnk in $existing) {
+        try {
+            $s = $shell.CreateShortcut($lnk)
+            $s.TargetPath       = $targetExe
+            $s.Arguments        = '"server.json"'
+            $s.WorkingDirectory = $TargetDir
+            $s.Description      = 'j0kers Media Server'
+            $s.Save()
+            Write-Step ("Shortcut updated: " + $lnk)
+        }
+        catch { Write-Step ("Could not write " + $lnk + ": " + $_.Exception.Message) }
+    }
 }
 
 Write-Host ''

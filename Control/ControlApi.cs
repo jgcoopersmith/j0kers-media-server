@@ -1462,6 +1462,11 @@ public sealed partial class ControlApi : IDisposable
             version = typeof(ControlApi).Assembly.GetName().Version?.ToString(3),
             running = _services.Running,
             uptimeSeconds = (int)(DateTime.UtcNow - _startedUtc).TotalSeconds,
+            // The header's Users button and the pill beside it. Counts only —
+            // no names — and they ride the poll the header already makes
+            // rather than costing a request of their own.
+            accounts = _auth.AccountCount,
+            signedIn = _auth.SignedInCount,
             // the machine's own clock, for the dashboard's header:
             // an instant, the offset that turns it into local time
             // here, and what this zone is called

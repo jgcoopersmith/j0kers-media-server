@@ -33,6 +33,16 @@ async function tick() {
   pw.classList.toggle("on", running);
   pw.classList.toggle("off", !running);
   $("verpill").textContent = "v" + (status.version || "?");
+
+  /* Accounts on the server, and how many of them have somebody signed in.
+     Both ride this poll rather than costing requests of their own. Left at
+     their placeholders when the server does not send them, so an older build
+     shows "Users" and a dash rather than a confident zero. */
+  if (typeof status.accounts === "number")
+    $("users-count").textContent = status.accounts + (status.accounts === 1 ? " User" : " Users");
+  if (typeof status.signedIn === "number")
+    $("loggedin-count").textContent =
+      status.signedIn + (status.signedIn === 1 ? " User" : " Users");
   noteServerClock(status);   // re-syncs the header clock on every poll
   rtspPort = status.rtsp.port; hlsPort = status.hls.port;
   hlsAddresses = status.hls.addresses || [];

@@ -477,6 +477,38 @@ public sealed class AuthService
     /// <summary>Number of live sessions for a user (dashboard display).</summary>
     public int SessionCountFor(string userId) => _sessions.Count(s => s.Value.UserId == userId);
 
+    /// <summary>How many accounts exist on this server, enabled or not.</summary>
+    public int AccountCount => _users.All.Count;
+
+    /// <summary>
+    /// How many accounts have somebody signed in right now — people, not
+    /// sessions, so two browsers and a phone signed in as the same account
+    /// count once.
+    ///
+    /// The liveness test is the one <see cref="ResolveSession"/> applies when
+    /// a request actually arrives: idle timeout, absolute lifetime, and the
+    /// account still existing and enabled. Counting raw dictionary entries
+    /// instead would report sessions that have expired but not yet been
+    /// swept — a number that says people are here when the next request from
+    /// any of them would be refused.
+    /// </summary>
+    public int SignedInCount
+    {
+        get
+        {
+            var now = DateTime.UtcNow;
+            var live = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var (_, s) in _sessions)
+            {
+                if (now - s.LastSeenUtc > SessionIdle || now - s.CreatedUtc > SessionMax) continue;
+                var user = _users.FindById(s.UserId);
+                if (user is null || !user.Enabled) continue;
+                live.Add(s.UserId);
+            }
+            return live.Count;
+        }
+    }
+
     // ---- cookie plumbing ----
 
     /// <summary>
