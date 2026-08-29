@@ -101,7 +101,7 @@ public sealed class FfmpegManager : IDisposable
         // before anything of ours starts, so a leftover writer is gone
         // rather than sharing a channel directory with its replacement
         KillOrphanedJobs();
-        CleanIncompleteVodDirs();   // drop partials a crash or restart left behind
+        ReportIncompleteVodDirs();  // names them; deletes nothing - see the method
         MarkExistingConversionsKeptOnce(Path.Combine(baseDirectory, "vod-keep-migrated"));
         LoadChannels();
         LoadQueueSettings();
@@ -591,7 +591,7 @@ public sealed class FfmpegManager : IDisposable
                     // Remove it so a half-finished conversion doesn't linger on
                     // disk (and isn't mistaken for a real one). A rerun that took
                     // the slot owns the dir now, so leave that alone.
-                    if (!superseded) CleanupIfIncomplete(stream, dir);
+                    if (!superseded) ReportIfIncomplete(stream, dir);
                     // one fewer file owed — write that down before starting the
                     // next, so a crash cannot resurrect a conversion that is
                     // already done. Outside the lock above: SaveQueueState
@@ -1382,51 +1382,74 @@ public sealed class FfmpegManager : IDisposable
     /// crashed partway, leaving segments that will never play. A finished
     /// conversion (ENDLIST present) is left untouched.
     /// </summary>
-    private void CleanupIfIncomplete(string stream, string dir)
+    private void ReportIfIncomplete(string stream, string dir)
     {
         try
         {
             if (!Directory.Exists(dir)) return;
-            var playlist = Path.Combine(dir, "index.m3u8");
-            var complete = File.Exists(playlist)
-                && File.ReadAllText(playlist).Contains("#EXT-X-ENDLIST", StringComparison.Ordinal);
-            if (complete) return;
-            Directory.Delete(dir, recursive: true);
-            Log.Info("ffmpeg", $"removed incomplete conversion: {stream}");
+            if (IsComplete(dir)) return;
+            // Not deleted. See ReportIncompleteVodDirs for why.
+            Log.Info("ffmpeg", $"conversion did not finish: {stream} — kept on disk; "
+                + "converting it again replaces it");
         }
         catch (Exception ex)
         {
-            Log.Warn("ffmpeg", $"could not remove incomplete conversion {stream}: {ex.Message}");
+            Log.Warn("ffmpeg", $"could not check {stream}: {ex.Message}");
         }
     }
 
+    /// <summary>A conversion ffmpeg ran to the end writes the EXT-X-ENDLIST marker.</summary>
+    private static bool IsComplete(string dir)
+    {
+        var playlist = Path.Combine(dir, "index.m3u8");
+        return File.Exists(playlist)
+            && File.ReadAllText(playlist).Contains("#EXT-X-ENDLIST", StringComparison.Ordinal);
+    }
+
     /// <summary>
-    /// At startup, clears out conversions left half-finished by a previous run
-    /// (a crash, or the server being stopped mid-encode — which a restart does).
-    /// Only "vod-*" directories are considered, and only those missing the
-    /// EXT-X-ENDLIST marker, so finished copies and live-channel directories are
-    /// never touched.
+    /// Names conversions that did not finish. Deletes nothing.
+    ///
+    /// This ran in the constructor and deleted every vod-* directory whose
+    /// playlist had no EXT-X-ENDLIST - before the server had finished
+    /// starting, before a line of the interface existed to say it was
+    /// happening, and with no way to stop it or get any of it back.
+    ///
+    /// The reasoning was that an unterminated playlist means a conversion
+    /// that was interrupted and is not worth keeping. The reasoning is wrong
+    /// in the case that matters. This server is stopped mid-encode as a
+    /// matter of routine - a restart, an upgrade, the machine sleeping, a
+    /// dashboard being closed - and every conversion running at that moment
+    /// becomes "incomplete". The next start then deleted it. Installing a new
+    /// version does exactly that: it stops a server that may be converting,
+    /// and starts one that sweeps. Hours of encoding, gone before the window
+    /// opened, repeatedly, and the only trace was a log line nobody had a
+    /// reason to read.
+    ///
+    /// Nothing needed it. A partial is already cleared by StartVod at the one
+    /// safe moment - when that same conversion is about to be redone and its
+    /// directory is being replaced anyway. This swept ahead of that for no
+    /// benefit, and it swept the whole media root, at the worst possible
+    /// moment, without asking.
+    ///
+    /// The rule now: this server does not delete a conversion by itself. It
+    /// says what it found and leaves it where it is.
     /// </summary>
-    private void CleanIncompleteVodDirs()
+    private void ReportIncompleteVodDirs()
     {
         try
         {
             if (!Directory.Exists(_mediaRoot)) return;
+            var partial = 0;
             foreach (var dir in Directory.EnumerateDirectories(_mediaRoot, "vod-*"))
             {
-                var playlist = Path.Combine(dir, "index.m3u8");
-                var complete = File.Exists(playlist)
-                    && File.ReadAllText(playlist).Contains("#EXT-X-ENDLIST", StringComparison.Ordinal);
-                if (complete) continue;
-                try
-                {
-                    Directory.Delete(dir, recursive: true);
-                    Log.Info("ffmpeg", $"cleared incomplete conversion left by a previous run: {Path.GetFileName(dir)}");
-                }
-                catch (Exception ex) { Log.Warn("ffmpeg", $"could not clear {Path.GetFileName(dir)}: {ex.Message}"); }
+                try { if (!IsComplete(dir)) partial++; }
+                catch { /* unreadable is not a reason to touch it */ }
             }
+            if (partial > 0)
+                Log.Info("ffmpeg", $"{partial} conversion(s) did not finish and are still on disk. "
+                    + "Nothing was deleted; converting one again replaces it.");
         }
-        catch (Exception ex) { Log.Warn("ffmpeg", $"incomplete-conversion sweep failed: {ex.Message}"); }
+        catch (Exception ex) { Log.Warn("ffmpeg", $"incomplete-conversion check failed: {ex.Message}"); }
     }
 
     /// <summary>
@@ -1505,7 +1528,7 @@ public sealed class FfmpegManager : IDisposable
         lock (_progressLock) _vodProgress.Remove(stream);
         // A cancelled conversion never reached EXT-X-ENDLIST, so its directory is
         // a partial — remove it, the same as a queued one leaves nothing behind.
-        CleanupIfIncomplete(stream, Path.Combine(_mediaRoot, stream));
+        ReportIfIncomplete(stream, Path.Combine(_mediaRoot, stream));
         Log.Info("ffmpeg", $"vod job cancelled: {stream}");
         PumpVodQueue();   // a slot just freed — start the next waiting one
         return true;
