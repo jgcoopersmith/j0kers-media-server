@@ -480,34 +480,42 @@ public sealed class AuthService
     /// <summary>How many accounts exist on this server, enabled or not.</summary>
     public int AccountCount => _users.All.Count;
 
+    /// <summary>One live sign-in: who, from where, and how long since it spoke.</summary>
+    public sealed record SignedIn(string Username, string Client, int IdleSeconds);
+
     /// <summary>
-    /// How many accounts have somebody signed in right now — people, not
-    /// sessions, so two browsers and a phone signed in as the same account
-    /// count once.
+    /// Every sign-in that is live right now — one per session, so two browsers
+    /// and a phone are three, whether or not they are the same account.
     ///
-    /// The liveness test is the one <see cref="ResolveSession"/> applies when
-    /// a request actually arrives: idle timeout, absolute lifetime, and the
-    /// account still existing and enabled. Counting raw dictionary entries
-    /// instead would report sessions that have expired but not yet been
-    /// swept — a number that says people are here when the next request from
-    /// any of them would be refused.
+    /// The liveness test is the one <see cref="ResolveSession"/> applies when a
+    /// request actually arrives: idle timeout, absolute lifetime, and the
+    /// account still existing and enabled. Reading the raw dictionary instead
+    /// would list sessions that have expired but not yet been swept — sign-ins
+    /// that look present while the next request from any of them would be
+    /// refused.
     /// </summary>
-    public int SignedInCount
+    public IReadOnlyList<SignedIn> SignedInSessions
     {
         get
         {
             var now = DateTime.UtcNow;
-            var live = new HashSet<string>(StringComparer.Ordinal);
+            var live = new List<SignedIn>();
             foreach (var (_, s) in _sessions)
             {
                 if (now - s.LastSeenUtc > SessionIdle || now - s.CreatedUtc > SessionMax) continue;
                 var user = _users.FindById(s.UserId);
                 if (user is null || !user.Enabled) continue;
-                live.Add(s.UserId);
+                live.Add(new SignedIn(user.Username, s.ClientHint,
+                                      (int)(now - s.LastSeenUtc).TotalSeconds));
             }
-            return live.Count;
+            return live.OrderBy(l => l.Username, StringComparer.OrdinalIgnoreCase)
+                       .ThenBy(l => l.IdleSeconds)
+                       .ToList();
         }
     }
+
+    /// <summary>How many sign-ins are live — sessions, not accounts.</summary>
+    public int SignedInCount => SignedInSessions.Count;
 
     // ---- cookie plumbing ----
 

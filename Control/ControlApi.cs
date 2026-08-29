@@ -1398,7 +1398,7 @@ public sealed partial class ControlApi : IDisposable
     /// </summary>
     private static readonly Dictionary<(string Method, string Path), Route> Routes = new()
     {
-        [("GET", "/api/status")] = Sync((api, ctx, _) => api.WriteStatus(ctx)),
+        [("GET", "/api/status")] = Sync((api, ctx, auth) => api.WriteStatus(ctx, auth)),
         [("GET", "/api/config")] = Sync((api, ctx, _) => api.WriteConfig(ctx)),
         [("GET", "/api/mounts")] = Sync((api, ctx, _) => api.WriteMounts(ctx)),
         [("GET", "/api/sessions")] = Sync((api, ctx, _) => api.WriteSessions(ctx)),
@@ -1499,7 +1499,7 @@ public sealed partial class ControlApi : IDisposable
     };
 
     /// <summary>GET /api/status - identity, uptime, and every live counter the dashboard polls.</summary>
-    private void WriteStatus(HttpListenerContext ctx)
+    private void WriteStatus(HttpListenerContext ctx, AuthResult auth)
     {
         var res = ctx.Response;
         WriteJson(res, 200, new
@@ -1508,11 +1508,23 @@ public sealed partial class ControlApi : IDisposable
             version = typeof(ControlApi).Assembly.GetName().Version?.ToString(3),
             running = _services.Running,
             uptimeSeconds = (int)(DateTime.UtcNow - _startedUtc).TotalSeconds,
-            // The header's Users button and the pill beside it. Counts only —
-            // no names — and they ride the poll the header already makes
-            // rather than costing a request of their own.
+            // The header's Users button and the pill beside it, riding the
+            // poll the header already makes rather than costing a request of
+            // their own. Counts are plain numbers and go to anyone signed in;
+            // signedInUsers names people and where they are connecting from,
+            // so it is an administrator's to see and nobody else's. Hiding the
+            // pill in CSS would not be enough — the answer must not be in the
+            // response at all for a read-only account.
             accounts = _auth.AccountCount,
             signedIn = _auth.SignedInCount,
+            signedInUsers = auth.IsAdmin
+                ? _auth.SignedInSessions.Select(s => new
+                  {
+                      user = s.Username,
+                      client = s.Client,
+                      idleSeconds = s.IdleSeconds,
+                  })
+                : null,
             // the machine's own clock, for the dashboard's header:
             // an instant, the offset that turns it into local time
             // here, and what this zone is called

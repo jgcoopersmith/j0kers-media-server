@@ -13,6 +13,13 @@ const fmtRate = bps => bps >= 1048576 ? (bps / 1048576).toFixed(1) + " MB/s"
   : bps >= 1024 ? Math.round(bps / 1024) + " KB/s"
   : Math.round(bps) + " B/s";
 
+/* How long since a sign-in last made a request — what separates a phone on
+   the sofa from a browser somebody left open on Tuesday. */
+const idleText = s => s < 10 ? "active now"
+  : s < 60 ? s + "s idle"
+  : s < 3600 ? Math.floor(s / 60) + "m idle"
+  : Math.floor(s / 3600) + "h idle";
+
 async function tick() {
   let status, sessions;
   try {
@@ -40,9 +47,21 @@ async function tick() {
      shows "Users" and a dash rather than a confident zero. */
   if (typeof status.accounts === "number")
     $("users-count").textContent = status.accounts + (status.accounts === 1 ? " User" : " Users");
-  if (typeof status.signedIn === "number")
+  if (typeof status.signedIn === "number") {
     $("loggedin-count").textContent =
       status.signedIn + (status.signedIn === 1 ? " User" : " Users");
+
+    /* Hovering names them, for an administrator. Each sign-in is its own
+       line — two browsers and a phone are three lines, and the same account
+       appearing more than once is the point rather than a mistake, so the
+       address and how long since each last spoke are what tell them apart.
+       The server sends this list only to an admin; for anyone else the field
+       is absent and the tooltip stays the plain description. */
+    const who = status.signedInUsers;
+    $("loggedinpill").title = Array.isArray(who) && who.length
+      ? who.map(w => w.user + " · " + w.client + " · " + idleText(w.idleSeconds)).join("\n")
+      : "Accounts with somebody signed in right now.";
+  }
   noteServerClock(status);   // re-syncs the header clock on every poll
   rtspPort = status.rtsp.port; hlsPort = status.hls.port;
   hlsAddresses = status.hls.addresses || [];
