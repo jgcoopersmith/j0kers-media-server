@@ -415,9 +415,18 @@ public sealed partial class ControlApi : IDisposable
     /// Explorer. A phone midway through a film was cut off the same way.
     ///
     /// Closing a window is not an instruction to throw work away.
+    ///
+    /// The two paths ask different questions, and conflating them was a
+    /// mistake with a cost. Going silent is not the same act as closing the
+    /// page, and only one of them is somebody telling the server to stop.
     /// </summary>
-    private string? ShutdownBlockedBy()
+    private string? SilenceShutdownBlockedBy()
     {
+        // Nobody said anything - the dashboard simply stopped answering.
+        // That is a locked screen, a sleeping laptop, a dropped network. It
+        // is not an instruction, so work in progress keeps the server up:
+        // without this, locking the screen ended an overnight conversion run
+        // half a minute later.
         if (_ffmpeg is not null)
         {
             var active = _ffmpeg.ActiveVodStreams.Count;
@@ -425,9 +434,33 @@ public sealed partial class ControlApi : IDisposable
             if (active > 0 || queued > 0)
                 return $"{active} conversion(s) running, {queued} queued";
         }
+        return StreamingBlockedBy();
+    }
+
+    /// <summary>
+    /// Why a deliberate close must not stop the server yet.
+    ///
+    /// Somebody shut the dashboard. That is an instruction, and it is how
+    /// this server has always been stopped, so it is obeyed even when
+    /// conversions are running - blocking it left no way to stop the server
+    /// at all while a queue was going, and a queue can be going for hours.
+    /// The process stayed up with its encoders, which is exactly the
+    /// "it will not shut down and ffmpeg is still running" that followed.
+    ///
+    /// An interrupted conversion is no longer destroyed - since the startup
+    /// sweep was removed, its part-finished directory stays on disk and
+    /// converting it again replaces it - so obeying the instruction costs
+    /// encoding time, not work on disk.
+    ///
+    /// Someone actually watching still holds it open. That is a film cutting
+    /// out on another person's screen this second, it is nothing to do with
+    /// the queue, and it clears itself: a viewer is forgotten 90 seconds
+    /// after their last request, so this can never be what wedges shutdown.
+    /// </summary>
+    private string? StreamingBlockedBy()
+    {
         var viewers = _services.Viewers.Count;
-        if (viewers > 0) return $"{viewers} viewer(s) streaming";
-        return null;
+        return viewers > 0 ? $"{viewers} viewer(s) streaming" : null;
     }
 
     private void StartIdleShutdownWatch()
@@ -451,7 +484,7 @@ public sealed partial class ControlApi : IDisposable
             // stops polling behind a lock screen, nothing is streaming, and
             // half a minute later the server shut itself down and took every
             // running ffmpeg and the whole queue with it.
-            if (ShutdownBlockedBy() is string busy)
+            if (SilenceShutdownBlockedBy() is string busy)
             {
                 Log.Debug("control", $"dashboard gone, but staying up: {busy}");
                 return;
@@ -1053,11 +1086,12 @@ public sealed partial class ControlApi : IDisposable
                         _closeShutdownTimer?.Dispose();
                         _closeShutdownTimer = new Timer(_ =>
                         {
-                            // Same question the idle watch asks. Closing the
-                            // page says the page is gone, not that the work is
-                            // unwanted; conversions keep running and the idle
-                            // watch stops the server once they are done.
-                            if (ShutdownBlockedBy() is string busy)
+                            // A narrower question than the idle watch asks.
+                            // Closing the dashboard is how this server is
+                            // stopped, so conversions do not veto it - see
+                            // StreamingBlockedBy. Only somebody watching does,
+                            // and only for as long as they are.
+                            if (StreamingBlockedBy() is string busy)
                             {
                                 Log.Info("control", $"dashboard closed, but staying up: {busy}");
                                 lock (_shutdownLock)

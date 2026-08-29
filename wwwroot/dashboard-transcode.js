@@ -498,14 +498,29 @@ function renderConversions(running, queued) {
   }
 }
 
+/* Every one of these threw the response away. A refusal came back and was
+   swallowed in silence, so the button simply appeared to do nothing - press
+   it again, still nothing, with no way to find out why. This endpoint needs
+   server-admin rights, so 403 is the likeliest refusal and the one worth
+   naming. Say what happened instead of nothing. */
+async function tcReport(r, what) {
+  if (r && r.ok) return true;
+  let why = "";
+  try { why = (await r.json()).error || ""; } catch { /* not JSON */ }
+  if (!why && r && r.status === 403) why = "this account does not have server-admin rights";
+  alert("Could not " + what + (why ? ": " + why : "."));
+  return false;
+}
+
 async function tcRemoveQueued(path) {
   try {
-    await fetch("/api/transcode/remove", {
+    const r = await fetch("/api/transcode/remove", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...headers() },
       body: JSON.stringify({ path }),
     });
-  } catch { /* the next poll will re-render either way */ }
+    await tcReport(r, "remove that file from the queue");
+  } catch { alert("Could not reach the server to change the queue."); }
   tick();   // pull a fresh status so the list updates at once
 }
 
@@ -516,20 +531,21 @@ async function tcCancelRunning(stream, title) {
       method: "POST",
       headers: { "Content-Type": "application/json", ...headers() },
       body: JSON.stringify({ stream }),
-    });
-  } catch { /* the next poll will re-render either way */ }
+    }).then(r => tcReport(r, "cancel that conversion"));
+  } catch { alert("Could not reach the server to cancel that conversion."); }
   tick();
 }
 
 async function tcClearQueue() {
   if (!confirm("Remove everything still waiting to convert? (Running conversions keep going.)")) return;
   try {
-    await fetch("/api/transcode/remove", {
+    const r = await fetch("/api/transcode/remove", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...headers() },
       body: JSON.stringify({ clear: true }),
     });
-  } catch {}
+    await tcReport(r, "clear the queue");
+  } catch { alert("Could not reach the server to clear the queue."); }
   tick();
 }
 
