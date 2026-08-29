@@ -76,7 +76,7 @@ public sealed class AuthService
         [System.Text.Json.Serialization.JsonPropertyName("lastSeenUtc")]
         public DateTime LastSeenUtc { get; set; }
         [System.Text.Json.Serialization.JsonPropertyName("clientHint")]
-        public string ClientHint { get; init; } = "";
+        public string ClientHint { get; set; } = "";
     }
 
     private sealed class Throttle
@@ -215,7 +215,20 @@ public sealed class AuthService
         if (presented is not null && _users.VerifyKey(presented) is UserAccount keyUser)
             return new AuthResult(LevelOf(keyUser), keyUser, "key");
 
-        if (ReadSessionCookie(ctx) is string token && ResolveSession(token) is UserAccount sessionUser)
+        // A key or token was offered and it is not one of ours. That is a
+        // failed sign-in as surely as a wrong password, and it was the one
+        // that left no trace at all: passwords, passwordless logins, lockouts
+        // and RTSP failures were all logged, while somebody working through
+        // guessed keys against this port produced complete silence.
+        //
+        // Rate-limited, and counted rather than remembered per credential:
+        // the caller chooses the value, so keeping a set of the ones already
+        // seen is a table an unauthenticated loop can grow without bound, and
+        // writing a line per attempt is the same problem in the log file.
+        // Same reasoning as NoteKeyInUrl below, which learned it the hard way.
+        if (presented is not null) NoteRejectedCredential(ClientKey(ctx));
+
+        if (ReadSessionCookie(ctx) is string token && ResolveSession(token, ctx) is UserAccount sessionUser)
             return new AuthResult(LevelOf(sessionUser), sessionUser, "session");
 
         // No accounts yet: whoever reaches an unclaimed server is its owner,
@@ -256,6 +269,26 @@ public sealed class AuthService
         if (string.IsNullOrWhiteSpace(query)) return null;
         NoteKeyInUrl();
         return query.Trim();
+    }
+
+    private long _rejectedKeyCount;
+    private long _rejectedKeyWarnedTicks;
+    private static readonly TimeSpan RejectedKeyWarnInterval = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// Records a key or token that was presented and refused. Says so at most
+    /// once a minute, with a running total and the address it last came from,
+    /// so a run of guesses is one visible line per minute rather than either
+    /// nothing at all or a log somebody can flood.
+    /// </summary>
+    private void NoteRejectedCredential(string client)
+    {
+        var total = Interlocked.Increment(ref _rejectedKeyCount);
+        var now = DateTime.UtcNow.Ticks;
+        var last = Interlocked.Read(ref _rejectedKeyWarnedTicks);
+        if (last != 0 && now - last < RejectedKeyWarnInterval.Ticks) return;
+        if (Interlocked.CompareExchange(ref _rejectedKeyWarnedTicks, now, last) != last) return;
+        Log.Warn("auth", $"rejected key/token from {client} — {total} refused since this server started");
     }
 
     private long _urlKeyCount;
@@ -303,7 +336,7 @@ public sealed class AuthService
         return null;
     }
 
-    private UserAccount? ResolveSession(string token)
+    private UserAccount? ResolveSession(string token, HttpListenerContext ctx)
     {
         var id = Digest(token);
         if (!_sessions.TryGetValue(id, out var session)) return null;
@@ -322,6 +355,17 @@ public sealed class AuthService
             return null;
         }
         session.LastSeenUtc = now;
+        // Where it is being used, not where it was created.
+        //
+        // This was only ever set at sign-in, so the address stayed whatever it
+        // was the moment somebody logged in and never moved again. On a server
+        // set up at its own console — every account created there, every
+        // session opened there — that means every line of "who is signed in"
+        // reads back the server's own address for good, however far away the
+        // person actually is now. Refreshing it here, beside the timestamp
+        // that is already being slid forward, costs nothing and makes the
+        // answer true.
+        session.ClientHint = ClientKey(ctx);
         return user;
     }
 
@@ -462,7 +506,15 @@ public sealed class AuthService
 
     public void Logout(HttpListenerContext ctx)
     {
-        if (ReadSessionCookie(ctx) is string token && _sessions.TryRemove(Digest(token), out _)) SaveSessions();
+        if (ReadSessionCookie(ctx) is not string token) return;
+        // Named before it is dropped, so the log has both ends of a session
+        // rather than only the sign-in. Bounded by definition: it takes a
+        // session that existed to remove one.
+        var who = _sessions.TryGetValue(Digest(token), out var s)
+            ? _users.FindById(s.UserId)?.Username ?? "unknown" : null;
+        if (!_sessions.TryRemove(Digest(token), out _)) return;
+        Log.Info("auth", $"signed out: {who} from {ClientKey(ctx)}");
+        SaveSessions();
     }
 
     /// <summary>Drops every session belonging to a user — used when their password changes or they are disabled.</summary>
