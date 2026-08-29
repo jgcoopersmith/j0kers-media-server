@@ -146,7 +146,7 @@ public sealed class FfmpegManager : IDisposable
             };
             psi.ArgumentList.Add("-hide_banner");
             psi.ArgumentList.Add("-encoders");
-            using var p = Process.Start(psi);
+            using var p = Services.ProcessJob.Start(psi);
             if (p is null) return;
             var inList = false;
             while (p.StandardOutput.ReadLine() is { } line)
@@ -251,7 +251,7 @@ public sealed class FfmpegManager : IDisposable
             foreach (var a in new[] { "-v", "error", "-show_entries", "stream=codec_type,codec_name",
                                       "-of", "csv=p=0", file })
                 psi.ArgumentList.Add(a);
-            using var p = Process.Start(psi);
+            using var p = Services.ProcessJob.Start(psi);
             if (p is null) return (null, null);
             var output = p.StandardOutput.ReadToEnd();
             p.WaitForExit(15_000);
@@ -289,7 +289,7 @@ public sealed class FfmpegManager : IDisposable
             foreach (var a in new[] { "-v", "error", "-show_entries", "format=duration",
                                       "-of", "default=noprint_wrappers=1:nokey=1", file })
                 psi.ArgumentList.Add(a);
-            using var p = Process.Start(psi);
+            using var p = Services.ProcessJob.Start(psi);
             if (p is null) return 0;
             var output = p.StandardOutput.ReadToEnd().Trim();
             p.WaitForExit(15_000);
@@ -333,7 +333,7 @@ public sealed class FfmpegManager : IDisposable
                     CreateNoWindow = true,
                 };
                 probe.ArgumentList.Add("-version");
-                using var p = Process.Start(probe);
+                using var p = Services.ProcessJob.Start(probe);
                 if (p is null) continue;
                 var first = p.StandardOutput.ReadLine() ?? "";
                 p.WaitForExit(3000);
@@ -1582,24 +1582,51 @@ public sealed class FfmpegManager : IDisposable
         Directory.CreateDirectory(thumbDir);
         var isVideo = ext is not (".jpg" or ".jpeg" or ".png" or ".gif" or ".webp" or ".bmp" or ".avif");
 
+        // Written beside the real name and moved into place, never straight
+        // at it — the pattern GetStreamThumbnail below already uses.
+        //
+        // The cache check above is "does the file exist", with no way to tell
+        // a finished thumbnail from a half-written one, and the entry is keyed
+        // on the source's path, size and modification time — so it is never
+        // reconsidered while the source is untouched. An ffmpeg killed
+        // part-way through writing therefore left a truncated JPEG that this
+        // served for good. Killing ffmpeg part-way through is not exotic: it
+        // is what closing the dashboard now does, and what Task Manager or a
+        // publish-and-restart always did. A move is atomic, so what lands at
+        // the real name is either a whole thumbnail or nothing.
+        var temp = Path.Combine(thumbDir, $"{key}.{Environment.CurrentManagedThreadId}.tmp.jpg");
+
         List<string> ThumbArgs(bool seek)
         {
             var a = new List<string> { "-hide_banner", "-loglevel", "error", "-y" };
             // videos: seek before decode so a frame grab is cheap even on large files
             if (seek) a.AddRange(new[] { "-ss", "3" });
-            a.AddRange(new[] { "-i", info.FullName, "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "5", thumb });
+            a.AddRange(new[] { "-i", info.FullName, "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "5", temp });
             return a;
+        }
+
+        bool Landed()
+        {
+            if (!File.Exists(temp)) return false;
+            try
+            {
+                File.Move(temp, thumb, overwrite: true);
+                return true;
+            }
+            catch { try { File.Delete(temp); } catch { } return false; }
         }
 
         try
         {
-            if (RunFfmpeg(ThumbArgs(isVideo)) && File.Exists(thumb)) return thumb;
+            if (RunFfmpeg(ThumbArgs(isVideo)) && Landed()) return thumb;
             // a very short video can have nothing at 3 s — retry from the start
-            if (isVideo && RunFfmpeg(ThumbArgs(false)) && File.Exists(thumb)) return thumb;
+            if (isVideo && RunFfmpeg(ThumbArgs(false)) && Landed()) return thumb;
+            try { File.Delete(temp); } catch { }
             return File.Exists(thumb) ? thumb : null;
         }
         catch
         {
+            try { File.Delete(temp); } catch { }
             return null;
         }
     }
@@ -1683,7 +1710,7 @@ public sealed class FfmpegManager : IDisposable
                 RedirectStandardError = true,
             };
             foreach (var a in args) psi.ArgumentList.Add(a);
-            using var p = Process.Start(psi);
+            using var p = Services.ProcessJob.Start(psi);
             if (p is null) return false;
             p.StandardError.ReadToEnd();
             if (!p.WaitForExit(timeoutMs)) { try { p.Kill(true); } catch { } return false; }
@@ -2835,15 +2862,44 @@ public sealed class FfmpegManager : IDisposable
 
     private void SaveChannels() => JsonSidecar.Save(_channelsFile, _channels, "ffmpeg");
 
+    /// <summary>
+    /// Stops the jobs, but never waits long to be allowed to.
+    ///
+    /// The wait was the problem, not the work. Everything inside the lock
+    /// here is fast — StopJob kills synchronously and hands the reaping to
+    /// the pool — but _lock is the same one StartVod holds for the whole of
+    /// starting a conversion, and that span covers a recursive delete of a
+    /// part-finished directory and an ffprobe of the source with a fifteen
+    /// second timeout. PumpVodQueue starts the next queued file on its own,
+    /// so a start can be in flight at the moment somebody closes the
+    /// dashboard with nobody having touched anything.
+    ///
+    /// Blocking there put the whole teardown behind it: shutdown stalled
+    /// until the five second watchdog in Program.cs called Environment.Exit,
+    /// which is both far longer than closing a window should take and a path
+    /// that skips the final state flush that comes after this. So the lock is
+    /// asked for, briefly, and declined if a start is mid-flight.
+    ///
+    /// Giving up the graceful pass costs nothing on Windows: the job object
+    /// takes every child with the process (see ProcessJob), which is the real
+    /// guarantee here — this pass is only politeness. Elsewhere the startup
+    /// sweep clears what is left, exactly as it does after a crash.
+    /// </summary>
     public void Dispose()
     {
         _disposed = true;
         _staggerTimer?.Dispose();
-        lock (_lock)
+        if (!Monitor.TryEnter(_lock, TimeSpan.FromMilliseconds(250)))
+        {
+            Log.Warn("ffmpeg", "shutdown: a job is still starting — leaving the children to the job object");
+            return;
+        }
+        try
         {
             foreach (var key in _seekJobs.Keys.ToList()) StopSeekJobs(key);
             foreach (var key in _vodJobs.Keys.ToList()) StopJob(_vodJobs, key);
             foreach (var key in _liveJobs.Keys.ToList()) StopJob(_liveJobs, key);
         }
+        finally { Monitor.Exit(_lock); }
     }
 }

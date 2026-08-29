@@ -176,7 +176,7 @@ public sealed class SubtitleManager
                          "-of", "json", mediaFile,
                      })
                 psi.ArgumentList.Add(a);
-            using var p = Process.Start(psi);
+            using var p = Services.ProcessJob.Start(psi);
             if (p is null) return results;
             var json = p.StandardOutput.ReadToEnd();
             p.WaitForExit(15_000);
@@ -353,7 +353,7 @@ public sealed class SubtitleManager
                 CreateNoWindow = true,
             };
             foreach (var a in args) psi.ArgumentList.Add(a);
-            using var p = Process.Start(psi);
+            using var p = Services.ProcessJob.Start(psi);
             if (p is null) return false;
             p.StandardError.ReadToEnd();
             if (!p.WaitForExit(60_000)) { try { p.Kill(true); } catch { } return false; }

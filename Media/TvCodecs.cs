@@ -213,7 +213,7 @@ public sealed class TvCodecs
             foreach (var a in new[] { "-v", "error", "-show_entries", "stream=codec_type,codec_name",
                                       "-of", "csv=p=0", file })
                 psi.ArgumentList.Add(a);
-            using var p = Process.Start(psi);
+            using var p = Services.ProcessJob.Start(psi);
             if (p is null) return (null, null);
             var output = p.StandardOutput.ReadToEnd();
             if (!p.WaitForExit(20_000)) { try { p.Kill(true); } catch { } return (null, null); }

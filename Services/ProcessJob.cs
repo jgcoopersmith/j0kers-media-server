@@ -122,6 +122,32 @@ public static class ProcessJob
     }
 
     /// <summary>
+    /// Starts a process already inside the job. Use this for every ffmpeg and
+    /// ffprobe the server runs.
+    ///
+    /// It exists rather than leaving each caller to Start and then Adopt
+    /// because that is what was here before, and exactly one spawn site out
+    /// of nine remembered — the long-running one. The eight that forgot were
+    /// the short-lived ones: codec probes, duration probes, thumbnails,
+    /// subtitle extraction. That is precisely the set that is mid-flight when
+    /// somebody closes the dashboard, so the process the user just stopped
+    /// left ffmpeg behind for up to another minute, still holding their file
+    /// open. A rule that has to be remembered at every call site is a rule
+    /// that gets kept at one of them; this one cannot be forgotten, because
+    /// forgetting it means not starting the process at all.
+    ///
+    /// Deliberately not used for the two children that are *meant* to outlive
+    /// this process: the browser being opened for the dashboard, and the
+    /// successor server started by a restart.
+    /// </summary>
+    public static Process? Start(ProcessStartInfo psi)
+    {
+        var p = Process.Start(psi);
+        if (p is not null) Adopt(p);
+        return p;
+    }
+
+    /// <summary>
     /// Puts a freshly started process in the job, so it cannot outlive this
     /// one. Safe to call for every spawn; does nothing where jobs don't
     /// exist or the process has already exited.

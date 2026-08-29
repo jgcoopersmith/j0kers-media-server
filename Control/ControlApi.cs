@@ -447,24 +447,16 @@ public sealed partial class ControlApi : IDisposable
     }
 
     /// <summary>
-    /// Why a deliberate close must not stop the server yet.
+    /// Somebody is watching, so the *silence* watch must not act.
     ///
-    /// Somebody shut the dashboard. That is an instruction, and it is how
-    /// this server has always been stopped, so it is obeyed even when
-    /// conversions are running - blocking it left no way to stop the server
-    /// at all while a queue was going, and a queue can be going for hours.
-    /// The process stayed up with its encoders, which is exactly the
-    /// "it will not shut down and ffmpeg is still running" that followed.
+    /// This answers one question only, and it is no longer asked about a
+    /// deliberate close — see CloseShutdownTick, which asks nothing. It is
+    /// left for the silence path, where the server has been told nothing and
+    /// is guessing from a gap in the polling: a television part way through a
+    /// film is exactly the case where that guess would be wrong.
     ///
-    /// An interrupted conversion is no longer destroyed - since the startup
-    /// sweep was removed, its part-finished directory stays on disk and
-    /// converting it again replaces it - so obeying the instruction costs
-    /// encoding time, not work on disk.
-    ///
-    /// Someone actually watching still holds it open. That is a film cutting
-    /// out on another person's screen this second, it is nothing to do with
-    /// the queue, and it clears itself: a viewer is forgotten 90 seconds
-    /// after their last request, so this can never be what wedges shutdown.
+    /// It clears itself either way: a viewer is forgotten 90 seconds after
+    /// their last request, so this can never be what wedges shutdown.
     /// </summary>
     private string? StreamingBlockedBy()
     {
@@ -667,29 +659,40 @@ public sealed partial class ControlApi : IDisposable
     private const int CloseGraceMs = 1500;
 
     /// <summary>
-    /// The moment of deciding, once the grace has run out.
+    /// The moment of deciding, once the grace has run out. Nothing is asked
+    /// except whether a dashboard came back.
     ///
-    /// Somebody else watching still holds it open — that is a film cutting
-    /// out on another person's screen this second, and it has nothing to do
-    /// with whose browser was just closed. But it is checked *again* rather
-    /// than abandoned: the old code disposed the timer and gave up for good,
-    /// so a viewer who stopped watching a minute later left a server nobody
-    /// had a dashboard for still running. A viewer is forgotten 90 s after
-    /// their last request, so this always ends.
+    /// Closing the dashboard stops the server. Not "once the conversions
+    /// finish", not "once the last phone stops watching" — then. It is the
+    /// off switch, and an off switch that argues is not one: every condition
+    /// that used to be consulted here was a way for the server to still be
+    /// running after the user had told it to stop, which is the whole
+    /// complaint this endpoint exists to answer.
     ///
-    /// Conversions deliberately do not veto it — see StreamingBlockedBy.
+    /// So both guards are gone, and they are worth naming so nobody
+    /// reinstates them by accident:
+    ///
+    ///   • Conversions never vetoed it, and still do not. A queue can run for
+    ///     hours, and blocking on it left no way to stop the server at all.
+    ///     An interrupted conversion keeps its part-finished directory and is
+    ///     replaced when it is converted again, so this costs encoding time,
+    ///     not work on disk.
+    ///   • Somebody else watching used to veto it, and no longer does. That
+    ///     is a real cost — a film can cut out on another person's screen —
+    ///     and it is the deliberate trade: an off switch that a television in
+    ///     another room can hold shut is not one either. Leave the server in
+    ///     the tray (background mode) when other people are watching; that is
+    ///     what background mode is, and it turns this whole path off.
+    ///
+    /// The silence watch is a different act and keeps its own guards: going
+    /// quiet is not somebody telling the server to stop, so a locked screen
+    /// still must not kill a conversion. See SilenceShutdownBlockedBy.
     /// </summary>
     private void CloseShutdownTick()
     {
         lock (_shutdownLock)
         {
             if (_closeShutdownTimer is null) return;   // a dashboard came back
-            if (StreamingBlockedBy() is string busy)
-            {
-                Log.Info("control", $"dashboard closed, but staying up: {busy}");
-                _closeShutdownTimer.Change(5000, Timeout.Infinite);
-                return;
-            }
             _closeShutdownTimer.Dispose();
             _closeShutdownTimer = null;
         }
