@@ -4071,20 +4071,34 @@ public sealed partial class ControlApi : IDisposable
     /// loops are skipped, and the walk stops at a cap so a huge tree can't
     /// stall the listing.
     /// </summary>
+    /// <summary>
+    /// How this server walks a folder of media, everywhere it walks one.
+    ///
+    /// It is shared because the two walks that mattered had drifted apart: the
+    /// pill counted with these rules while the Convert button enumerated with
+    /// a bare SearchOption.AllDirectories, which skips nothing and gives up on
+    /// the first folder it is refused. So the number shown and the work done
+    /// were answers to different questions — hidden and system files, and
+    /// anything behind a junction, were converted without ever having been
+    /// counted, a junction pointing back into the tree offered the same film
+    /// twice under two paths, and one unreadable sub-folder threw away the
+    /// rest of the selection. One set of rules, one answer.
+    /// </summary>
+    private static readonly EnumerationOptions MediaWalk = new()
+    {
+        RecurseSubdirectories = true,
+        IgnoreInaccessible = true,
+        AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System,
+    };
+
     private object FolderMediaSummary(string dir)
     {
         int media = 0, needs = 0, done = 0, ready = 0, unknown = 0;
         const int cap = 4000;
         var capped = false;
-        var opts = new EnumerationOptions
-        {
-            RecurseSubdirectories = true,
-            IgnoreInaccessible = true,
-            AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System,
-        };
         try
         {
-            foreach (var f in Directory.EnumerateFiles(dir, "*", opts))
+            foreach (var f in Directory.EnumerateFiles(dir, "*", MediaWalk))
             {
                 if (!TranscodableExt.Contains(Path.GetExtension(f))) continue;
                 if (media >= cap) { capped = true; break; }
@@ -4364,8 +4378,11 @@ public sealed partial class ControlApi : IDisposable
             if (string.IsNullOrWhiteSpace(p) || !TryLocalPath(p, out var full)) continue;
             try
             {
+                // The same rules the pill counted with — see MediaWalk. These
+                // two disagreeing is how the number shown and the work done
+                // came apart.
                 if (Directory.Exists(full))
-                    files.AddRange(Directory.EnumerateFiles(full, "*", SearchOption.AllDirectories)
+                    files.AddRange(Directory.EnumerateFiles(full, "*", MediaWalk)
                         .Where(f => TranscodableExt.Contains(Path.GetExtension(f))));
                 else if (File.Exists(full) && TranscodableExt.Contains(Path.GetExtension(full)))
                     files.Add(full);

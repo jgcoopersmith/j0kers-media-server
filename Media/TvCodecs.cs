@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using J0kersMediaServer.Logging;
 
 namespace J0kersMediaServer.Media;
 
@@ -83,7 +84,28 @@ public sealed class TvCodecs
             if (File.Exists(_cacheFile))
             {
                 var loaded = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(_cacheFile));
-                if (loaded is not null) _cache = new Dictionary<string, string>(loaded, StringComparer.OrdinalIgnoreCase);
+                if (loaded is not null)
+                {
+                    _cache = new Dictionary<string, string>(loaded, StringComparer.OrdinalIgnoreCase);
+                    // Drop the failures an older build recorded as answers.
+                    // "|" is a probe that returned nothing, and it was being
+                    // read as "no video codec", which both callers take to
+                    // mean a television can play the file — so those entries
+                    // are films quietly excluded from conversion for good.
+                    // Forgetting them costs one ffprobe each on the next
+                    // sweep; keeping them costs the film. See Codecs().
+                    var failed = _cache.Where(kv => kv.Value is "|").Select(kv => kv.Key).ToList();
+                    foreach (var k in failed) _cache.Remove(k);
+                    if (failed.Count > 0)
+                    {
+                        _dirty = true;
+                        Log.Info("probe", $"forgetting {failed.Count} failed probe(s) recorded as playable — they will be read again");
+                        // Written back now rather than whenever the next probe
+                        // happens to flush, so the repair is done once instead
+                        // of on every start for the life of the file.
+                        Save();
+                    }
+                }
             }
         }
         catch { /* a corrupt cache is a cache miss, not a failure */ }
@@ -111,6 +133,28 @@ public sealed class TvCodecs
         }
 
         var probed = Probe(file);
+
+        // A probe that failed is not an answer, and must not be filed as one.
+        //
+        // Probe returns (null, null) three ways: ffprobe would not start, it
+        // was still running after twenty seconds and was killed, or it threw.
+        // All three used to be written into the cache as "|" — and both
+        // readers below treat a null video codec as "a television can play
+        // this", so the file was counted as TV-ready, dropped out of the
+        // conversion list, and never looked at again, because a key that is
+        // present is never re-probed. There is no expiry here to rescue it.
+        //
+        // Found in this install's own cache: 28 files written off that way,
+        // whole seasons of one series among them. The timeout is the likely
+        // culprit and bulk conversion is exactly when it bites — twenty
+        // seconds is generous for reading stream headers, but not while
+        // several encoders have the disk.
+        //
+        // So leave a failure uncached. The file goes back to "not read yet",
+        // the next sweep tries again, and one that genuinely cannot be read
+        // costs one ffprobe per sweep rather than a permanent wrong answer.
+        if (probed.video is null && probed.audio is null) return probed;
+
         bool flush;
         lock (_lock)
         {

@@ -9,7 +9,8 @@
    shows whether a TV needs it converted and whether a conversion exists, is
    running, or has never been made. */
 const tcState = { path: "", parent: null, booted: false, selected: new Set(), converting: false, search: "" };
-let tcCheckTimer = 0, tcCheckTries = 0;   // re-poll while any pill still says "checking..."
+let tcCheckTimer = 0, tcCheckTries = 0;   // re-poll while any pill is still being read
+let tcLastAutoReload = 0;                 // throttles the heartbeat's re-scan (dashboard-status.js)
 const TC_FOLDER_KEY = "j0kers-tc-folder";   // last folder browsed, remembered per browser
 
 async function tcBoot() {
@@ -144,6 +145,12 @@ async function tcReload(path, quiet) {
     tcState.search = "";
     const si = $("tc-search"); if (si) si.value = "";
     const sc = $("tc-search-clear"); if (sc) sc.style.display = "none";
+    // A fresh folder gets its own allowance of re-polls. The ceiling below is
+    // there so one folder of unreadable files cannot poll forever, but the
+    // counter was only ever reset when a folder came back fully read — so that
+    // one bad folder spent the allowance and then every folder opened
+    // afterwards had none, and their pills never refreshed at all.
+    tcCheckTries = 0;
   }
   const list = $("tc-list"), msg = $("tc-msg");
   // A quiet refresh is the "checking..." poll coming back for fresh pills.
@@ -225,7 +232,9 @@ function tcStatusRank(e) {
    converting; for a file, its size. Different units, but the same question -
    how much is here - and they never mix, because folders sort among folders. */
 function tcSortNumber(e) {
-  if (e.type === "folder") { const s = e.summary || {}; return (s.needs || 0) * 1e12 + (s.media || 0); }
+  // the same figure the pill shows, so sorting by "how much is here" agrees
+  // with the number beside it rather than with a half-probed subset of it
+  if (e.type === "folder") { const s = e.summary || {}; return tcOutstanding(s) * 1e12 + (s.media || 0); }
   const m = /([\d.]+)\s*(KB|MB|GB)/i.exec(e.detail || "");
   if (!m) return 0;
   const mult = { kb: 1024, mb: 1048576, gb: 1073741824 }[m[2].toLowerCase()] || 1;
@@ -382,6 +391,28 @@ function tcSelectAll() {
    only, so opening a folder never launches a probe. Red "to convert" leads;
    the settled facts trail. "checking…" means files under here haven't been
    probed yet — browse into them (or play them) and the counts fill in. */
+/* What is still outstanding here — the number the headline shows.
+
+   It is needs + unknown, not needs, and that is the whole fix for a pill that
+   counted upwards. "needs" is only the files already probed AND known to be
+   unplayable; anything not yet read by ffprobe sits in "unknown". Reading one
+   moves it unknown → needs or unknown → ready, and the first of those made the
+   headline GROW. That is what "110 to convert" turning into "123 to convert"
+   was: not 13 new files, 13 files that had been there all along and had just
+   been read. Probing happens constantly — the background sweep, opening this
+   panel, and pressing Convert all do it — so the number climbed whatever the
+   user did, including while conversions were finishing.
+
+   needs + unknown cannot climb. Reading a file moves it unknown → needs (the
+   sum is unchanged) or unknown → ready (the sum drops by one), and finishing a
+   conversion moves it needs → done (drops by one). Every transition is level
+   or downward, so the figure only ever falls — and it is an honest ceiling on
+   what pressing Convert will actually queue, rather than a floor presented as
+   a total. */
+function tcOutstanding(s) {
+  return ((s && s.needs) || 0) + ((s && s.unknown) || 0);
+}
+
 function tcFolderPills(s) {
   if (!s || !s.media)
     return '<span class="tc-badge b-ok" title="Nothing in here a TV could play or convert">no media</span>';
@@ -390,11 +421,22 @@ function tcFolderPills(s) {
   // "needs converting" only if a TV can't play it AND no converted copy exists
   // yet — so a folder holding an original plus its H.264 copy reads as done,
   // not as "1/3", because the copy already plays and nothing is outstanding.
-  if (s.needs > 0)
-    out += '<span class="tc-badge b-need" title="' + s.needs + ' file(s) here still need converting for a TV">'
-         + s.needs + ' to convert' + (s.unknown ? '+' : '') + '</span>';
-  else if (s.unknown > 0)
-    out += '<span class="tc-badge b-conv" title="Codecs not read yet — open this folder to fill it in">checking…</span>';
+  //
+  // While anything here is unread the figure is a ceiling, and it says so in
+  // words — "up to 123" — rather than with the bare "+" this used to hang off
+  // the end of the label. That "+" landed after the word convert ("110 to
+  // convert+"), where it read as a stray character rather than as "at least",
+  // and the tooltip beside it flatly asserted the number was final. Between
+  // them there was nothing to warn anybody that the figure was still settling.
+  const outstanding = tcOutstanding(s);
+  if (outstanding > 0)
+    out += '<span class="tc-badge b-need" title="'
+         + (s.unknown
+             ? outstanding + ' file(s) here may need converting — ' + s.needs
+               + ' confirmed so far, ' + s.unknown + ' still being read. '
+               + 'The number only falls as they are read.'
+             : outstanding + ' file(s) here still need converting for a TV')
+         + '">' + (s.unknown ? 'up to ' : '') + outstanding + ' to convert</span>';
   else
     out += '<span class="tc-badge b-done" title="Everything here plays on a TV — either converted, or a format a TV already handles">TV-ready</span>';
   // Neutral detail — facts, not work, so they never read as "incomplete".
@@ -592,13 +634,25 @@ async function tcTranscode() {
     });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.status);
+    /* What was actually taken on, against what was found.
+
+       The server settles only the first dozen files before answering — the
+       rest are read and queued on a background task, and it reports that
+       honestly as "pending". This used to drop `pending` on the floor and
+       report `queued` on its own, so acting on a folder pill that said 110
+       answered "9 file(s) queued for conversion": a number computed from
+       twelve files, contradicting the pill that prompted the click and making
+       it look as though most of the job had been refused. Say the whole
+       shape of it instead — taken on, still being read, and found. */
     const gap = parseInt(($("tc-stagger") || {}).value || "0", 10);
+    const pending = d.pending || 0;
     const skips = [];
     if (d.alreadyGood > 0) skips.push(d.alreadyGood + " already play on a TV");
     const already = d.needs != null ? d.needs - d.queued : d.found - d.queued;
     if (already > 0) skips.push(already + " already converted or in progress");
-    result = d.queued > 0
-      ? d.queued + " file(s) queued for conversion"
+    if (pending > 0) skips.push(pending + " still being read and queued behind these");
+    result = (d.queued > 0 || pending > 0)
+      ? d.queued + " of " + d.found + " file(s) queued for conversion"
         + (skips.length ? " (" + skips.join(", ") + ")" : "")
         + (gap > 0 ? " — starting one every " + gap + "s once one is running" : "")
       : (skips.length ? "nothing to queue — " + skips.join(", ") : "no video files found");

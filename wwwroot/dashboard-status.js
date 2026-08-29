@@ -80,11 +80,31 @@ async function tick() {
     refreshLog();
     tcBoot();
     renderConversions(transcodingNow, status.transcodeQueue || []);
-    // keep the listing live while conversions run, without a full reload
-    // wiping a selection the user is building: only re-scan when something
-    // is converting and nothing is ticked
-    if (tcState.booted && tcState.converting && tcState.selected.size === 0 && tcState.path && !tcState.search)
-      tcReload(tcState.path);
+    /* Keep the listing live while conversions run, without a full reload
+       wiping a selection the user is building.
+
+       "While conversions run" used to mean tcState.converting, which is set in
+       exactly one place: a FILE row in the current view whose state is
+       "converting". Standing in a parent directory — which is where the folder
+       pills are, and so where the "N to convert" number is read — every row is
+       a folder, none of them carries a state, and that flag was therefore
+       always false. So the one view whose number the user was watching was the
+       one view that never refreshed: it froze at whatever it last showed and
+       stayed there for the rest of the run, while files quietly finished
+       behind it. Together with a count that climbed as files were read, that
+       is how a pill ends up stuck at a number higher than it started.
+
+       The server already tells us whether it is busy, in this very poll, so
+       ask that instead. Throttled, because each of these re-walks the folder
+       tree recursively and this fires every two seconds. */
+    const tcBusy = tcState.converting
+                || transcodingNow.length > 0
+                || (status.transcodeQueue || []).length > 0;
+    if (tcState.booted && tcBusy && tcState.selected.size === 0 && tcState.path && !tcState.search
+        && performance.now() - tcLastAutoReload > 6000) {
+      tcLastAutoReload = performance.now();
+      tcReload(tcState.path, true);   // quiet: keeps the "N file(s) queued" message on screen
+    }
   }
   refreshHistory();
   refreshMounts();   // cheap, cached-ish
