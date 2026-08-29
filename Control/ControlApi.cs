@@ -3477,10 +3477,24 @@ public sealed partial class ControlApi : IDisposable
             var dir = Directory.GetCurrentDirectory();
             var pid = Environment.ProcessId;
 
+            // Restart with the arguments this copy was given, not without them.
+            //
+            // They were being dropped, and the config path is among them. The
+            // restarted server then re-ran the "which server.json is there"
+            // probe from scratch, and whichever it settled on decides where
+            // users.json is read from — so a Restart could come back as a
+            // server with no accounts, offering to create an administrator.
+            // The working directory alone is not the same instruction.
+            var args = Environment.GetCommandLineArgs().Skip(1)
+                .Select(a => "'" + a.Replace("'", "''") + "'")
+                .ToArray();
+            var argList = args.Length > 0 ? " -ArgumentList " + string.Join(",", args) : "";
+
             var script =
                 $"Wait-Process -Id {pid} -Timeout 60 -ErrorAction SilentlyContinue; " +
                 "Start-Sleep -Milliseconds 800; " +
-                $"Start-Process -FilePath '{exe.Replace("'", "''")}' -WorkingDirectory '{dir.Replace("'", "''")}'";
+                $"Start-Process -FilePath '{exe.Replace("'", "''")}' " +
+                $"-WorkingDirectory '{dir.Replace("'", "''")}'{argList}";
 
             var psi = new System.Diagnostics.ProcessStartInfo("powershell")
             {

@@ -111,9 +111,32 @@ public sealed class UserStore
 
     public string FilePath => _file;
 
+    /// <summary>
+    /// Whether an accounts file was actually read at startup. Guards Save()
+    /// from writing a fresh list over one this process never loaded — see
+    /// there for why that is the difference between "the accounts are
+    /// somewhere else" and "the accounts are gone".
+    /// </summary>
+    private bool _loadedFromDisk;
+
     private void Load()
     {
-        if (!File.Exists(_file)) return;
+        if (!File.Exists(_file))
+        {
+            // Said out loud, and with the path in it.
+            //
+            // This returned in silence, and silence is what made an account
+            // list that had gone missing impossible to diagnose: a good start
+            // logs "loaded N user account(s)", a bad one logged nothing at
+            // all, and the dashboard simply offered to create the first
+            // administrator as though the server were new. The usual cause is
+            // not a deleted file but a server started against a different
+            // directory, so the line that matters is which one it looked in.
+            Log.Warn("auth", $"no accounts file at {_file} — this server will ask for a new " +
+                             "administrator. If it had accounts, it has been started against " +
+                             "the wrong folder; check the config path rather than creating one.");
+            return;
+        }
         try
         {
             var doc = JsonSerializer.Deserialize<Document>(File.ReadAllText(_file), JsonOpts);
@@ -123,6 +146,7 @@ public sealed class UserStore
                 if (string.IsNullOrEmpty(u.Id)) u.Id = NewId();
                 u.Keys ??= new List<ApiKeyRecord>();
             }
+            _loadedFromDisk = true;
             Log.Info("auth", $"loaded {_users.Count} user account(s) from {Path.GetFileName(_file)}");
 
             // A server with no Server Admin has features nobody can reach: the
@@ -154,12 +178,60 @@ public sealed class UserStore
 
     private void Save()
     {
-        var json = JsonSerializer.Serialize(new Document { Users = _users }, JsonOpts);
-        var tmp = $"{_file}.{Environment.CurrentManagedThreadId}.tmp";
-        File.WriteAllText(tmp, json);
-        File.Move(tmp, _file, overwrite: true);
-        // password hashes and key digests: this account's business alone
-        Services.SecretFile.Protect(_file);
+        // Never write over an accounts file this process did not read.
+        //
+        // The sequence that costs somebody their server: it starts against a
+        // folder with no users.json (a bad upgrade, the wrong config path),
+        // loads nothing, and the dashboard offers to create the first
+        // administrator — because to the server that is exactly what a new
+        // install looks like. Up to that point the real file is untouched and
+        // the mistake is recoverable. The moment anyone accepts the offer,
+        // this method writes one account over whatever is at that path, and it
+        // is not recoverable any more.
+        //
+        // It also covers the opposite order: an operator who spots the problem
+        // and copies users.json back while the server is running. Load runs
+        // once, in the constructor, so the in-memory list is still empty and
+        // the next save would erase what they just restored.
+        //
+        // So if a file has appeared where this store never found one, it is
+        // somebody else's account list. Keep it.
+        if (!_loadedFromDisk && File.Exists(_file))
+        {
+            var aside = $"{_file}.found-{DateTime.UtcNow:yyyyMMdd-HHmmss}";
+            try
+            {
+                File.Copy(_file, aside, overwrite: true);
+                Log.Warn("auth", $"an accounts file appeared at {_file} that this server never " +
+                                 $"loaded — copied to {Path.GetFileName(aside)} before writing. " +
+                                 "If accounts went missing, that copy is them.");
+            }
+            catch (Exception ex)
+            {
+                Log.Error("auth", $"could not preserve the accounts file already at {_file}: {ex.Message}");
+            }
+        }
+
+        try
+        {
+            var json = JsonSerializer.Serialize(new Document { Users = _users }, JsonOpts);
+            var tmp = $"{_file}.{Environment.CurrentManagedThreadId}.tmp";
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, _file, overwrite: true);
+            _loadedFromDisk = true;   // this process owns the file from here on
+            // password hashes and key digests: this account's business alone
+            Services.SecretFile.Protect(_file);
+        }
+        catch (Exception ex)
+        {
+            // Said before it is rethrown. A save that fails leaves an account
+            // that works until the next restart and then is simply not there,
+            // which reads as the account having been deleted by something —
+            // and nothing in the log said the write had failed at all.
+            Log.Error("auth", $"could not write {_file}: {ex.Message} — " +
+                              "changes to accounts will not survive a restart");
+            throw;
+        }
     }
 
     private static string NewId() => Convert.ToHexString(RandomNumberGenerator.GetBytes(8)).ToLowerInvariant();

@@ -45,6 +45,26 @@ if (-not (Test-Path -LiteralPath $payload)) {
 
 $exeName  = 'j0kers-media-server.exe'
 
+# What makes a folder somebody's server, rather than an empty directory.
+#
+# Used in two places that must agree: finding an existing install below, and
+# deciding upgrade-vs-new further down. They did not agree before — the search
+# threw away any folder whose exe was missing, while the upgrade test knew
+# perfectly well that a folder full of accounts and channels is an install
+# whether or not the program is still sitting in it. So a quarantined exe sent
+# the search home empty, the script installed a fresh server at the default
+# path, and repointed the desktop shortcut at it. Nothing was deleted; the
+# accounts were simply somewhere the server no longer looked.
+$DataNames = @('users.json', 'server.json', 'channels.json', 'signing.key',
+               'settings.json', 'library.json', 'providers.json')
+
+function Test-InstallHere($dir) {
+    if (-not $dir -or -not (Test-Path -LiteralPath $dir)) { return $false }
+    if (Test-Path -LiteralPath (Join-Path $dir $exeName)) { return $true }
+    foreach ($n in $DataNames) { if (Test-Path -LiteralPath (Join-Path $dir $n)) { return $true } }
+    return $false
+}
+
 # Find a copy already on this machine when the default target has none. An
 # earlier portable build was unpacked wherever the user chose, so installing
 # blindly into the default would make a second, empty install beside the real
@@ -70,7 +90,9 @@ if (-not $PSBoundParameters.ContainsKey('TargetDir') -and
             } catch { }
         }
     }
-    $found = @($found | Where-Object { $_ -and (Test-Path -LiteralPath (Join-Path $_ $exeName)) } | Select-Object -Unique)
+    # A shortcut records where the program was, and that record outlives the
+    # program — so a folder named by one still counts even with the exe gone.
+    $found = @($found | Where-Object { Test-InstallHere $_ } | Select-Object -Unique)
 
     if ($found.Count -eq 1) {
         Write-Host ('Found an existing installation:  ' + $found[0]) -ForegroundColor Yellow
@@ -91,25 +113,75 @@ if (-not $PSBoundParameters.ContainsKey('TargetDir') -and
         for ($i = 0; $i -lt $found.Count; $i++) { Write-Host ("  [{0}] {1}" -f ($i + 1), $found[$i]) }
         Write-Host ("  [0] none of these - install to {0}" -f $TargetDir)
         Write-Host ''
+        # Not choosing must not mean "install a new one anyway".
+        #
+        # Both of these used to fall straight through with $TargetDir still at
+        # the default, which installed a complete new server there and then
+        # repointed the desktop shortcut at it — so the answer "I don't know
+        # which" produced a server with no accounts and an icon that opened it.
+        # Refusing costs one flag; guessing costs the account list.
         if ($Quiet) {
-            Write-Host 'Ambiguous, and running unattended: none chosen. Re-run with'
+            Write-Host 'Ambiguous, and running unattended: nothing was changed.' -ForegroundColor Yellow
+            Write-Host 'Re-run naming the one you mean, or a new folder for a fresh install:'
             Write-Host '  Install.cmd -TargetDir "<the folder you mean>"'
             Write-Host ''
+            return
+        }
+        $ans = Read-Host 'Which one should be upgraded?'
+        if ($ans -match '^\d+$' -and [int]$ans -ge 1 -and [int]$ans -le $found.Count) {
+            $TargetDir = $found[[int]$ans - 1]
+        }
+        elseif ($ans -eq '0') {
+            Write-Host ('Installing fresh to ' + $TargetDir) -ForegroundColor Yellow
         }
         else {
-            $ans = Read-Host 'Which one should be upgraded?'
-            if ($ans -match '^\d+$' -and [int]$ans -ge 1 -and [int]$ans -le $found.Count) {
-                $TargetDir = $found[[int]$ans - 1]
-            }
+            Write-Host 'Nothing chosen - nothing was changed.' -ForegroundColor Yellow
+            Write-Host ''
+            return
         }
+    }
+    elseif (Test-InstallHere $TargetDir) {
+        # The default folder holds data but no program — the quarantined-exe
+        # case. Upgrade it rather than treating it as bare ground.
+        Write-Host ('An installation with no program file is here:  ' + $TargetDir) -ForegroundColor Yellow
+        Write-Host 'Its accounts and settings are being kept.'
+        Write-Host ''
     }
 }
 
 $targetExe = Join-Path $TargetDir $exeName
-$upgrade  = Test-Path -LiteralPath $targetExe
+
+# Is there an install here already? Asked of the DATA, not of the program.
+#
+# This used to be Test-Path $targetExe alone, and that is the wrong question,
+# because the exe is the one file in the folder that can go missing on its own.
+# A virus scanner quarantines it; somebody deletes it to force a clean install;
+# or - worst, because this script causes it - Copy-Payload renames a locked exe
+# aside and then fails to write the new one, leaving the folder with all of the
+# user's data and no program.
+#
+# In every one of those the next run called itself a "new install" and copied
+# the payload's defaults straight over the real server.json and providers.json.
+# Measured: an install holding accounts, channels, a signing key and converted
+# media was reported as "new install", and its configuration - server name,
+# ports, TLS, library roots - was replaced with the shipped defaults.
+#
+# Any of these means somebody's server has lived here, whether or not the
+# program is still present.
+$dataHere = @('users.json', 'server.json', 'channels.json', 'signing.key',
+              'settings.json', 'library.json', 'providers.json') |
+            Where-Object { Test-Path -LiteralPath (Join-Path $TargetDir $_) }
+$exeHere  = Test-Path -LiteralPath $targetExe
+$upgrade  = $exeHere -or $dataHere.Count -gt 0
 
 Write-Host ("Target:  " + $TargetDir)
 Write-Host ("Mode:    " + $(if ($upgrade) { 'upgrade - existing settings and data are kept' } else { 'new install' }))
+if ($upgrade -and -not $exeHere) {
+    Write-Host ''
+    Write-Host ('  Note: the program was missing but ' + $dataHere.Count +
+                ' data file(s) are here, so this is an upgrade, not a new install.') -ForegroundColor Yellow
+    Write-Host '  Your accounts and settings are being kept.' -ForegroundColor Yellow
+}
 Write-Host ''
 
 if (-not $Quiet) {
@@ -150,6 +222,26 @@ foreach ($old in Get-ChildItem -LiteralPath $TargetDir -Filter '*.replaced-*' -E
     try { Remove-Item -LiteralPath $old.FullName -Force -ErrorAction Stop } catch { }
 }
 
+# The accounts, copied aside before anything else is touched.
+#
+# Nothing below is supposed to be able to harm them - users.json is not in the
+# payload, and the copy loop now refuses to overwrite any existing data file.
+# This is the belt to that pair of braces: accounts are the one thing here that
+# cannot be rebuilt from the media on disk. Everything else an upgrade could
+# spoil is a preference; a lost account list is somebody locked out of their
+# own server with no way back in.
+#
+# One fixed name, so it is the state before the last upgrade rather than a pile
+# that grows with every install.
+$usersFile = Join-Path $TargetDir 'users.json'
+if (Test-Path -LiteralPath $usersFile) {
+    try {
+        Copy-Item -LiteralPath $usersFile -Destination "$usersFile.previous" -Force -ErrorAction Stop
+        Write-Step 'Accounts backed up to users.json.previous before upgrading.'
+    }
+    catch { Write-Step ('Could not back up users.json: ' + $_.Exception.Message) }
+}
+
 <#
   Copies one payload file over whatever is there, and copes with the file
   still being locked.
@@ -166,6 +258,7 @@ function Copy-Payload($source, $dest) {
         try { Copy-Item -LiteralPath $source -Destination $dest -Force -ErrorAction Stop; return $true }
         catch { Start-Sleep -Milliseconds 400 }
     }
+    $aside = $null
     try {
         if (Test-Path -LiteralPath $dest) {
             $aside = "$dest.replaced-" + (Get-Random)
@@ -175,6 +268,18 @@ function Copy-Payload($source, $dest) {
         return $true
     }
     catch {
+        # Put the old one back. Renaming aside and then failing to write the
+        # replacement left the folder with no program at all beside a full set
+        # of the user's data - and the next run of this script read that as a
+        # new install and copied its defaults over the lot. A failed upgrade
+        # must leave the previous version running, not a hole.
+        if ($aside -and (Test-Path -LiteralPath $aside) -and -not (Test-Path -LiteralPath $dest)) {
+            try {
+                Move-Item -LiteralPath $aside -Destination $dest -Force -ErrorAction Stop
+                Write-Step ("Restored the previous " + (Split-Path -Leaf $dest) + " after a failed replace.")
+            }
+            catch { }
+        }
         Write-Step ("Could not replace " + (Split-Path -Leaf $dest) + ": " + $_.Exception.Message)
         return $false
     }
@@ -184,7 +289,14 @@ $copied = 0; $kept = 0; $failed = 0
 foreach ($item in Get-ChildItem -LiteralPath $payload -File) {
     $dest = Join-Path $TargetDir $item.Name
     # Not the program, and already there: it belongs to the running server.
-    if ($upgrade -and ($ProgramFiles -notcontains $item.Name) -and (Test-Path -LiteralPath $dest)) {
+    #
+    # This no longer asks whether we decided this was an upgrade. The payload's
+    # server.json and providers.json are SEED files - they exist to give a
+    # first install something to start from, and there is no circumstance in
+    # which writing one over a file somebody's server is already using is
+    # right. Seed if absent, never replace. That was the whole of the bug
+    # above: one misjudged $upgrade and a real configuration was gone.
+    if (($ProgramFiles -notcontains $item.Name) -and (Test-Path -LiteralPath $dest)) {
         $kept++
         continue
     }
