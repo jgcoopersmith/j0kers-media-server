@@ -107,11 +107,38 @@ public static class WindowsUrlAcl
             // A reservation belongs to a scheme, and these ports have just
             // changed theirs. The leftover http one is not merely useless:
             // it holds the port, so the https registration is refused with a
-            // conflict — which is also why the probe below cannot be trusted
-            // to spot a missing https reservation, and why TLS ports ask for
-            // one unconditionally.
-            foreach (var p in aclPorts)
+            // conflict — which is also why the *bind probe* cannot be trusted
+            // to spot a missing https reservation.
+            //
+            // But the listing can. NeedsAcl is a probe: it tries to bind and
+            // reads the error, and a conflict is not the error it recognises.
+            // ShowUrlAcls just asks Windows what is reserved, which is exactly
+            // the question, and the branch below already trusts it for the
+            // mirror case. Asking it here is what turns "every start" into
+            // "the first start".
+            //
+            // This matters more than it looks. A settled TLS server had these
+            // queued unconditionally, so every single launch raised the
+            // elevation prompt and spent about three seconds in netsh redoing
+            // reservations that were already exactly right — measured on this
+            // user's own log, 3.1 of a 3.7 second startup. Nothing else in
+            // startup comes close.
+            //
+            // If the listing cannot be read the set comes back empty and every
+            // port is treated as unsettled, which is precisely the old
+            // behaviour — so the failure mode of this shortcut is the thing it
+            // replaced, not a server that will not bind.
+            var reserved = ShowUrlAcls();
+            var settled = reserved.Length > 0
+                ? aclPorts.Where(p => reserved.Contains($"https://+:{p}/", StringComparison.OrdinalIgnoreCase)).ToHashSet()
+                : new HashSet<int>();
+
+            if (settled.Count > 0)
+                Log.Debug("main", $"https reservation already held for port(s) {string.Join(", ", settled)} — not asking again");
+
+            foreach (var p in aclPorts.Where(p => !settled.Contains(p)))
                 commands.Add($"netsh http delete urlacl url=http://+:{p}/");
+            aclPorts = aclPorts.Where(p => !settled.Contains(p)).ToList();
         }
         else
         {

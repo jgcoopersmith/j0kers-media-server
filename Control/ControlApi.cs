@@ -56,6 +56,13 @@ public sealed partial class ControlApi : IDisposable
     /// </summary>
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _openPages = new();
 
+    /// <summary>
+    /// When the live-link count last fell to zero, or null while any page is
+    /// open. The sweep turns this into a shutdown once it has stood for the
+    /// grace period.
+    /// </summary>
+    private DateTime? _zeroSinceUtc;
+
     /// <summary>Distinct addresses currently holding a page open.</summary>
     private IEnumerable<string> OpenPageClients() =>
         _openPages.Values.Distinct().OrderBy(a => a, StringComparer.Ordinal);
@@ -295,6 +302,7 @@ public sealed partial class ControlApi : IDisposable
         _subtitles = ffmpeg is not null ? new Media.SubtitleManager(ffmpeg) : null;
         _requestShutdown = requestShutdown;
         StartIdleShutdownWatch();
+        StartLinkSweep();
         _playlists = new Media.PlaylistStore(baseDirectory);
         _library = new Media.LibraryStore(baseDirectory);
         _links = new Media.StreamLinks(baseDirectory);
@@ -484,6 +492,47 @@ public sealed partial class ControlApi : IDisposable
         return viewers > 0 ? $"{viewers} viewer(s) streaming" : null;
     }
 
+    private Timer? _linkSweepTimer;
+
+    /// <summary>
+    /// Shuts the server down once no page has been open for the grace period.
+    ///
+    /// The decision moved here from the moment a link ended, because a link
+    /// ending no longer means what it used to. Links are closed and remade on
+    /// purpose (see LinkLifetime), so the count dips to zero routinely and
+    /// only staying at zero means anything. A browser that is still there
+    /// reconnects within about half a second and clears the mark; one that has
+    /// gone cannot.
+    /// </summary>
+    private void StartLinkSweep()
+    {
+        if (_requestShutdown is null) return;
+        _linkSweepTimer = new Timer(_ =>
+        {
+            try
+            {
+                if (!_config.ShutdownOnClose || !_sawDashboard) return;
+                if (Volatile.Read(ref _liveDashboards) > 0) return;
+                DateTime? since;
+                lock (_shutdownLock) since = _zeroSinceUtc;
+                if (since is null || DateTime.UtcNow - since.Value < TimeSpan.FromMilliseconds(CloseGraceMs))
+                    return;
+
+                lock (_shutdownLock)
+                {
+                    if (_zeroSinceUtc is null) return;   // something reconnected
+                    _zeroSinceUtc = null;
+                }
+                _linkSweepTimer?.Dispose();
+                _linkSweepTimer = null;
+                Log.Info("control", "no page has been open for "
+                                    + (CloseGraceMs / 1000) + "s — shutting down");
+                _requestShutdown();
+            }
+            catch (Exception ex) { Log.Warn("control", "link sweep failed: " + ex.Message); }
+        }, null, dueTime: 1000, period: 1000);
+    }
+
     private void StartIdleShutdownWatch()
     {
         if (_requestShutdown is null) return;
@@ -499,6 +548,17 @@ public sealed partial class ControlApi : IDisposable
             Services.KeepAwake.Busy(converting);
 
             if (!_config.ShutdownOnClose || !_sawDashboard) return;
+            // A page is open, and that is now a fact rather than a hope. It
+            // used to be neither: a link was held until a write failed, so an
+            // immortal one meant this check could never be reached — which is
+            // why this watch was written to ignore the count and go by silence
+            // instead. Links expire and are remade now, so a count above zero
+            // cannot be a ghost, and the sweep owns the zero case.
+            //
+            // It has to defer, too. The sign-in page holds a link and does not
+            // poll anything, so going by silence alone shut the server down
+            // half a minute after somebody opened it and simply looked at it.
+            if (Volatile.Read(ref _liveDashboards) > 0) return;
             if (DateTime.UtcNow - _lastSeenUtc < DashboardGoneAfter) return;
             // Converting counts as being in use just as much as watching does.
             // Without this, locking the screen stopped the work: the browser
@@ -586,6 +646,11 @@ public sealed partial class ControlApi : IDisposable
         res.SendChunked = true;
 
         var open = Interlocked.Increment(ref _liveDashboards);
+        // A browser that can open a link is a browser that exists. This is the
+        // only proof of life the server accepts now, and unlike a successful
+        // write it cannot be produced by a socket nobody is holding.
+        lock (_shutdownLock) _zeroSinceUtc = null;
+        _lastSeenUtc = DateTime.UtcNow;
         // Who is holding it, so the log can name them when a close does not
         // stop the server. A page on another machine keeping it alive is
         // correct behaviour and completely invisible without this.
@@ -595,29 +660,31 @@ public sealed partial class ControlApi : IDisposable
         NoteActivity();
         Log.Info("control", $"page opened from {_openPages[holder]} ({open} now open)");
 
-        // "retry" is what the browser waits before reopening after a drop.
-        // Half a second, so a blip reconnects well inside the grace period
-        // below rather than looking like a close for the default three.
+        // "retry" is what the browser waits before reopening. Half a second,
+        // which matters more than it looks: this link is deliberately closed
+        // and remade, so the reconnect happens constantly rather than only
+        // after a fault.
         var hello = System.Text.Encoding.ASCII.GetBytes("retry: 500\n\n");
         var beat = System.Text.Encoding.ASCII.GetBytes(":\n\n");
+        // The lifetime is enforced by cancelling, not by checking the clock
+        // between writes. A write to a socket whose far end has gone does not
+        // reliably fail — that is the whole reason this design exists — and it
+        // does not reliably RETURN either: it can simply never complete. A
+        // loop that re-reads the time only after each write would then never
+        // get to look. Cancellation reaches into the pending write itself, so
+        // the link ends on time whatever the socket is doing.
+        using var life = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+        life.CancelAfter(LinkLifetime);
+        var tok = life.Token;
         try
         {
-            await res.OutputStream.WriteAsync(hello, _cts.Token);
-            await res.OutputStream.FlushAsync(_cts.Token);
-            while (!_cts.IsCancellationRequested)
+            await res.OutputStream.WriteAsync(hello, tok);
+            await res.OutputStream.FlushAsync(tok);
+            while (!tok.IsCancellationRequested)
             {
-                // Short, because this interval is the detection time: the
-                // write after the browser has gone is the one that fails.
-                await Task.Delay(500, _cts.Token);
-                await res.OutputStream.WriteAsync(beat, _cts.Token);
-                await res.OutputStream.FlushAsync(_cts.Token);
-                // A beat that got through is proof the page is there, which
-                // is what the silence watch below is really asking. It keeps
-                // asking the polling, and the polling stops behind a lock
-                // screen or in a backgrounded tab while this connection does
-                // not — so without this line, locking the screen still looked
-                // like a closed dashboard half a minute later.
-                _lastSeenUtc = DateTime.UtcNow;
+                await Task.Delay(500, tok);
+                await res.OutputStream.WriteAsync(beat, tok);
+                await res.OutputStream.FlushAsync(tok);
             }
         }
         catch
@@ -628,10 +695,14 @@ public sealed partial class ControlApi : IDisposable
         {
             var left = Interlocked.Decrement(ref _liveDashboards);
             _openPages.TryRemove(holder, out _);
+            // Note the moment the last one went, and let the sweep below
+            // decide. Deciding here cannot work any more: a link that ends
+            // because its lifetime ran out looks exactly like one that ended
+            // because the browser closed, and the difference is only knowable
+            // a moment later, by whether anything reconnected.
             if (left <= 0 && !_cts.IsCancellationRequested)
             {
-                Log.Info("control", "last page closed");
-                DashboardWentAway();
+                lock (_shutdownLock) _zeroSinceUtc ??= DateTime.UtcNow;
             }
             else if (!_cts.IsCancellationRequested)
             {
@@ -691,11 +762,45 @@ public sealed partial class ControlApi : IDisposable
 
     /// <summary>
     /// How long after the last dashboard goes before the server acts. Long
-    /// enough that a refresh — which drops the link and reopens it — is not
-    /// a close, and short enough that closing the browser is over before
-    /// anyone wonders whether it worked.
+    /// enough that a reconnect — a refresh, or the deliberate rotation below —
+    /// is not mistaken for a close, and short enough that closing the browser
+    /// is over before anyone wonders whether it worked.
+    ///
+    /// Three seconds rather than the original one and a half, because links
+    /// now rotate on purpose and the count dips to zero every time one does.
+    /// The browser comes back in about half a second; the rest is margin for
+    /// a machine that is busy.
     /// </summary>
-    private const int CloseGraceMs = 1500;
+    private const int CloseGraceMs = 3000;
+
+    /// <summary>
+    /// How long one live link is allowed to last before the server closes it
+    /// and makes the browser open another.
+    ///
+    /// This exists because the previous design could not tell a closed browser
+    /// from a socket that merely never reports being closed, and quietly bet
+    /// everything on the difference. A page was counted as present until a
+    /// 3-byte heartbeat write FAILED — the server's own write, to a socket it
+    /// cannot see the far end of. Whenever that write kept succeeding after
+    /// the browser had gone (TLS record buffering, an intermediary holding the
+    /// connection, a half-open socket that never surfaces the reset), the link
+    /// was immortal: the count never fell, so the close was never noticed.
+    ///
+    /// And the same beat refreshed the timestamp the thirty-second silence
+    /// watch reads, so the fallback that existed for exactly this was
+    /// suppressed by the very thing that had failed. One assumption, both
+    /// safety nets. That is why "closing the browser does not stop it"
+    /// survived several fixes: every one of them trusted the same write.
+    ///
+    /// So liveness is no longer something the server tells itself. The link is
+    /// closed on a timer and a living browser proves it is living by opening
+    /// another — which a closed one cannot do, whatever the socket says. It
+    /// costs one request a minute per open page.
+    /// </summary>
+    /// Deliberately well inside DashboardGoneAfter below: every reconnect is
+    /// also what refreshes the timestamp that watch reads, so a link must be
+    /// remade comfortably before that watch would give up on the page.
+    private static readonly TimeSpan LinkLifetime = TimeSpan.FromSeconds(20);
 
     /// <summary>
     /// The moment of deciding, once the grace has run out. Nothing is asked
@@ -5012,6 +5117,7 @@ public sealed partial class ControlApi : IDisposable
         // services that are being torn down: an exception on a timer thread
         // takes the process with it rather than being caught anywhere.
         try { _idleShutdownTimer?.Dispose(); _idleShutdownTimer = null; } catch { }
+        try { _linkSweepTimer?.Dispose(); _linkSweepTimer = null; } catch { }
         try { Services.KeepAwake.Busy(false); } catch { }   // let the machine sleep again
         lock (_shutdownLock)
         {
