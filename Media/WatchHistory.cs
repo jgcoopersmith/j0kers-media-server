@@ -1,4 +1,4 @@
-using J0kersMediaServer.Logging;
+﻿using J0kersMediaServer.Logging;
 
 namespace J0kersMediaServer.Media;
 
@@ -32,6 +32,35 @@ public sealed class WatchHistory
         public DateTime StartedUtc { get; set; }
         /// <summary>How many times it has been played, counting this one.</summary>
         public int Plays { get; set; } = 1;
+
+        /// <summary>
+        /// How far in the viewer had got, in seconds, so it can be picked up
+        /// where it was left. Zero means "from the start" - either never
+        /// reported, or watched to the end and deliberately cleared.
+        /// </summary>
+        public double PositionSeconds { get; set; }
+
+        /// <summary>
+        /// The length of the thing being watched, as the player reported it.
+        /// Kept alongside the position because a position on its own cannot
+        /// say whether it means "two minutes in" or "two minutes from the
+        /// end", and the difference decides whether this is worth resuming.
+        /// </summary>
+        public double DurationSeconds { get; set; }
+
+        /// <summary>When the position was last reported.</summary>
+        public DateTime PositionUtc { get; set; }
+
+        /// <summary>
+        /// Worth offering a resume for. Not within the first half-minute,
+        /// which is a false start rather than progress, and not in the last
+        /// stretch, where the film is effectively over and "resume" would
+        /// drop somebody into the credits.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonIgnore]
+        public bool CanResume =>
+            PositionSeconds >= 30 &&
+            (DurationSeconds <= 0 || PositionSeconds < DurationSeconds * 0.97);
     }
 
     private readonly string _file;
@@ -97,6 +126,12 @@ public sealed class WatchHistory
                 if (stream.Length > 0) existing.Stream = stream;
                 if (existing.Path.Length > 0) existing.Kind = "file";
                 if (name.Length > 0) existing.Name = name;
+                // Starting it again from the beginning is what clears the
+                // resume point; simply being recorded again is not. Prepare
+                // and then watch arrive seconds apart as one viewing, and
+                // wiping the position on the second of them would lose the
+                // place every time somebody reopened a film.
+                if (again) { existing.PositionSeconds = 0; existing.DurationSeconds = 0; }
             }
             else
             {
@@ -118,6 +153,39 @@ public sealed class WatchHistory
                 _entries.RemoveRange(Capacity, _entries.Count - Capacity);
             }
             Persist();
+        }
+    }
+
+    /// <summary>
+    /// Records how far through something a viewer has got.
+    ///
+    /// Called by the player every few seconds and when it pauses or closes,
+    /// keyed the same way a play is - by path or by stream, whichever the
+    /// caller has. Silently does nothing for something never played, which is
+    /// the right answer: a position without a viewing is not a thing to
+    /// resume.
+    ///
+    /// A position at or past the end clears itself rather than being stored.
+    /// Finishing a film should leave it playable from the start again, not
+    /// offer to resume it three seconds from the credits.
+    /// </summary>
+    public bool Position(string user, string key, double seconds, double duration)
+    {
+        if (string.IsNullOrWhiteSpace(key) || seconds < 0) return false;
+        lock (_lock)
+        {
+            var e = _entries.FirstOrDefault(x =>
+                (x.User.Length == 0 || string.Equals(x.User, user, StringComparison.OrdinalIgnoreCase)) &&
+                (x.Path.Equals(key, StringComparison.OrdinalIgnoreCase) ||
+                 x.Stream.Equals(key, StringComparison.OrdinalIgnoreCase)));
+            if (e is null) return false;
+
+            var finished = duration > 0 && seconds >= duration * 0.97;
+            e.PositionSeconds = finished ? 0 : seconds;
+            e.DurationSeconds = finished ? 0 : duration;
+            e.PositionUtc = DateTime.UtcNow;
+            Persist();
+            return true;
         }
     }
 

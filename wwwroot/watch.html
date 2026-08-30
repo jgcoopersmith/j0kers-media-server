@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -73,17 +73,52 @@
   const stream = __NAME_JS__;
   // recordings start at the beginning; live channels join the edge
   const live = /^ch-/i.test(stream);
+
+  /* Where to pick up, handed over in the fragment by whoever opened this tab.
+     A fragment because it never reaches the server: this page is served from
+     the media port and the history lives behind the control port, so the page
+     cannot ask for its own resume point without a cross-origin request. The
+     dashboard already knows it, and it is the thing that opens this tab. */
+  const resumeAt = (function () {
+    const m = /(?:^|[#&])t=(\d+(?:\.\d+)?)/.exec(location.hash || "");
+    return m && !live ? parseFloat(m[1]) : 0;
+  })();
+
   if (!live) {
     v.addEventListener("playing", function once() {
       v.removeEventListener("playing", once);
-      if (v.currentTime > 2) { try { v.currentTime = 0; } catch (e) {} }
+      // Snap to the start only when there is nowhere else to be. Without the
+      // guard this fought the resume and always won.
+      if (!resumeAt && v.currentTime > 2) { try { v.currentTime = 0; } catch (e) {} }
     });
   }
+
+  /* Tell the opener how far through we are, so it can remember it. Same
+     reason as above, in the other direction: this page cannot POST to the
+     control port, but it can hand the number to the page that can. The
+     opener checks where the message came from before believing it. */
+  function reportPosition() {
+    if (live || !window.opener || window.opener.closed) return;
+    const t = v.currentTime, d = v.duration;
+    if (!isFinite(t) || t < 1) return;
+    try {
+      window.opener.postMessage({
+        j0kers: "position",
+        stream: stream,
+        seconds: t,
+        duration: isFinite(d) ? d : 0,
+      }, "*");
+    } catch (e) { /* opener gone or blocked; the position is not worth an error */ }
+  }
+  setInterval(reportPosition, 10000);
+  v.addEventListener("pause", reportPosition);
+  window.addEventListener("pagehide", reportPosition);
+
   let hls = null;
   if (window.Hls && Hls.isSupported()) {
     // startPosition is what actually pins the initial seek;
     // startLoad(0) alone still lets hls.js pick its own spot
-    hls = new Hls(live ? {} : { startPosition: 0 });
+    hls = new Hls(live ? {} : { startPosition: resumeAt || 0 });
     hls.loadSource(src);
     hls.attachMedia(v);
     // A stream's renditions are only known once the playlist is

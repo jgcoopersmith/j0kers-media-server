@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -67,6 +67,57 @@
   // corrected from the playlist itself, which actually knows.
   let live = /\/ch-[^/]*\//.test(src) || src.indexOf("/api/tv/") === 0;
 
+  /* Where to pick up, handed over in the fragment by whoever opened this tab.
+     A fragment because it never reaches the server, and it comes from the
+     opener because this page may be served from either port while the history
+     lives behind one of them - the dashboard already knows the number and is
+     the thing that opens this tab, so it hands it over rather than this page
+     asking. Live channels join the edge and are never resumed. */
+  const resumeAt = (function () {
+    const m = /(?:^|[#&])t=(\d+(?:\.\d+)?)/.exec(location.hash || "");
+    return m ? parseFloat(m[1]) : 0;
+  })();
+
+  /* Report back, so the place gets remembered. Same reason in the other
+     direction: this page cannot be sure it can reach the control API, but the
+     page that opened it can. Sent while playing, when paused, and once more on
+     the way out - the last of those is the one that matters, because closing
+     the tab is how watching usually ends. */
+  function reportPosition() {
+    if (live || !window.opener || window.opener.closed) return;
+    const t = v.currentTime, d = v.duration;
+    if (!isFinite(t) || t < 1) return;
+    try {
+      window.opener.postMessage({
+        j0kers: "position",
+        stream: streamKeyFromSrc(src),
+        seconds: t,
+        duration: isFinite(d) ? d : 0,
+      }, "*");
+    } catch (e) { /* opener gone; a lost position is not worth an error */ }
+  }
+
+  /* The stream id out of the playlist URL - the same key the history is
+     stored under. "/vod-film-1a2b/index.m3u8" -> "vod-film-1a2b". */
+  function streamKeyFromSrc(u) {
+    const m = /\/([^/?#]+)\/[^/?#]*\.m3u8/.exec(u || "");
+    return m ? decodeURIComponent(m[1]) : "";
+  }
+
+  setInterval(reportPosition, 10000);
+  v.addEventListener("pause", reportPosition);
+  window.addEventListener("pagehide", reportPosition);
+
+  /* Seek once, when there is enough loaded to seek within. Doing it before
+     the media is ready is silently ignored, which is how a resume turns into
+     "it started from the beginning again". */
+  if (resumeAt > 0) {
+    v.addEventListener("loadedmetadata", function once() {
+      v.removeEventListener("loadedmetadata", once);
+      try { v.currentTime = resumeAt; } catch (e) {}
+    });
+  }
+
   // hls.js first. Chromium answers "maybe" to the native HLS
   // question and then cannot play it — asking politely gets a
   // black screen and a MEDIA_ELEMENT_ERROR. Native is the
@@ -74,6 +125,9 @@
   if (window.Hls && Hls.isSupported()) {
     const hls = new Hls({
       enableWorker: true,
+      // pins the initial seek; without it hls.js picks its own spot and the
+      // resume above ends up fighting it
+      startPosition: resumeAt > 0 ? resumeAt : -1,
       // a channel left on all evening keeps every played-out
       // second otherwise; half an hour is a generous DVR
       backBufferLength: 1800,

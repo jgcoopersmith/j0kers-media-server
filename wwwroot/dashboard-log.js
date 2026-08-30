@@ -1,4 +1,4 @@
-/* The three read-outs of what the server has been doing: the log panel, the
+﻿/* The three read-outs of what the server has been doing: the log panel, the
    recently-watched list, and terminating a session from the sessions table.
    Split out of dashboard.html; see dashboard-core.js for why every function
    here stays global. */
@@ -178,7 +178,9 @@ function renderHistory() {
   // again until the page was reloaded.)
   // the rendered "ago" text, not the timestamp — it changes on its own
   const sig = JSON.stringify(lastHistory.map(e =>
-    [e.name, fmtSince(e.startedUtc), e.plays, e.missing, e.viaDlna])) + "|" + currentMediaPath + "|" + currentHlsStream;
+    [e.name, fmtSince(e.startedUtc), e.plays, e.missing, e.viaDlna,
+     // the resume point too, or a row that has moved on never repaints
+     e.canResume ? Math.floor((e.positionSeconds || 0) / 30) : 0])) + "|" + currentMediaPath + "|" + currentHlsStream;
   if (sig === historySig) return;
   historySig = sig;
 
@@ -193,9 +195,21 @@ function renderHistory() {
     // a TV over DLNA is nobody's account, so it would otherwise read as
     // something this user watched — the icon says where it was played
     const mark = playing ? "▶" : e.viaDlna ? "📺" : "✓";
+    /* How far in, when there is somewhere to pick up from. This is the whole
+       point of storing a position: the list is where somebody decides what to
+       carry on with, so it has to say which rows are part-watched and roughly
+       how far. Shown as time and, when the length is known, a percentage —
+       "1h 04m in (48%)" answers "is this nearly over?" and a bare timestamp
+       does not. */
+    const resume = !e.missing && e.canResume
+      ? " · ⏵ " + hmsShort(e.positionSeconds)
+        + (e.durationSeconds > 0
+            ? " in (" + Math.round(e.positionSeconds / e.durationSeconds * 100) + "%)"
+            : " in")
+      : "";
     const note = (e.missing ? " · no longer available"
       : e.plays > 1 ? " · watched ×" + e.plays
-      : "") + (e.viaDlna ? " · on a TV" : "");
+      : "") + (e.viaDlna ? " · on a TV" : "") + resume;
     // the index, not the path: an entry may be replayable by file or by
     // stream, and the row itself knows which
     h += '<option value="' + i + '"' + (e.missing ? " disabled" : "") + ">"
@@ -228,3 +242,13 @@ async function killSession(id) {
   tick();
 }
 
+
+
+/* A position said the short way: "6m", "1h 04m". Used by the recently-watched
+   list, where the row is already long and the exact second does not matter. */
+function hmsShort(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  if (h > 0) return h + "h " + String(m).padStart(2, "0") + "m";
+  return m > 0 ? m + "m" : sec + "s";
+}

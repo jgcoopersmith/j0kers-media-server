@@ -1,4 +1,4 @@
-/* The inline player: subtitle tracks, the transport controls, the hls.js
+﻿/* The inline player: subtitle tracks, the transport controls, the hls.js
    bootstrap for browsers without native HLS, and handing playback to a tab
    of its own. Split out of dashboard.html; see dashboard-core.js for why
    every function here stays global. */
@@ -329,9 +329,41 @@ const POPUP_BLOCKED_NOTE =
   "Playing here — the browser blocked the player tab. Allow pop-ups for this site to use it.";
 let playingHereBecauseBlocked = false;
 
-function playerPageUrl(src, title) {
-  return "/player?src=" + encodeURIComponent(src) + (title ? "&title=" + encodeURIComponent(title) : "");
+function playerPageUrl(src, title, resumeAt) {
+  return "/player?src=" + encodeURIComponent(src)
+    + (title ? "&title=" + encodeURIComponent(title) : "")
+    // A fragment, so it never leaves the browser: the watch page is on the
+    // media port and cannot ask the control port where it got to.
+    + (resumeAt > 0 ? "#t=" + Math.floor(resumeAt) : "");
 }
+
+/* Where this stream was left, from the history the page already polls. Only
+   offered when it is worth offering - see CanResume on the server: not the
+   first half-minute, and not the last stretch, where "resume" would drop
+   somebody into the credits. */
+function resumePointFor(stream) {
+  if (!stream || !Array.isArray(lastHistory)) return 0;
+  const e = lastHistory.find(h => h.stream === stream || h.path === stream);
+  return e && e.canResume ? (e.positionSeconds || 0) : 0;
+}
+
+/* The watch tab reports its position here, because it cannot reach the
+   control port itself. Origin-checked: this listener runs on the dashboard
+   and anything on the internet can postMessage to a window it has a handle
+   to, so a message is only believed when it came from where the media is
+   actually served. */
+window.addEventListener("message", async ev => {
+  const d = ev.data;
+  if (!d || d.j0kers !== "position" || !d.stream) return;
+  const mediaOrigins = (hlsAddresses || []).map(a => a.replace(/\/$/, ""));
+  const ok = mediaOrigins.some(o => { try { return new URL(o).origin === ev.origin; } catch { return false; } })
+          || ev.origin === location.origin;
+  if (!ok) return;
+  try {
+    await send("POST", "/api/history/position",
+               { key: d.stream, seconds: d.seconds, duration: d.duration });
+  } catch { /* a position not recorded is not worth surfacing */ }
+});
 
 /* The same page as an absolute link, for pasting into another tab or
    sending to another device.
@@ -355,8 +387,8 @@ function openPlayerTab() {
   try { return window.open("", "_blank"); } catch { return null; }
 }
 
-function pointPlayerTab(win, src, title) {
-  const url = playerPageUrl(src, title);
+function pointPlayerTab(win, src, title, resumeAt) {
+  const url = playerPageUrl(src, title, resumeAt);
   if (win && !win.closed) { win.location.replace(url); return true; }
   // no tab in hand (no gesture, or a blocker): this may still be allowed
   const fresh = window.open(url, "_blank");
@@ -371,7 +403,9 @@ async function playHls(url, startAt, tab) {
   noteWatched();
 
   // The whole point: the media plays in its own tab, not in the card.
-  if (pointPlayerTab(tab ?? openPlayerTab(), url, playerTitleFor(url))) return;
+  // pick up where this was left, unless the caller asked for a specific spot
+  const resumeAt = startAt > 0 ? startAt : resumePointFor(currentHlsStream);
+  if (pointPlayerTab(tab ?? openPlayerTab(), url, playerTitleFor(url), resumeAt)) return;
 
   // A blocked popup shouldn't mean nothing happens, so the card's player is
   // still here as the fallback — with the reason, since "it played in the

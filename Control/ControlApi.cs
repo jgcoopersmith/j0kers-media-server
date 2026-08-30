@@ -1413,6 +1413,7 @@ public sealed partial class ControlApi : IDisposable
     {
         [("GET", "/api/status")] = Sync((api, ctx, auth) => api.WriteStatus(ctx, auth)),
         [("GET", "/api/problems")] = Sync((api, ctx, _) => api.WriteProblems(ctx)),
+        [("POST", "/api/history/position")] = Sync((api, ctx, auth) => api.RecordPosition(ctx, auth)),
         [("POST", "/api/problems/clear")] = Sync((api, ctx, _) => api.ClearProblems(ctx)),
         [("GET", "/api/config")] = Sync((api, ctx, _) => api.WriteConfig(ctx)),
         [("GET", "/api/mounts")] = Sync((api, ctx, _) => api.WriteMounts(ctx)),
@@ -1514,6 +1515,31 @@ public sealed partial class ControlApi : IDisposable
     };
 
     /// <summary>GET /api/status - identity, uptime, and every live counter the dashboard polls.</summary>
+    /// <summary>
+    /// POST /api/history/position - how far through something a viewer has got.
+    ///
+    /// Read level: reporting your own progress is part of watching, and the
+    /// store only ever matches a row this caller can already see. The player
+    /// sends this every few seconds while playing and once more when it
+    /// pauses or the page goes away, so it has to be cheap and it has to
+    /// tolerate arriving for something that is no longer in the history.
+    /// </summary>
+    private void RecordPosition(HttpListenerContext ctx, AuthResult auth)
+    {
+        if (!TryReadJsonBody<PositionRequest>(ctx, out var req, out var error))
+        { BadRequest(ctx.Response, error); return; }
+        var key = req?.Key ?? "";
+        var ok = _history.Position(auth.Name, key, req?.Seconds ?? 0, req?.Duration ?? 0);
+        WriteJson(ctx.Response, 200, new { recorded = ok });
+    }
+
+    private sealed class PositionRequest
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("key")] public string? Key { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("seconds")] public double? Seconds { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("duration")] public double? Duration { get; set; }
+    }
+
     /// <summary>
     /// GET /api/problems - what has failed lately. Server Admin, the same tier
     /// as the log it is drawn from: these name file paths.
@@ -1964,6 +1990,10 @@ public sealed partial class ControlApi : IDisposable
                 kind = e.Kind,
                 plays = e.Plays,
                 startedUtc = e.StartedUtc,
+                // where the viewer got to, so the list can offer to pick it up
+                positionSeconds = (int)e.PositionSeconds,
+                durationSeconds = (int)e.DurationSeconds,
+                canResume = e.CanResume,
                 // empty = watched with no account, which today means
                 // a television over DLNA; the list says so rather
                 // than leaving it looking like the caller's own play
