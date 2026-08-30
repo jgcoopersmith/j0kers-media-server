@@ -143,6 +143,33 @@ if dotnet publish J0kersMediaServer.csproj -c Release -r win-x64 --self-containe
     chmod u+w "$exe" 2>/dev/null
     if cp "$staging/j0kers-media-server.exe" "$exe" 2>/dev/null; then
         echo "post-commit: published $exe"
+
+        # Warm it, because replacing this file is what makes the next launch
+        # hang.
+        #
+        # Writing the exe invalidates the security software's scan cache for
+        # it, and the next launch pays for a fresh scan of 75MB before a line
+        # of managed code runs. Measured on this machine: 107s, then 80s, then
+        # 39ms once it had been scanned twice and cached. During those minutes
+        # the process exists with one thread, no CPU, nothing bound, nothing
+        # logged and no window - so from the outside it is a program that does
+        # nothing at all when you double-click it.
+        #
+        # That landed on the first launch after every publish, which is to say
+        # every time somebody went to try the build they had just made. It is
+        # the whole of "it takes a minute to come up" and "I launch it and see
+        # nothing", and none of it is this program's doing: the same bytes
+        # copied to a different filename in the same folder start in 89ms.
+        #
+        # So the scan is paid here, inside a commit, where waiting is already
+        # expected - rather than in front of whoever launches it next.
+        # --help returns during argument parsing, before any config is read,
+        # any port is bound or any single-instance claim is made, so this
+        # cannot disturb a server that is running.
+        echo "post-commit: warming the new binary (first-launch scan)..."
+        warm_from=$(date +%s)
+        "$exe" --help >/dev/null 2>&1
+        echo "post-commit: warm in $(( $(date +%s) - warm_from ))s — the next launch will not pay for this"
     else
         echo "post-commit: COPY FAILED — the desktop shortcut still points at the previous build" >&2
     fi
