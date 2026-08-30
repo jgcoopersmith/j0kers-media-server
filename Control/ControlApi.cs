@@ -1757,6 +1757,11 @@ public sealed partial class ControlApi : IDisposable
             // to explain: the answer was always in a file nobody opens.
             pagesOpen = Volatile.Read(ref _liveDashboards),
             pagesFrom = auth.IsAdmin ? OpenPageClients() : null,
+            // Whether closing the last page is going to stop this server. The
+            // two numbers above mean opposite things depending on it, and the
+            // question people actually have — "will closing my browser stop
+            // it?" — is this field, not either of them.
+            stopsOnClose = _config.ShutdownOnClose,
             accounts = _auth.AccountCount,
             signedIn = _auth.SignedInCount,
             signedInUsers = auth.IsAdmin

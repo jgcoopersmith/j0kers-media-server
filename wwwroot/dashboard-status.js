@@ -62,6 +62,34 @@ async function tick() {
       ? who.map(w => w.user + " · " + w.client + " · " + idleText(w.idleSeconds)).join("\n")
       : "Accounts with somebody signed in right now.";
   }
+  /* What is holding the server open, and whether that matters here.
+     In background mode the answer is "nothing will stop it either way", so
+     the pill says that instead of a number that means nothing. Otherwise it
+     is a count, and the count is the whole mechanism: one page is you, and
+     closing it stops the server about three seconds later. Anything above
+     what you can account for is the thing to look at, and for an admin the
+     tooltip names the addresses. */
+  if (typeof status.pagesOpen === "number") {
+    const stops = status.stopsOnClose !== false;
+    const from = status.pagesFrom;
+    if (stops) {
+      $("hold-count").textContent = status.pagesOpen
+        + (status.pagesOpen === 1 ? " Page" : " Pages");
+      $("hold-label").textContent = "Holding Open";
+      $("holdpill").title =
+        (status.pagesOpen === 1
+          ? "One page is open — this one. Closing it stops the server in about 3 seconds."
+          : status.pagesOpen + " pages are open. The server stops about 3 seconds after the last one closes.")
+        + (Array.isArray(from) && from.length ? "\n\nHeld from:\n" + from.join("\n") : "");
+    } else {
+      $("hold-count").textContent = "Background";
+      $("hold-label").textContent = "Stays Up";
+      $("holdpill").title =
+        "Background mode is on, so closing this page will NOT stop the server — "
+        + "untick 'Minimize to the system tray' in ⚙ Config to change that."
+        + (Array.isArray(from) && from.length ? "\n\n" + status.pagesOpen + " page(s) open:\n" + from.join("\n") : "");
+    }
+  }
   noteServerClock(status);   // re-syncs the header clock on every poll
   rtspPort = status.rtsp.port; hlsPort = status.hls.port;
   hlsAddresses = status.hls.addresses || [];

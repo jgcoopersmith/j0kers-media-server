@@ -775,6 +775,15 @@
          width. The count is its own span because the script sets only that
          half; the label is markup and stays put. -->
     <span class="pill admin-only" id="loggedinpill" style="white-space:nowrap;text-align:center;line-height:1.25" title="Sign-ins that are live right now — two browsers and a phone are three."><span id="loggedin-count">–</span><br>Logged In</span>
+    <!-- What is keeping this server alive, in the header, where it is looked
+         at. "It never shuts down when I close the browser" took seven attempts
+         to explain, and every one of them was slow for the same reason: the
+         only thing that could have answered it was a count kept in memory and
+         written to a log file nobody opens. It is a pill now. When it reads 1
+         and the last window is shut, it is about to stop; when it reads more
+         than you can account for, something else is holding it, and hovering
+         says where from. -->
+    <span class="pill admin-only" id="holdpill" style="white-space:nowrap;text-align:center;line-height:1.25"><span id="hold-count">–</span><br><span id="hold-label">Holding Open</span></span>
     <button class="pill" id="acctbtn" onclick="openAccount()" title="Your account, password, and keys">👤 <span id="acct-pill">…</span></button>
     <button class="pill" id="themebtn" onclick="toggleTheme()" title="Switch theme">🌗</button>
     <span class="pill" id="clockpill" style="font-variant-numeric:tabular-nums;font-weight:700">–</span>

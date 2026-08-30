@@ -404,59 +404,6 @@ try
         var urls = DashboardUrls(control.BoundHost, config.Control.Port);
         var dashboardUrl = urls[0];
 
-        if (config.Control.OpenDashboardOnStart)
-        {
-            var urlList = string.Join(" · ", urls);
-            if (control.BoundHost == "0.0.0.0")
-                urlList += " (bound to 0.0.0.0 — reachable on any of this machine's addresses)";
-            if (config.Control.ShutdownOnClose)
-            {
-                // Do not open a window this server will then treat as somebody
-                // using it.
-                //
-                // This is the whole of "closing my browser never stops the
-                // server". In shutdown-on-close mode the server was opening a
-                // dashboard on its OWN screen at startup; that page holds a
-                // live link exactly like any other, and nothing distinguishes
-                // it. So the count could never reach zero — and on a server
-                // administered from another machine the window doing it was
-                // one nobody could see, on a screen nobody was sitting at,
-                // opened by the server against itself. Closing the browser you
-                // are actually using was never going to be the last page.
-                //
-                // Both safety nets were held shut by that one page: the sweep
-                // returns early while the count is above zero, and every
-                // 20-second reconnect refreshed the timestamp the silence
-                // watch reads. It also set _sawDashboard, so the shutdown was
-                // armed and then permanently vetoed by the thing that armed it.
-                //
-                // The URLs are still printed. Deliberately not fixed by
-                // ignoring loopback in the link handler: driving the dashboard
-                // from the server's own console is legitimate, and closing
-                // THAT page must still stop the server.
-                Log.Info("main", $"dashboard: {urlList}");
-                Log.Info("main", "not opening a browser here — this server stops when the last "
-                                 + "dashboard closes, and a window it opened on its own screen "
-                                 + "would hold it open for ever. Turn on background mode, or "
-                                 + "control.openDashboardOnStart, if you want it opened.");
-            }
-            else if (OperatingSystem.IsLinux()
-                && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISPLAY"))
-                && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY")))
-            {
-                // headless box — nothing to open a browser on
-                Log.Info("main", $"dashboard: {urlList}");
-            }
-            else if (TryOpenBrowser(dashboardUrl))
-            {
-                Log.Info("main", $"dashboard opened: {urlList} (disable with control.openDashboardOnStart=false)");
-            }
-            else
-            {
-                Log.Info("main", $"no browser opener found on this system; dashboard: {urlList}");
-            }
-        }
-
         // Background/tray mode can be switched on and off while running —
         // the Config dialog calls this, and startup uses it too.
         var svc = services;                                   // for the menu callbacks
@@ -539,6 +486,69 @@ try
         // background mode off. The dashboard is the session, so closing it ends
         // the server rather than leaving one running that nobody can see.
         else config.Control.ShutdownOnClose = true;
+
+        // Opened here, and not where this used to sit, because up there the
+        // answer was not known yet.
+        //
+        // Whether closing the page stops the server is decided by
+        // MinimizeToTray, and Control.ShutdownOnClose is derived from it —
+        // by the lines directly above. Asking the derived value before it
+        // had been derived read the file's default instead of the mode, so
+        // a background-mode server, where opening a window is harmless
+        // because nothing shuts down over it, quietly stopped opening one.
+        // The test for it is Background_mode_survives_the_last_page_closing.
+        if (config.Control.OpenDashboardOnStart)
+        {
+            var urlList = string.Join(" · ", urls);
+            if (control.BoundHost == "0.0.0.0")
+                urlList += " (bound to 0.0.0.0 — reachable on any of this machine's addresses)";
+            if (config.Control.ShutdownOnClose)
+            {
+                // Do not open a window this server will then treat as somebody
+                // using it.
+                //
+                // This is the whole of "closing my browser never stops the
+                // server". In shutdown-on-close mode the server was opening a
+                // dashboard on its OWN screen at startup; that page holds a
+                // live link exactly like any other, and nothing distinguishes
+                // it. So the count could never reach zero — and on a server
+                // administered from another machine the window doing it was
+                // one nobody could see, on a screen nobody was sitting at,
+                // opened by the server against itself. Closing the browser you
+                // are actually using was never going to be the last page.
+                //
+                // Both safety nets were held shut by that one page: the sweep
+                // returns early while the count is above zero, and every
+                // 20-second reconnect refreshed the timestamp the silence
+                // watch reads. It also set _sawDashboard, so the shutdown was
+                // armed and then permanently vetoed by the thing that armed it.
+                //
+                // The URLs are still printed. Deliberately not fixed by
+                // ignoring loopback in the link handler: driving the dashboard
+                // from the server's own console is legitimate, and closing
+                // THAT page must still stop the server.
+                Log.Info("main", $"dashboard: {urlList}");
+                Log.Info("main", "not opening a browser here — this server stops when the last "
+                                 + "dashboard closes, and a window it opened on its own screen "
+                                 + "would hold it open for ever. Turn on background mode, or "
+                                 + "control.openDashboardOnStart, if you want it opened.");
+            }
+            else if (OperatingSystem.IsLinux()
+                && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISPLAY"))
+                && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY")))
+            {
+                // headless box — nothing to open a browser on
+                Log.Info("main", $"dashboard: {urlList}");
+            }
+            else if (TryOpenBrowser(dashboardUrl))
+            {
+                Log.Info("main", $"dashboard opened: {urlList} (disable with control.openDashboardOnStart=false)");
+            }
+            else
+            {
+                Log.Info("main", $"no browser opener found on this system; dashboard: {urlList}");
+            }
+        }
     }
 }
 catch (Exception ex)
