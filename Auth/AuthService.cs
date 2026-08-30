@@ -379,6 +379,22 @@ public sealed class AuthService
     /// nor a spray attack gets unlimited guesses; the error text is
     /// deliberately identical for "no such user" and "wrong password".
     /// </summary>
+    /// <summary>
+    /// Why a sign-in was refused, in words, for the log only. Never returned
+    /// to the caller — see the call site.
+    /// </summary>
+    private string FailureReason(string? username)
+    {
+        var user = _users.FindByName(username);
+        if (user is null) return " — no such account";
+        if (!user.Enabled) return " — the account is disabled";
+        if (!user.HasPassword && !user.Passwordless)
+            return " — the account has no password and is not marked passwordless, so it can never sign in. " +
+                   "Tick 'passwordless (read-only)' in Users, or give it a password";
+        if (!user.HasPassword) return " — the account has no password";
+        return " — wrong password";
+    }
+
     public LoginOutcome Login(string? username, string? password, HttpListenerContext ctx)
     {
         var client = ClientKey(ctx);
@@ -418,7 +434,19 @@ public sealed class AuthService
         {
             RegisterFailure(nameKey);
             RegisterFailure(addrKey);
-            Log.Warn("auth", $"failed login for '{username}' from {client}");
+            // The reply stays deliberately vague — telling an anonymous caller
+            // which half was wrong is how account names get enumerated. The
+            // log is a different audience: it is the administrator's, it
+            // already names accounts and addresses, and without the reason in
+            // it a refusal that has an obvious cause looks like a mystery.
+            //
+            // The case that prompted this: an account created with no password
+            // but never ticked "passwordless (read-only)" cannot sign in at
+            // all — the passwordless branch above skips it because the flag is
+            // off, and VerifyPassword refuses it because it has no password to
+            // verify. Both ends are correct and the result is a working-looking
+            // account that always says "invalid username or password".
+            Log.Warn("auth", $"failed login for '{username}' from {client}{FailureReason(username)}");
             return new LoginOutcome(false, null, null, "invalid username or password");
         }
 

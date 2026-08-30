@@ -1574,6 +1574,8 @@ public sealed partial class ControlApi : IDisposable
                     percent = v.Percent,
                     doneSeconds = (int)v.DoneSeconds,
                     durationSeconds = (int)v.DurationSeconds,
+                    // how much longer, at the rate this job is actually going
+                    etaSeconds = v.EtaSeconds,
                 }),
             // files waiting to convert, in order — the dashboard
             // lists these with a remove button (running ones can't

@@ -13,6 +13,16 @@ let tcCheckTimer = 0, tcCheckTries = 0;   // re-poll while any pill is still bei
 let tcLastAutoReload = 0;                 // throttles the heartbeat's re-scan (dashboard-status.js)
 const TC_FOLDER_KEY = "j0kers-tc-folder";   // last folder browsed, remembered per browser
 
+/* How much longer a conversion has, said the way somebody waiting would say
+   it. Rounded deliberately coarsely above an hour: the estimate is not
+   accurate to the minute and printing "2h 07m" would claim it is. */
+function etaText(s) {
+  if (s < 60) return "under a minute";
+  if (s < 3600) return Math.round(s / 60) + " min";
+  const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
+  return h + "h" + (m >= 5 ? " " + m + "m" : "");
+}
+
 async function tcBoot() {
   if (tcState.booted) return;
   tcState.booted = true;
@@ -501,7 +511,7 @@ function renderConversions(running, queued) {
   list.innerHTML = "";
 
   // one flat list of items, tagged by kind, then ordered by the chosen view
-  const items = running.map(r => ({ kind: "running", title: r.title || r.stream, percent: r.percent, stream: r.stream }))
+  const items = running.map(r => ({ kind: "running", title: r.title || r.stream, percent: r.percent, stream: r.stream, eta: r.etaSeconds }))
     .concat(queued.map(q => ({ kind: "queued", title: q.title || q.path, path: q.path })));
   if (tcConvOrder === "az")
     items.sort((a, b) => (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" }));
@@ -521,6 +531,16 @@ function renderConversions(running, queued) {
       badge.className = "tc-badge b-conv";
       badge.textContent = "converting " + (it.percent != null ? it.percent + "%" : "…");
       r.appendChild(badge);
+      /* How much longer, at the rate this job is actually managing — the
+         number the percentage never answered. Absent for the first few
+         seconds, and for a source whose length could not be probed. */
+      if (it.eta != null) {
+        const eta = document.createElement("span");
+        eta.className = "tc-badge b-ok";
+        eta.title = "Estimated from how fast this conversion is actually going";
+        eta.textContent = etaText(it.eta) + " left";
+        r.appendChild(eta);
+      }
       const cancel = document.createElement("button");
       cancel.className = "danger"; cancel.style.flex = "none"; cancel.textContent = "✕";
       cancel.title = "Cancel this conversion (the partial copy is discarded)";

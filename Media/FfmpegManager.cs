@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -55,11 +55,40 @@ public sealed class FfmpegManager : IDisposable
     /// probed — a live or malformed input — in which case only the elapsed
     /// position is meaningful and Percent stays null.
     /// </summary>
-    public sealed record VodProgress(string Stream, string Title, double DoneSeconds, double DurationSeconds)
+    public sealed record VodProgress(string Stream, string Title, double DoneSeconds, double DurationSeconds,
+                                     DateTime StartedUtc = default)
     {
         public int? Percent => DurationSeconds > 0
             ? Math.Clamp((int)Math.Round(DoneSeconds / DurationSeconds * 100), 0, 100)
             : null;
+
+        /// <summary>
+        /// Seconds of encoding still to do, from how fast this job has
+        /// actually been going.
+        ///
+        /// Measured against the wall clock rather than read from ffmpeg's
+        /// speed= line, because the rate that matters is the one this job is
+        /// achieving on this machine with everything else that is running -
+        /// which is exactly what a queue of encodes competing for the same
+        /// cores changes. A momentary speed= promises a finish time that the
+        /// next four conversions starting immediately make untrue.
+        ///
+        /// Null until there is something worth dividing: no known duration,
+        /// or the first few seconds where the ratio is still noise.
+        /// </summary>
+        public int? EtaSeconds
+        {
+            get
+            {
+                if (DurationSeconds <= 0 || StartedUtc == default) return null;
+                var elapsed = (DateTime.UtcNow - StartedUtc).TotalSeconds;
+                if (elapsed < 5 || DoneSeconds < 1) return null;
+                var rate = DoneSeconds / elapsed;               // encoded seconds per wall second
+                if (rate <= 0) return null;
+                var left = DurationSeconds - DoneSeconds;
+                return left <= 0 ? 0 : (int)Math.Round(left / rate);
+            }
+        }
     }
 
     private readonly Dictionary<string, VodProgress> _vodProgress = new(StringComparer.OrdinalIgnoreCase);
@@ -559,7 +588,7 @@ public sealed class FfmpegManager : IDisposable
 
             var title = Media.StreamTitle.Prettify(stream);
             var duration = ProbeDurationSeconds(info.FullName);
-            lock (_progressLock) _vodProgress[stream] = new VodProgress(stream, title, 0, duration);
+            lock (_progressLock) _vodProgress[stream] = new VodProgress(stream, title, 0, duration, DateTime.UtcNow);
             // The length of the film, next to the segments, so the HLS server
             // can list every segment the finished conversion will have before
             // it has them. That is what lets the seek bar cover the whole film
@@ -975,8 +1004,11 @@ public sealed class FfmpegManager : IDisposable
         lock (_progressLock)
         {
             // only present while the job is live; Exited removes it
-            if (_vodProgress.ContainsKey(stream))
-                _vodProgress[stream] = new VodProgress(stream, title, at.TotalSeconds, duration);
+            // Carry the start time forward: it is what the ETA divides by, and
+            // a fresh record on every progress line would keep resetting it.
+            if (_vodProgress.TryGetValue(stream, out var prior))
+                _vodProgress[stream] = new VodProgress(stream, title, at.TotalSeconds, duration,
+                                                       prior.StartedUtc == default ? DateTime.UtcNow : prior.StartedUtc);
         }
     }
 
