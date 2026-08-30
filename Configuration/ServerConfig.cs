@@ -132,6 +132,7 @@ public sealed class ServerConfig
         [JsonPropertyName("controlPort")] public int? ControlPort { get; set; }
         [JsonPropertyName("authToken")] public string? AuthToken { get; set; }
         [JsonPropertyName("minimizeToTray")] public bool? MinimizeToTray { get; set; }
+        [JsonPropertyName("openDashboardOnStart")] public bool? OpenDashboardOnStart { get; set; }
         [JsonPropertyName("linkLifetimeHours")] public int? LinkLifetimeHours { get; set; }
         [JsonPropertyName("discoveryEnabled")] public bool? DiscoveryEnabled { get; set; }
         [JsonPropertyName("dlnaEnabled")] public bool? DlnaEnabled { get; set; }
@@ -207,6 +208,17 @@ public sealed class ServerConfig
         if (s.HlsPort is int hp) Hls.Port = hp;
         if (s.ControlPort is int cp) Control.Port = cp;
         if (!string.IsNullOrWhiteSpace(s.AuthToken)) Control.AuthToken = s.AuthToken;
+        // Whether the server opens a browser on ITS OWN machine at startup.
+        //
+        // It had no way in at all — not the Config dialog, not /api/settings —
+        // and on a server administered from another machine it is the setting
+        // that quietly breaks shutdown-on-close. The window it opens sits on
+        // the server's own screen holding a live link, so closing the browser
+        // on the machine you are actually sitting at can never bring the count
+        // to zero, and the server never stops. Nobody could see it, and nobody
+        // could turn it off without hand-editing server.json on the box.
+        if (s.OpenDashboardOnStart is bool openDash) Control.OpenDashboardOnStart = openDash;
+
         if (s.MinimizeToTray is bool tray)
         {
             // Worth a line, because this quietly beats server.json and the two

@@ -1180,6 +1180,20 @@
     </label>
     <div id="cfg-tray-note" style="color:var(--muted);font-size:11.5px;margin-top:3px"></div>
 
+    <!-- The setting that quietly breaks shutdown-on-close on a server you
+         administer from somewhere else: the window it opens sits on the
+         server's own screen holding the dashboard open, so closing the browser
+         on the machine you are actually at can never be the last page. It had
+         no way in at all before this — not here, not the API. -->
+    <label id="cfg-open-row" style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;color:var(--ink);font-size:13px;cursor:pointer;margin:8px 0 0">
+      <input id="cfg-open" type="checkbox" style="width:16px;height:16px">
+      <span>Open the dashboard on this machine when the server starts</span>
+    </label>
+    <div style="color:var(--muted);font-size:11.5px;margin-top:3px">
+      Turn this off for a server you use from another PC. The window it opens counts as an open
+      dashboard, so while it is there, closing your browser elsewhere will not stop the server.
+    </div>
+
     <label class="sect" style="margin-top:12px">Network announcement</label>
     <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;color:var(--ink);font-size:13px;cursor:pointer;margin:0">
       <input id="cfg-announce" type="checkbox" style="width:16px;height:16px">

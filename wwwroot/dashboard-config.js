@@ -34,6 +34,7 @@ async function openConfig() {
     renderCfgInterfaces();
 
     $("cfg-tray").checked = !!s.minimizeToTray;
+    $("cfg-open").checked = s.openDashboardOnStart !== false;
     $("cfg-tray").disabled = !s.traySupported;
     $("cfg-tray-note").textContent = s.traySupported
       ? "Applies immediately. The icon starts in the taskbar's hidden ^ area — drag it out to pin it."
@@ -397,6 +398,7 @@ async function saveConfig() {
     controlPort: parseInt($("cfg-ctl").value, 10),
     linkLifetimeHours: parseInt($("cfg-link").value, 10),
     minimizeToTray: $("cfg-tray").checked,
+    openDashboardOnStart: $("cfg-open").checked,
     discoveryEnabled: $("cfg-announce").checked,
     dlnaEnabled: $("cfg-dlna").checked,
     httpsEnabled: $("cfg-https").checked,

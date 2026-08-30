@@ -1752,6 +1752,11 @@ public sealed partial class ControlApi : IDisposable
             // pill in CSS would not be enough — the answer must not be in the
             // response at all for a read-only account.
             problems = Problems.Count,
+            // How many pages are holding this server open, and from where.
+            // Log-only until now, which is why "it never stops" took so long
+            // to explain: the answer was always in a file nobody opens.
+            pagesOpen = Volatile.Read(ref _liveDashboards),
+            pagesFrom = auth.IsAdmin ? OpenPageClients() : null,
             accounts = _auth.AccountCount,
             signedIn = _auth.SignedInCount,
             signedInUsers = auth.IsAdmin
@@ -2000,6 +2005,7 @@ public sealed partial class ControlApi : IDisposable
             hlsPort = _serverConfig.Hls.Port,
             controlPort = _serverConfig.Control.Port,
             minimizeToTray = _serverConfig.MinimizeToTray,
+            openDashboardOnStart = _serverConfig.Control.OpenDashboardOnStart,
             linkLifetimeHours = _serverConfig.Hls.LinkLifetimeHours,
             // where transcodes and live-channel streams are written; the
             // resolved path is what Browse opens at and what the box shows
