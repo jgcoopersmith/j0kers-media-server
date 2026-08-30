@@ -364,7 +364,18 @@ try
         // Likewise the batch conversion queue: whatever was still owed when
         // this server last stopped is on disk, and picks up here rather than
         // being lost with the process that was working through it.
-        ffmpeg.ResumeVodQueue();
+        //
+        // Off the startup path, because picking it up means launching an
+        // encode, and the second and a half that took was a second and a half
+        // before the dashboard could open — spent competing for the same disk
+        // the dashboard was trying to be read from. The queue is on disk
+        // either way, so resuming it a moment later loses nothing.
+        var vodQueue = ffmpeg;
+        _ = Task.Run(() =>
+        {
+            try { vodQueue.ResumeVodQueue(); }
+            catch (Exception ex) { Log.Warn("ffmpeg", $"could not resume the conversion queue: {ex.Message}"); }
+        });
 
         // The channel watchdog: a live job that is running but has written
         // nothing for 90 seconds is wedged, and killing it is what revives

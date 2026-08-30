@@ -164,7 +164,17 @@ public sealed class FfmpegManager : IDisposable
         // before anything of ours starts, so a leftover writer is gone
         // rather than sharing a channel directory with its replacement
         KillOrphanedJobs();
-        ReportIncompleteVodDirs();  // names them; deletes nothing - see the method
+        // Behind the server, not in front of it. This counts unfinished
+        // conversions and deletes nothing — it is a line in the log — but it
+        // opens a file in every vod-* directory under the media root, and it
+        // did so before the dashboard could bind. On this machine's own
+        // library (811 conversions) that was 8.5 seconds of a 10.8 second
+        // start, and all of it was spent with nothing on screen at all:
+        // launched from the desktop icon there is no console, no window and
+        // no tray icon until the browser opens, so a server that was working
+        // perfectly looked like one that had not started. It says the same
+        // thing a moment later now, with the server already up.
+        _ = Task.Run(ReportIncompleteVodDirs);  // names them; deletes nothing - see the method
         MarkExistingConversionsKeptOnce(Path.Combine(baseDirectory, "vod-keep-migrated"));
         LoadChannels();
         LoadQueueSettings();
@@ -1478,12 +1488,34 @@ public sealed class FfmpegManager : IDisposable
         }
     }
 
-    /// <summary>A conversion ffmpeg ran to the end writes the EXT-X-ENDLIST marker.</summary>
+    /// <summary>
+    /// A conversion ffmpeg ran to the end writes the EXT-X-ENDLIST marker.
+    ///
+    /// Read from the end rather than whole. The marker is the last line of
+    /// the playlist, and a feature-length conversion lists every one of its
+    /// segments above it — hundreds of kilobytes that say nothing about the
+    /// question being asked. Reading all of them, once per conversion, is
+    /// most of what made the sweep below slow enough to be noticed.
+    /// </summary>
     private static bool IsComplete(string dir)
     {
         var playlist = Path.Combine(dir, "index.m3u8");
-        return File.Exists(playlist)
-            && File.ReadAllText(playlist).Contains("#EXT-X-ENDLIST", StringComparison.Ordinal);
+        try
+        {
+            // ReadWrite | Delete: a conversion running right now is writing
+            // this file, and a check must never be what makes it fail.
+            using var fs = new FileStream(playlist, FileMode.Open, FileAccess.Read,
+                                          FileShare.ReadWrite | FileShare.Delete);
+            // room for the marker plus whatever trailing tags follow it
+            var take = (int)Math.Min(fs.Length, 512);
+            fs.Seek(-take, SeekOrigin.End);
+            var buf = new byte[take];
+            var read = fs.Read(buf, 0, take);
+            return System.Text.Encoding.UTF8.GetString(buf, 0, read)
+                .Contains("#EXT-X-ENDLIST", StringComparison.Ordinal);
+        }
+        catch (FileNotFoundException) { return false; }
+        catch (DirectoryNotFoundException) { return false; }
     }
 
     /// <summary>
