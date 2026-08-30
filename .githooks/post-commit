@@ -11,6 +11,27 @@
 #
 # So: commit, and the binary behind the desktop shortcut is the commit.
 #
+# WHERE it publishes matters as much as when, and this hook had it wrong.
+#
+# It used to publish into the repo's own publish/ directory and restart from
+# there. But the desktop shortcut on this machine points at the install under
+# %LOCALAPPDATA%, which is where the accounts, channels, library, history and
+# signing key live. So the hook was building into a directory nothing
+# launches from — every commit published a binary no one would ever run,
+# while the shortcut went on starting the build it had always started. The
+# staleness this hook exists to prevent was the exact thing it was causing.
+#
+# Worse than useless, in fact: on a commit made while the server was up, the
+# restart at the bottom started publish/j0kers-media-server.exe with the REPO
+# as its working directory. Config resolution then finds the repo's own
+# config/server.json, so that is a second server with different accounts and
+# a different library, standing in for the one that was just stopped.
+#
+# It now publishes into the install the shortcut actually points at, in the
+# same shape the installer produces (self-contained, single file), and
+# restarts from there with that directory as the working directory. Set
+# J0KERS_INSTALL_DIR to publish somewhere else.
+#
 # The running server holds its own exe open on Windows, so it is stopped
 # first and started again afterwards — but only if it was running when this
 # began. Committing with the server down leaves it down.
@@ -22,8 +43,20 @@
 cd "$(git rev-parse --show-toplevel)" || exit 0
 command -v dotnet >/dev/null 2>&1 || exit 0
 
-exe="publish/j0kers-media-server.exe"
+# Where the desktop shortcut points. A checkout on a machine with no install
+# is not a broken commit, so a missing directory is a skip and not a failure:
+# there is no shortcut for it to leave stale.
+install_win="${J0KERS_INSTALL_DIR:-$LOCALAPPDATA\\Programs\\j0kers Media Server}"
+install_sh=$(cygpath -u "$install_win" 2>/dev/null || echo "$install_win")
+if [ ! -d "$install_sh" ]; then
+    echo "post-commit: no install at $install_win — nothing to update (set J0KERS_INSTALL_DIR to override)"
+    exit 0
+fi
+
+exe="$install_sh/j0kers-media-server.exe"
+staging="publish/staging"
 was_running=0
+
 if command -v powershell >/dev/null 2>&1; then
     if powershell -NoProfile -Command \
         "if (Get-Process j0kers-media-server -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" 2>/dev/null; then
@@ -49,7 +82,7 @@ if command -v powershell >/dev/null 2>&1; then
         if [ -n "$viewers" ] && [ "$viewers" -gt 0 ] 2>/dev/null; then
             echo "post-commit: $viewers viewer(s) streaming — publishing without restarting"
             powershell -NoProfile -Command \
-                "Move-Item '$exe' '$exe.inuse' -Force -ErrorAction SilentlyContinue" 2>/dev/null
+                "Move-Item -LiteralPath '$install_win\\j0kers-media-server.exe' '$install_win\\j0kers-media-server.exe.inuse' -Force -ErrorAction SilentlyContinue" 2>/dev/null
         else
             was_running=1
             echo "post-commit: stopping the idle server so its exe can be replaced"
@@ -88,18 +121,40 @@ fi
 
 # Sweep up exes moved aside by an earlier commit, now that whatever was
 # running from them has exited. Best effort: one still in use just stays.
-rm -f publish/*.inuse 2>/dev/null
+rm -f "$install_sh"/*.inuse 2>/dev/null
 
-echo "post-commit: publishing $(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' J0kersMediaServer.csproj)"
-if dotnet publish J0kersMediaServer.csproj -c Release -r win-x64 --self-contained false \
-        -p:PublishSingleFile=true -o publish --nologo -v q >/dev/null 2>&1; then
-    echo "post-commit: published $exe"
+version=$(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' J0kersMediaServer.csproj)
+echo "post-commit: publishing $version to $install_win"
+
+# Self-contained and single-file, matching installer/build-package.ps1: the
+# installed exe is the one people copy to machines with no .NET on them, and
+# a hook that quietly swapped it for a framework-dependent build would leave
+# an install that runs here and nowhere else.
+#
+# Published to a staging directory and copied in, rather than straight over
+# the top: a publish that fails half way through must not be what replaces a
+# working server, and -o pointed at the install would do exactly that.
+if dotnet publish J0kersMediaServer.csproj -c Release -r win-x64 --self-contained true \
+        -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true \
+        -p:DebugType=none -o "$staging" --nologo -v q >/dev/null 2>&1; then
+    # The installed exe is read-only (the installer marks it so), which a
+    # plain copy will not overwrite - it fails with permission denied and the
+    # install keeps the old build while the hook reports success.
+    chmod u+w "$exe" 2>/dev/null
+    if cp "$staging/j0kers-media-server.exe" "$exe" 2>/dev/null; then
+        echo "post-commit: published $exe"
+    else
+        echo "post-commit: COPY FAILED — the desktop shortcut still points at the previous build" >&2
+    fi
 else
     echo "post-commit: PUBLISH FAILED — the desktop shortcut still points at the previous build" >&2
 fi
 
 if [ "$was_running" = "1" ]; then
+    # The working directory is the whole point: config resolution finds
+    # server.json relative to it, and starting from anywhere else gives a
+    # server with none of this install's accounts, channels or library.
     powershell -NoProfile -Command \
-        "Start-Process -FilePath '$(pwd -W 2>/dev/null || pwd)/publish/j0kers-media-server.exe' -WorkingDirectory '$(pwd -W 2>/dev/null || pwd)'" 2>/dev/null
-    echo "post-commit: server restarted"
+        "Start-Process -FilePath '$install_win\\j0kers-media-server.exe' -ArgumentList 'server.json' -WorkingDirectory '$install_win'" 2>/dev/null
+    echo "post-commit: server restarted from $install_win"
 fi
