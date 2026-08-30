@@ -37,24 +37,65 @@ public class ShutdownOnCloseTests
     // re-run until it passes is worth less than no test at all.
     private static readonly TimeSpan StopWithin = TimeSpan.FromSeconds(15);
 
+    private const string SelfToken = "test-self-window-token";
+
     /// <summary>
     /// The regression test for the actual defect.
     ///
-    /// Shipped defaults — openDashboardOnStart on, shutdownOnClose on — and
-    /// nobody has connected yet. Nothing may be holding the server open,
-    /// because the only thing that could be is the server itself.
+    /// The server opens a dashboard on its own machine at startup, and that
+    /// window holds a live link like any other. On a server administered from
+    /// somewhere else it sits on a screen nobody is at — so the count of open
+    /// pages never fell to zero and closing the browser you were actually
+    /// using was never the last page. That is the whole bug.
+    ///
+    /// So: the server's own window is open, somebody connects from elsewhere,
+    /// and then that somebody closes their browser. The server must stop,
+    /// even though its own window is still sitting there.
     /// </summary>
     [Fact]
-    public async Task Nothing_holds_the_server_open_before_anyone_connects()
+    public async Task The_servers_own_window_does_not_hold_it_open_after_someone_else_leaves()
     {
-        using var server = await TestServer.Start(openDashboardOnStart: true, backgroundMode: false);
+        using var server = await TestServer.Start(openDashboardOnStart: false, backgroundMode: false,
+                                                 selfToken: SelfToken);
 
-        // Long enough that a browser started at boot would have loaded and
-        // opened its link; measured at well under a second when it did.
-        await Task.Delay(3000);
+        var mark = await server.ClaimSelfWindow(SelfToken);
+        using var ownWindow = await server.OpenPage(cookie: mark);      // the server's own screen
 
-        Assert.Equal(0, await server.PagesOpen());
-        Assert.True(server.IsRunning, "the server stopped on its own before anyone connected");
+        var somebodyElse = await server.OpenPage(expected: 2);          // a browser on another machine
+        somebodyElse.Dispose();                                         // …which is then closed
+
+        Assert.True(server.WaitForExit(StopWithin),
+                    $"the server was still running {StopWithin.TotalSeconds:0}s after the last real page "
+                    + "closed — its own startup window was holding it open, which is the original bug. Log:\n"
+                    + server.ReadLog());
+    }
+
+    /// <summary>
+    /// The other half of the same rule, and the reason the window cannot
+    /// simply be ignored: on a machine somebody is actually sitting at, the
+    /// window the server opened is the session. Nobody else has connected, so
+    /// it holds the server open like any other page — and closing it stops
+    /// the server, the way closing an application's window should.
+    /// </summary>
+    [Fact]
+    public async Task The_servers_own_window_holds_it_open_while_it_is_the_only_page()
+    {
+        using var server = await TestServer.Start(openDashboardOnStart: false, backgroundMode: false,
+                                                 selfToken: SelfToken);
+
+        var mark = await server.ClaimSelfWindow(SelfToken);
+        var ownWindow = await server.OpenPage(cookie: mark);
+
+        // Comfortably past the close grace. Nobody else has been, so this
+        // page is the session and the server belongs to whoever is looking
+        // at it.
+        await Task.Delay(6000);
+        Assert.True(server.IsRunning,
+                    "the server shut down while the only window open was the one it opened itself");
+
+        ownWindow.Dispose();
+        Assert.True(server.WaitForExit(StopWithin),
+                    "closing the server's own window did not stop it");
     }
 
     /// <summary>
@@ -64,7 +105,7 @@ public class ShutdownOnCloseTests
     [Fact]
     public async Task Closing_the_last_page_stops_the_server()
     {
-        using var server = await TestServer.Start(openDashboardOnStart: true, backgroundMode: false);
+        using var server = await TestServer.Start(openDashboardOnStart: false, backgroundMode: false);
 
         // Deliberately no assertion on the count here. How many pages the
         // server thinks are open is the subject of the test above; this one is
@@ -88,7 +129,7 @@ public class ShutdownOnCloseTests
     [Fact]
     public async Task Closing_one_of_two_pages_leaves_it_running()
     {
-        using var server = await TestServer.Start(openDashboardOnStart: true, backgroundMode: false);
+        using var server = await TestServer.Start(openDashboardOnStart: false, backgroundMode: false);
 
         var first = await server.OpenPage();
         var second = await server.OpenPage(expected: 2);
@@ -148,7 +189,7 @@ public class ShutdownOnCloseTests
     [Fact]
     public async Task A_page_on_the_servers_own_machine_still_counts()
     {
-        using var server = await TestServer.Start(openDashboardOnStart: true, backgroundMode: false);
+        using var server = await TestServer.Start(openDashboardOnStart: false, backgroundMode: false);
 
         var page = await server.OpenPage();       // over loopback, like the console does
         Assert.Equal(1, await server.PagesOpen());
@@ -189,7 +230,8 @@ public class ShutdownOnCloseTests
             };
         }
 
-        public static async Task<TestServer> Start(bool openDashboardOnStart, bool backgroundMode)
+        public static async Task<TestServer> Start(bool openDashboardOnStart, bool backgroundMode,
+                                                  string? selfToken = null)
         {
             var exe = Path.Combine(AppContext.BaseDirectory,
                                    OperatingSystem.IsWindows() ? "j0kers-media-server.exe"
@@ -234,6 +276,9 @@ public class ShutdownOnCloseTests
                 WorkingDirectory = dir,
             };
             startInfo.Environment["J0KERS_CONFIG"] = configPath;
+            // The seam that lets a test play the window the server opens for
+            // itself. Unset in every real run, where the token is random.
+            if (selfToken is not null) startInfo.Environment["J0KERS_SELF_TOKEN"] = selfToken;
 
             var process = Process.Start(startInfo)
                           ?? throw new InvalidOperationException("could not start the server");
@@ -286,9 +331,25 @@ public class ShutdownOnCloseTests
         /// dashboard holds. Disposing it is the browser closing — the socket
         /// drops, which is the signal the whole mechanism turns on.
         /// </summary>
-        public async Task<IDisposable> OpenPage(int expected = 1)
+        /// <summary>
+        /// Does what the browser the server launches does: fetches the
+        /// dashboard with the startup token on the URL, and comes away with
+        /// the cookie that marks this page as the server's own window.
+        /// </summary>
+        public async Task<string> ClaimSelfWindow(string token)
         {
-            var page = await Page.Open(Port);
+            using var r = await _http.GetAsync("?j=" + token);
+            r.EnsureSuccessStatusCode();
+            Assert.True(r.Headers.TryGetValues("Set-Cookie", out var cookies),
+                        "the server did not mark this page as the window it opened for itself");
+            var mark = cookies.FirstOrDefault(c => c.StartsWith("j0k-self=", StringComparison.Ordinal));
+            Assert.NotNull(mark);
+            return mark!.Split(';')[0];
+        }
+
+        public async Task<IDisposable> OpenPage(int expected = 1, string? cookie = null)
+        {
+            var page = await Page.Open(Port, cookie);
             // The link is counted when the handler runs, not when the request
             // is written, so give the server the moment in between rather than
             // racing it and then blaming it for the difference.
@@ -316,8 +377,21 @@ public class ShutdownOnCloseTests
             {
                 var logs = Path.Combine(_dir, "logs");
                 if (!Directory.Exists(logs)) return "(no log)";
+                // Share the handle. The server is usually still running when
+                // a test wants to know why it failed, and it is holding this
+                // file open — so File.ReadAllLines threw and the failure
+                // message said nothing at exactly the moment it mattered.
+                static IEnumerable<string> Read(string file)
+                {
+                    using var fs = new FileStream(file, FileMode.Open, FileAccess.Read,
+                                                  FileShare.ReadWrite | FileShare.Delete);
+                    using var sr = new StreamReader(fs);
+                    var lines = new List<string>();
+                    while (sr.ReadLine() is string line) lines.Add(line);
+                    return lines;
+                }
                 return string.Join("\n", Directory.GetFiles(logs)
-                                                  .SelectMany(File.ReadAllLines)
+                                                  .SelectMany(Read)
                                                   .TakeLast(40));
             }
             catch (Exception ex) { return "(log unreadable: " + ex.Message + ")"; }
@@ -356,7 +430,7 @@ public class ShutdownOnCloseTests
 
         private Page(TcpClient socket) => _socket = socket;
 
-        public static async Task<Page> Open(int port)
+        public static async Task<Page> Open(int port, string? cookie = null)
         {
             var socket = new TcpClient();
             await socket.ConnectAsync(IPAddress.Loopback, port);
@@ -365,6 +439,7 @@ public class ShutdownOnCloseTests
                         + $"Host: 127.0.0.1:{port}\r\n"
                         + "Accept: text/event-stream\r\n"
                         + "Sec-Fetch-Site: same-origin\r\n"
+                        + (cookie is null ? "" : $"Cookie: {cookie}\r\n")
                         + "Connection: keep-alive\r\n\r\n";
             await stream.WriteAsync(System.Text.Encoding.ASCII.GetBytes(request));
             await stream.FlushAsync();

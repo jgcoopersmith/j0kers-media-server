@@ -49,6 +49,33 @@ public sealed class FfmpegManager : IDisposable
     /// Nothing converting is the common case, and this answers it for free.
     private volatile int _vodJobCount;
 
+    /// The same table, as an array, readable without the lock — and the
+    /// reason the dashboard could stop loading altogether.
+    ///
+    /// /api/status reports what is converting, and asking for that used to
+    /// take _lock. StartVod holds _lock for the whole of starting a
+    /// conversion, and that span covers a recursive delete and an ffprobe
+    /// with a fifteen second timeout (see StopVodJobs). On a server with a
+    /// full queue there is nearly always a start in flight, so the status
+    /// poll blocked behind it — and the page puts no timeout on that fetch,
+    /// so it sat at "connecting…" for ever while the two-second poll piled
+    /// another blocked request on top every two seconds. A server that was
+    /// converting perfectly well looked like one with no web interface at all.
+    ///
+    /// Refreshed under _lock wherever _vodJobs changes, by RefreshVodJobView.
+    private volatile KeyValuePair<string, Process>[] _vodJobsView =
+        Array.Empty<KeyValuePair<string, Process>>();
+
+    /// <summary>
+    /// Republishes the lock-free views of the job table. Call with _lock
+    /// held, immediately after any change to <see cref="_vodJobs"/>.
+    /// </summary>
+    private void RefreshVodJobView()
+    {
+        _vodJobCount = _vodJobs.Count;
+        _vodJobsView = _vodJobs.ToArray();
+    }
+
     /// <summary>
     /// How far each running conversion has got, from ffmpeg's own -progress
     /// stream. DurationSeconds is 0 when the source length couldn't be
@@ -615,7 +642,7 @@ public sealed class FfmpegManager : IDisposable
                         if (_vodJobs.TryGetValue(stream, out var q) && ReferenceEquals(q, p))
                         {
                             _vodJobs.Remove(stream);
-                            _vodJobCount = _vodJobs.Count;
+                            RefreshVodJobView();
                         }
                         else
                             superseded = true;   // a rerun already owns this stream+dir
@@ -637,7 +664,7 @@ public sealed class FfmpegManager : IDisposable
                     PumpVodQueue();
                 });
             _vodJobs[stream] = job;
-            _vodJobCount = _vodJobs.Count;
+            RefreshVodJobView();
             _vodStarted[stream] = DateTime.UtcNow;
             started = stream;
         }
@@ -1046,8 +1073,12 @@ public sealed class FfmpegManager : IDisposable
             // which is the "Collection was modified" that has been ending
             // overnight batches. Materialising the pairs finishes the
             // enumeration before any of that can happen.
-            KeyValuePair<string, Process>[] snapshot;
-            lock (_lock) snapshot = _vodJobs.ToArray();
+            // No lock. This is on the /api/status path, which must never
+            // wait on _lock — see _vodJobsView. The array is published under
+            // the lock and never mutated afterwards, so reading it here is
+            // safe, and the "Collection was modified" hazard described above
+            // is unchanged: this is still a materialised snapshot.
+            var snapshot = _vodJobsView;
             return snapshot
                 .Where(kv => { try { return !kv.Value.HasExited; } catch { return false; } })
                 .Select(kv => kv.Key).ToList();
@@ -1083,12 +1114,22 @@ public sealed class FfmpegManager : IDisposable
             if (File.Exists(Path.Combine(_mediaRoot, stream, "index.m3u8"))) return VodState.Done;
             _vodDone.TryRemove(stream, out _);
         }
-        // Nothing is converting: no need for the lock at all, which matters
-        // because this is asked once per file while a folder is being listed.
+        // No lock here either, and for the same reason as ActiveVodStreams.
+        //
+        // Nothing converting was already free, via the counter. But while
+        // something IS converting — which on a server working through a queue
+        // is all the time — this used to take _lock once per file, and _lock
+        // is held for the whole of starting a conversion, ffprobe included.
+        // So the Transcode panel stalled exactly when there was something to
+        // watch. The view is an array of the few jobs that can run at once,
+        // so scanning it costs less than the lock did.
         if (_vodJobCount > 0)
-            lock (_lock)
-                if (_vodJobs.TryGetValue(stream, out var p))
-                { try { if (!p.HasExited) return VodState.Converting; } catch { } }
+            foreach (var kv in _vodJobsView)
+                if (string.Equals(kv.Key, stream, StringComparison.OrdinalIgnoreCase))
+                {
+                    try { if (!kv.Value.HasExited) return VodState.Converting; } catch { }
+                    break;
+                }
         try
         {
             var playlist = Path.Combine(_mediaRoot, stream, "index.m3u8");
@@ -1520,7 +1561,7 @@ public sealed class FfmpegManager : IDisposable
             {
                 try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
                 _vodJobs.Remove(stream);
-                _vodJobCount = _vodJobs.Count;
+                RefreshVodJobView();
             }
             StopSeekJobs(stream);
         }
@@ -1559,7 +1600,7 @@ public sealed class FfmpegManager : IDisposable
         {
             StopSeekJobs(stream);
             if (!_vodJobs.Remove(stream, out p)) return false;
-            _vodJobCount = _vodJobs.Count;
+            RefreshVodJobView();
         }
         // Outside the lock: KillAndRelease waits up to 2s, and PumpVodQueue takes
         // a different lock — holding _lock across either risks a stall/inversion.

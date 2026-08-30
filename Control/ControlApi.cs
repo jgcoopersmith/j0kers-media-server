@@ -67,6 +67,48 @@ public sealed partial class ControlApi : IDisposable
     private IEnumerable<string> OpenPageClients() =>
         _openPages.Values.Distinct().OrderBy(a => a, StringComparer.Ordinal);
 
+    /// <summary>The cookie that marks the window this server opened for itself.</summary>
+    private const string SelfPageCookie = "j0k-self";
+
+    /// <summary>
+    /// The one-time value that identifies the window this server opened. Set
+    /// by Program before the browser is launched; null when nothing was
+    /// opened, in which case no page can ever be marked.
+    /// </summary>
+    public string? SelfOpenToken { set => _selfOpenToken = value; }
+    private string? _selfOpenToken;
+
+    /// <summary>Live links held by the window this server opened for itself.</summary>
+    private int _liveSelfPages;
+
+    /// <summary>
+    /// Whether any page that is NOT the server's own window has ever been
+    /// open. Until one has, the server's own window counts like any other —
+    /// which is what makes a server used from its own console behave the way
+    /// a desktop application should: close the dashboard, the server stops.
+    /// </summary>
+    private volatile bool _elsewhereSeen;
+
+    /// <summary>
+    /// How many open pages are a reason to stay running.
+    ///
+    /// The rule, in one sentence: a window the server opened for itself keeps
+    /// the server alive only until somebody else has been and gone.
+    ///
+    /// Both halves matter. Counting it always is the bug that took seven
+    /// attempts to find — a window on an unattended screen held the server up
+    /// for ever, so closing the browser you were actually using was never the
+    /// last page. Never counting it is just as wrong the other way: the
+    /// person sitting at the server, using the window it opened for them,
+    /// would have it shut down three seconds after it started.
+    /// </summary>
+    private int PagesHolding()
+    {
+        var total = Volatile.Read(ref _liveDashboards);
+        if (!_elsewhereSeen) return total;
+        return Math.Max(0, total - Volatile.Read(ref _liveSelfPages));
+    }
+
     private RtspServer? RtspServer => _services.Rtsp;
     private readonly Media.PlaylistStore _playlists;
     /// <summary>Which conversions are listed; see StreamLinks. Removing a link keeps the files.</summary>
@@ -500,7 +542,7 @@ public sealed partial class ControlApi : IDisposable
     /// </summary>
     private void MarkPageClosing()
     {
-        if (Volatile.Read(ref _liveDashboards) > 0) return;
+        if (PagesHolding() > 0) return;
         lock (_shutdownLock) _zeroSinceUtc ??= DateTime.UtcNow;
     }
 
@@ -524,10 +566,23 @@ public sealed partial class ControlApi : IDisposable
             try
             {
                 if (!_config.ShutdownOnClose || !_sawDashboard) return;
-                if (Volatile.Read(ref _liveDashboards) > 0) return;
+
+                // The mark is maintained here rather than only where links
+                // begin and end. PagesHolding can change without either
+                // happening — the instant a second page connects, the window
+                // the server opened for itself stops counting — and a mark
+                // that is only ever set in the link handler would miss it.
                 DateTime? since;
-                lock (_shutdownLock) since = _zeroSinceUtc;
-                if (since is null) return;
+                if (PagesHolding() > 0)
+                {
+                    lock (_shutdownLock) _zeroSinceUtc = null;
+                    return;
+                }
+                lock (_shutdownLock)
+                {
+                    _zeroSinceUtc ??= DateTime.UtcNow;
+                    since = _zeroSinceUtc;
+                }
 
                 // One wait, whatever is running.
                 //
@@ -690,9 +745,16 @@ public sealed partial class ControlApi : IDisposable
         // correct behaviour and completely invisible without this.
         var holder = Guid.NewGuid().ToString("n");
         _openPages[holder] = ctx.Request.RemoteEndPoint?.Address.ToString() ?? "unknown";
+        // Is this the window the server opened for itself? See PagesHolding.
+        var isSelf = _selfOpenToken is { Length: > 0 } expected
+                     && ctx.Request.Cookies[SelfPageCookie]?.Value == expected;
+        if (isSelf) Interlocked.Increment(ref _liveSelfPages);
+        else _elsewhereSeen = true;
         _sawDashboard = true;
         NoteActivity();
-        Log.Info("control", $"page opened from {_openPages[holder]} ({open} now open)");
+        Log.Info("control", $"page opened from {_openPages[holder]}"
+                            + (isSelf ? " (the window this server opened for itself)" : "")
+                            + $" ({open} now open, {PagesHolding()} holding)");
 
         // "retry" is what the browser waits before reopening. Half a second,
         // which matters more than it looks: this link is deliberately closed
@@ -741,13 +803,15 @@ public sealed partial class ControlApi : IDisposable
         finally
         {
             var left = Interlocked.Decrement(ref _liveDashboards);
+            if (isSelf) Interlocked.Decrement(ref _liveSelfPages);
             _openPages.TryRemove(holder, out _);
+            var holding = PagesHolding();
             // Note the moment the last one went, and let the sweep below
             // decide. Deciding here cannot work any more: a link that ends
             // because its lifetime ran out looks exactly like one that ended
             // because the browser closed, and the difference is only knowable
             // a moment later, by whether anything reconnected.
-            if (left <= 0 && !_cts.IsCancellationRequested)
+            if (holding <= 0 && !_cts.IsCancellationRequested)
             {
                 lock (_shutdownLock) _zeroSinceUtc ??= DateTime.UtcNow;
             }
@@ -1234,6 +1298,27 @@ public sealed partial class ControlApi : IDisposable
             // accounts yet, the form that creates the first administrator).
             if (method == "GET" && path is "/" or "/index.html")
             {
+                // The window this server opened for itself, claiming itself.
+                //
+                // The server opens a dashboard at startup, and that window
+                // holds a live link exactly like anybody else's — which is
+                // how "closing my browser never stops it" happened: on a
+                // server administered from another machine, the window doing
+                // the holding was on a screen nobody was sitting at, so the
+                // count could never reach zero. Suppressing the window
+                // altogether fixed that and took away the front door.
+                //
+                // So it opens the window, and marks it. The token is minted
+                // at startup and goes out in the URL the server opens; the
+                // cookie carries it back on the live link. See PagesHolding
+                // for what the mark is worth — which is nothing at all until
+                // somebody else has been and gone.
+                if (_selfOpenToken is { Length: > 0 } expected
+                    && ctx.Request.QueryString["j"] == expected)
+                {
+                    var mark = new Cookie(SelfPageCookie, expected) { Path = "/", HttpOnly = true };
+                    res.SetCookie(mark);
+                }
                 var page = auth.Level == AccessLevel.None || _auth.SetupRequired
                     ? LoginPage.Value
                     : Dashboard.Value;

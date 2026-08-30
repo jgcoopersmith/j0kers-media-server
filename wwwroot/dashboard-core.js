@@ -124,8 +124,33 @@ function headers() {
   return h;
 }
 
+/* Every read goes through here, and every read gets a deadline.
+
+   Without one, a request the server accepts and then never answers leaves
+   this promise pending for ever — and a pending promise is silent. The whole
+   dashboard sat at "connecting…" with every tile on a dash, no error in the
+   console and nothing in the log, because the first poll never came back and
+   never failed either. It looked exactly like a server that was not there,
+   on a server that was running fine.
+
+   Fifteen seconds is deliberately far longer than any answer should take;
+   this is here to turn "for ever" into "an error you can read", not to be a
+   tight budget. */
+const API_TIMEOUT_MS = 15000;
+
 async function api(path) {
-  const r = await fetch(path, { headers: headers() });
+  const stop = new AbortController();
+  const timer = setTimeout(() => stop.abort(), API_TIMEOUT_MS);
+  let r;
+  try {
+    r = await fetch(path, { headers: headers(), signal: stop.signal });
+  } catch (e) {
+    if (e.name === "AbortError")
+      throw new Error(path + " → no answer in " + (API_TIMEOUT_MS / 1000) + "s");
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
   if (r.status === 401) { showLogin(); throw new Error("unauthorized"); }
   if (!r.ok) throw new Error(path + " → " + r.status);
   return r.json();

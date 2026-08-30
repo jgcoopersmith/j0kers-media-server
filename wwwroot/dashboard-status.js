@@ -20,14 +20,35 @@ const idleText = s => s < 10 ? "active now"
   : s < 3600 ? Math.floor(s / 60) + "m idle"
   : Math.floor(s / 3600) + "h idle";
 
+/* One poll at a time.
+
+   setInterval does not wait for the last run to finish, so a server that was
+   answering slowly got a fresh pair of requests every two seconds on top of
+   the ones already outstanding. That turns a server which is briefly busy
+   into one which is buried, and it is the reason a slow start looked like a
+   dead server rather than a slow one. */
+let pollInFlight = false;
+
 async function tick() {
+  if (pollInFlight) return;
+  pollInFlight = true;
   let status, sessions;
   try {
     [status, sessions] = await Promise.all([api("/api/status"), api("/api/sessions")]);
   } catch (e) {
     $("livedot").classList.remove("live");
-    $("livetext").textContent = e.message === "unauthorized" ? "signed out" : "server unreachable";
+    /* Say what actually happened. "server unreachable" was the answer to
+       every failure including the ones where the server was perfectly
+       reachable and simply had not answered yet — which is the failure that
+       cost the most time to explain, because the page was hiding the one
+       fact that identified it. */
+    $("livetext").textContent =
+      e.message === "unauthorized" ? "signed out"
+      : /no answer in/.test(e.message) ? "server is not answering — it is up, but busy"
+      : "server unreachable";
     return;
+  } finally {
+    pollInFlight = false;
   }
 
   const running = status.running !== false;

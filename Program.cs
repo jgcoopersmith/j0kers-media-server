@@ -497,50 +497,54 @@ try
         // a background-mode server, where opening a window is harmless
         // because nothing shuts down over it, quietly stopped opening one.
         // The test for it is Background_mode_survives_the_last_page_closing.
+        // The window this server opens for itself, and the mark that
+        // stops it holding the server open for ever.
+        //
+        // Opening it is the front door: on a machine somebody is sitting
+        // at, the dashboard appearing IS the application starting. A
+        // build that stopped opening it stopped looking like it had
+        // started at all.
+        //
+        // But that window holds a live link like any other, and on a
+        // server administered from elsewhere it sits on a screen nobody
+        // is at — so the count of open pages never fell to zero and
+        // closing the browser you were actually using was never the last
+        // page. That is the whole of "it never shuts down when I close
+        // the browser", and it survived every fix that did not know the
+        // window existed.
+        //
+        // So the window is marked. The token goes out in the URL, comes
+        // back as a cookie on the live link, and ControlApi.PagesHolding
+        // decides what it is worth: everything, until somebody else has
+        // been and gone, and nothing after that.
+        //
+        // The environment variable is a seam for the end-to-end tests,
+        // which have to be able to play this window without a browser.
+        // Unset — which is every real run — it is a fresh random value
+        // per start, so a token from a previous run can never mark a
+        // page in this one.
+        var selfToken = Environment.GetEnvironmentVariable("J0KERS_SELF_TOKEN") is { Length: > 0 } seeded
+            ? seeded
+            : Guid.NewGuid().ToString("n");
+        control.SelfOpenToken = selfToken;
+        var openUrl = dashboardUrl
+                      + (dashboardUrl.Contains('?') ? "&" : "?") + "j=" + selfToken;
+
         if (config.Control.OpenDashboardOnStart)
         {
             var urlList = string.Join(" · ", urls);
             if (control.BoundHost == "0.0.0.0")
                 urlList += " (bound to 0.0.0.0 — reachable on any of this machine's addresses)";
-            if (config.Control.ShutdownOnClose)
-            {
-                // Do not open a window this server will then treat as somebody
-                // using it.
-                //
-                // This is the whole of "closing my browser never stops the
-                // server". In shutdown-on-close mode the server was opening a
-                // dashboard on its OWN screen at startup; that page holds a
-                // live link exactly like any other, and nothing distinguishes
-                // it. So the count could never reach zero — and on a server
-                // administered from another machine the window doing it was
-                // one nobody could see, on a screen nobody was sitting at,
-                // opened by the server against itself. Closing the browser you
-                // are actually using was never going to be the last page.
-                //
-                // Both safety nets were held shut by that one page: the sweep
-                // returns early while the count is above zero, and every
-                // 20-second reconnect refreshed the timestamp the silence
-                // watch reads. It also set _sawDashboard, so the shutdown was
-                // armed and then permanently vetoed by the thing that armed it.
-                //
-                // The URLs are still printed. Deliberately not fixed by
-                // ignoring loopback in the link handler: driving the dashboard
-                // from the server's own console is legitimate, and closing
-                // THAT page must still stop the server.
-                Log.Info("main", $"dashboard: {urlList}");
-                Log.Info("main", "not opening a browser here — this server stops when the last "
-                                 + "dashboard closes, and a window it opened on its own screen "
-                                 + "would hold it open for ever. Turn on background mode, or "
-                                 + "control.openDashboardOnStart, if you want it opened.");
-            }
-            else if (OperatingSystem.IsLinux()
+
+
+            if (OperatingSystem.IsLinux()
                 && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISPLAY"))
                 && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY")))
             {
                 // headless box — nothing to open a browser on
                 Log.Info("main", $"dashboard: {urlList}");
             }
-            else if (TryOpenBrowser(dashboardUrl))
+            else if (TryOpenBrowser(openUrl))
             {
                 Log.Info("main", $"dashboard opened: {urlList} (disable with control.openDashboardOnStart=false)");
             }
