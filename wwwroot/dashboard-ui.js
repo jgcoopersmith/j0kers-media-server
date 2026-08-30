@@ -1,4 +1,4 @@
-/* The pieces the rest of the page borrows, and the start-up that sets it
+﻿/* The pieces the rest of the page borrows, and the start-up that sets it
    running: pickPath, the popconfirm, the clipboard fallback for plain http,
    the delegated data-act handler, card folding and card ordering.
 
@@ -322,6 +322,7 @@ document.addEventListener("click", e => {
     case "pl-play":     playFolder(arg, el.dataset.name); break;
     case "pl-remove":   removePlaylist(arg); break;
     case "usr-edit":    toggleUserEdit(arg); break;
+    case "usr-signout": signOutUser(arg); break;
     case "usr-save":    saveUser(arg); break;
     case "usr-remove":  removeUser(arg); break;
     case "usr-keys":    toggleUserKeys(arg); break;

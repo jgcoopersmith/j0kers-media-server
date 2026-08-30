@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Text;
 using System.Text.Json;
 using J0kersMediaServer.Auth;
@@ -150,6 +150,33 @@ public sealed partial class ControlApi
             case ("POST", "/api/users"):
                 CreateUser(ctx, auth);
                 return true;
+
+            // Ends every session belonging to one account.
+            //
+            // The machinery existed and had no door: RevokeSessionsFor was
+            // reachable only as a side effect of editing an account —
+            // disabling it, resetting its password, re-ticking passwordless —
+            // so the way to clear a stale sign-in was to change something
+            // about the account and change it back. That is a workaround
+            // standing in for a control, and it meant a server showing ten
+            // sign-ins had no way to end any of them short of waiting out the
+            // twelve-hour idle timeout.
+            //
+            // Deliberately per account rather than per session: a session has
+            // no name a person could act on, and "sign this account out" is
+            // the thing anybody actually wants to say. Signing yourself out
+            // this way is allowed — it is the same as the sign-out you already
+            // have, applied to every device you left signed in.
+            case ("POST", "/api/users/signout"):
+            {
+                var target = store.FindById(ctx.Request.QueryString["id"]);
+                if (target is null) { WriteJson(res, 404, new { error = "unknown user" }); return true; }
+                var had = _auth.SessionCountFor(target.Id);
+                _auth.RevokeSessionsFor(target.Id);
+                Log.Info("auth", $"{auth.Name} signed {target.Username} out of {had} session(s)");
+                WriteJson(res, 200, new { signedOut = had });
+                return true;
+            }
 
             case ("PUT", "/api/users"):
                 EditUser(ctx, auth);

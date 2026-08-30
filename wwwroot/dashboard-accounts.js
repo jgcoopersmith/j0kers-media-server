@@ -1,4 +1,4 @@
-/* Your own account and, for an administrator, everyone else's: the account
+﻿/* Your own account and, for an administrator, everyone else's: the account
    panel with its password change and personal keys, and the user list that
    creates, edits and removes accounts. Split out of dashboard.html; see
    dashboard-core.js for why every function here stays global. */
@@ -70,10 +70,13 @@ async function openUsers() {
   await loadUsers();
 }
 
+let lastUsers = [];   // the last list fetched, so an action can name its subject
+
 async function loadUsers() {
   let data;
   try { data = await api("/api/users"); }
   catch (e) { $("users-list").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; return; }
+  lastUsers = data.users || [];
   $("users-list").innerHTML = data.users.map(u => {
     const badges = '<span class="badge ' + esc(u.role) + '">' + esc(u.roleLabel || u.role) + "</span>"
       + (u.enabled ? "" : '<span class="badge off">disabled</span>')
@@ -84,6 +87,9 @@ async function loadUsers() {
       + '<div class="top"><span class="nm">' + esc(u.displayName || u.username) + "</span>" + badges
       + '<span style="flex:1"></span>'
       + '<button data-act="usr-keys" data-arg="' + esc(u.id) + '" title="' + u.keys.length + ' key' + (u.keys.length === 1 ? '' : 's') + '">🔑</button>'
+      + (u.sessions > 0
+          ? '<button data-act="usr-signout" data-arg="' + esc(u.id) + '" title="End every session this account has open. It can sign in again; anything it is watching stops.">Sign out</button>'
+          : "")
       + '<button data-act="usr-edit" data-arg="' + esc(u.id) + '">Edit</button>'
       + (u.self ? "" : '<button class="danger" data-act="usr-remove" data-arg="' + esc(u.id) + '">Remove</button>')
       + "</div>"
@@ -132,6 +138,26 @@ async function createUser() {
 }
 
 function userPanel(id) { return $("up-" + id); }
+
+/* Ends every session one account has open.
+   Confirmed, because it is felt at the other end: somebody watching on a TV
+   is signed out mid-film, and the person clicking is usually not the person
+   holding the remote. Signing yourself out is allowed and lands you back at
+   the sign-in page, which is the honest consequence rather than a special
+   case worth coding around. */
+async function signOutUser(id) {
+  const u = (lastUsers || []).find(x => x.id === id);
+  const who = u ? (u.displayName || u.username) : "this account";
+  const n = u ? u.sessions : 0;
+  if (!confirm("Sign " + who + " out of " + n + " session" + (n === 1 ? "" : "s") + "?\n\n"
+             + "They can sign in again. Anything they are watching right now stops.")) return;
+  const [ok, d] = await send("POST", "/api/users/signout?id=" + encodeURIComponent(id));
+  const msg = $("users-msg");
+  if (msg) msg.textContent = ok
+    ? "signed " + who + " out of " + d.signedOut + " session" + (d.signedOut === 1 ? "" : "s")
+    : (d.error || "could not sign that account out");
+  loadUsers();
+}
 
 async function toggleUserEdit(id) {
   const box = userPanel(id);
