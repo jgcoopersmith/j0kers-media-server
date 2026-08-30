@@ -506,14 +506,25 @@ public sealed partial class ControlApi : IDisposable
         // is not an instruction, so work in progress keeps the server up:
         // without this, locking the screen ended an overnight conversion run
         // half a minute later.
-        if (_ffmpeg is not null)
-        {
-            var active = _ffmpeg.ActiveVodStreams.Count;
-            var queued = _ffmpeg.VodQueueDepth;
-            if (active > 0 || queued > 0)
-                return $"{active} conversion(s) running, {queued} queued";
-        }
-        return StreamingBlockedBy();
+        return ConversionsInProgress() ?? StreamingBlockedBy();
+    }
+
+    /// <summary>
+    /// Work this server was asked to do and has not finished — conversions
+    /// running now, and conversions still queued behind them.
+    ///
+    /// Both shutdown paths ask this. It used to be inline in the silence
+    /// watch only, which is how the close path came to be the one that could
+    /// throw the work away.
+    /// </summary>
+    private string? ConversionsInProgress()
+    {
+        if (_ffmpeg is null) return null;
+        var active = _ffmpeg.ActiveVodStreams.Count;
+        var queued = _ffmpeg.VodQueueDepth;
+        return active > 0 || queued > 0
+            ? $"{active} conversion(s) running, {queued} queued"
+            : null;
     }
 
     /// <summary>
@@ -584,18 +595,44 @@ public sealed partial class ControlApi : IDisposable
                     since = _zeroSinceUtc;
                 }
 
-                // One wait, whatever is running.
-                //
-                // A conversion in flight briefly bought a longer one, on the
-                // reasoning that a dropped link is ambiguous — a Wi-Fi blip and
-                // a closed tab arrive here identically — and that guessing
-                // wrong mid-encode is expensive. The owner of this server has
-                // decided otherwise: the page closing stops it, promptly, and
-                // an interrupted conversion is the accepted cost. It is a fair
-                // trade to make, because nothing is destroyed by it: the queue
-                // persists the in-flight sources and the next start resumes
-                // them (see SaveQueueState).
                 if (DateTime.UtcNow - since.Value < TimeSpan.FromMilliseconds(CloseGraceMs)) return;
+
+                // Closing the page stops the server — but not on top of work
+                // it was asked to do.
+                //
+                // Queue a batch of conversions, close the dashboard and walk
+                // away, which is the entire point of a queue, and this took
+                // the whole thing down three seconds later: no CPU, no
+                // transcodes, nothing answering on the control port. From the
+                // outside that is indistinguishable from a crash, and it is
+                // what "the server works for a while and then goes dead" was.
+                //
+                // What used to stand here recorded a decision that an
+                // interrupted conversion was an acceptable cost, because the
+                // queue persists and resumes on the next start. It resumes
+                // only if something starts it — and nothing does. The server
+                // is gone and the person who queued the work went away
+                // precisely because they had queued it. "It resumes on the
+                // next start" is a description of a server that is not
+                // running.
+                //
+                // The silence watch has always held work above a guess (see
+                // SilenceShutdownBlockedBy). A deliberate close is a stronger
+                // signal than silence, but it is still not an instruction to
+                // throw away an hour of encoding. So the close is remembered
+                // rather than cancelled: the mark stands, this timer keeps
+                // running, and the moment the queue drains the pending close
+                // takes effect on the next tick.
+                //
+                // Viewers deliberately do not hold it — see StreamingBlockedBy
+                // for why a close asks nothing about them. Only work this
+                // server was told to do does.
+                if (ConversionsInProgress() is string working)
+                {
+                    Log.Debug("control", $"no page open, but staying up: {working} " +
+                                         "— shutting down when the work is done");
+                    return;
+                }
 
                 lock (_shutdownLock)
                 {
@@ -604,13 +641,7 @@ public sealed partial class ControlApi : IDisposable
                 }
                 _linkSweepTimer?.Dispose();
                 _linkSweepTimer = null;
-                var busy = _ffmpeg is not null
-                           && (_ffmpeg.ActiveVodStreams.Count > 0 || _ffmpeg.VodQueueDepth > 0);
-                // Say when work was interrupted, so the log accounts for it —
-                // the stop is intended, the abandoned encode should still be
-                // on the record rather than being a silent surprise later.
-                Log.Info("control", $"no page has been open for {CloseGraceMs / 1000}s — shutting down"
-                                    + (busy ? " (conversions were still running; they resume on the next start)" : ""));
+                Log.Info("control", $"no page has been open for {CloseGraceMs / 1000}s — shutting down");
                 _requestShutdown();
             }
             catch (Exception ex) { Log.Warn("control", "link sweep failed: " + ex.Message); }
