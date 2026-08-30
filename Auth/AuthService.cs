@@ -50,8 +50,9 @@ public sealed record AuthResult(AccessLevel Level, UserAccount? User, string Met
 ///     media element can't set headers), for phones, players and scripts
 ///     that should just keep working without a login prompt.
 ///
-/// Sessions survive a restart: the table is kept in a sessions.json sidecar
-/// as token digests, so an update or a reboot doesn't sign everybody out.
+/// A start signs everybody out. Sessions used to be restored from a
+/// sessions.json sidecar so that a restart didn't cost anyone a login; see
+/// ClearSessions for why that was the wrong trade.
 /// Failed logins are throttled per account and per source address with an
 /// escalating lockout.
 /// </summary>
@@ -111,36 +112,44 @@ public sealed class AuthService
         _users = users;
         _legacyToken = legacyToken ?? "";
         _sessionFile = baseDirectory is null ? "" : Path.Combine(baseDirectory, "sessions.json");
-        LoadSessions();
+        ClearSessions();
     }
 
-    private void LoadSessions()
+    /// <summary>
+    /// A server that has just started has nobody signed in.
+    ///
+    /// This used to restore the table from sessions.json, so that a restart
+    /// did not cost everyone a login. What it did in practice was accumulate.
+    /// The window the server opens for itself signs in through the self-open
+    /// token, which mints a row every single start, and nothing ever took one
+    /// away: an unused session was kept until it aged out days later. So the
+    /// count only ever went up. Seven "users logged in" on a freshly started
+    /// server, every one of them the same account at the same address, each
+    /// one a window that had been opened once and closed long ago.
+    ///
+    /// A running total of every window ever opened is not a list of who is
+    /// signed in, and it is worse than useless on the page that is supposed
+    /// to show that — it is the place you would look to find out whether
+    /// somebody else is on your server, answering with a number that means
+    /// nothing. Surviving a restart was never worth that.
+    ///
+    /// So the table starts empty, and the file is emptied with it: whoever is
+    /// signed in is whoever has signed in since this server started.
+    /// </summary>
+    private void ClearSessions()
     {
         if (_sessionFile.Length == 0 || !File.Exists(_sessionFile)) return;
-        Services.SecretFile.Protect(_sessionFile);   // an older build's file, on the way past
         try
         {
-            var stored = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, Session>>(
-                File.ReadAllText(_sessionFile));
-            if (stored is null) return;
-            var now = DateTime.UtcNow;
-            var kept = 0;
-            foreach (var (id, s) in stored)
-            {
-                // an expired session is not worth restoring, and neither is
-                // one whose account has since gone or been disabled
-                if (now - s.LastSeenUtc > SessionIdle || now - s.CreatedUtc > SessionMax) continue;
-                if (_users.FindById(s.UserId) is not { Enabled: true }) continue;
-                _sessions[id] = s;
-                kept++;
-            }
-            if (kept > 0) Log.Info("auth", $"restored {kept} signed-in session(s)");
+            File.Delete(_sessionFile);
         }
         catch (Exception ex)
         {
-            // a damaged file costs everyone a sign-in, which is recoverable;
-            // refusing to start is not
-            Log.Warn("auth", $"could not read sessions.json ({ex.Message}) — everyone will sign in again");
+            // Not fatal, but it must not pass in silence: a file that cannot
+            // be removed is one a later save will merge into, and the count
+            // starts creeping again.
+            Log.Warn("auth", $"could not clear sessions.json ({ex.Message}) — " +
+                             "old sessions may reappear in the signed-in list");
         }
     }
 
