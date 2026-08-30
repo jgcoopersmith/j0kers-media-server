@@ -791,6 +791,21 @@
     <div class="tile"><div class="k">HLS streams</div><div class="v" id="t-hls">–</div><div class="d" id="t-hls-d">on port –</div></div>
   </div>
 
+  <!-- What has failed lately. Server-admin, like the log it is drawn from,
+       because these name file paths. Hidden entirely when nothing is wrong:
+       a card that says "0 problems" every day is a card people stop reading,
+       and the whole point of this one is that its presence means something. -->
+  <div class="card server-admin-only" id="problemcard" style="display:none">
+    <h2 style="display:flex;align-items:center;gap:8px">
+      <span style="flex:1">⚠ Problems <span id="prob-count" style="color:var(--muted);font-weight:400"></span></span>
+      <button id="prob-clear" onclick="clearProblems()" title="Forget everything listed here. It does not fix or retry anything — the next failure will list itself again.">Clear</button>
+    </h2>
+    <div style="color:var(--muted);font-size:12px;margin-bottom:8px">
+      Files the server could not read or convert. These were only ever log lines before, so they went unnoticed.
+    </div>
+    <div id="prob-list"></div>
+  </div>
+
   <div class="card server-admin-only" id="logcard">
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Log</span>
       <select id="log-file" class="am-in" style="width:auto;max-width:230px" onchange="onLogFileChange()" onfocus="loadLogFiles()" title="Live view, or an earlier log file from disk (last night, a crash, a previous run)">

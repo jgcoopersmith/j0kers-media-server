@@ -68,6 +68,9 @@ public sealed class TvCodecs
         ".vob", ".ifo", ".divx", ".rm", ".rmvb", ".ogm", ".asf", ".mkv",
     };
 
+    /// <summary>Told when a file cannot be read, so it can be listed rather than only logged.</summary>
+    public Action<string, string, string>? OnProblem { get; set; }
+
     private readonly string _cacheFile;
     private readonly string _ffprobe;
     private readonly Dictionary<string, string> _cache = new(StringComparer.OrdinalIgnoreCase);
@@ -153,7 +156,13 @@ public sealed class TvCodecs
         // So leave a failure uncached. The file goes back to "not read yet",
         // the next sweep tries again, and one that genuinely cannot be read
         // costs one ffprobe per sweep rather than a permanent wrong answer.
-        if (probed.video is null && probed.audio is null) return probed;
+        if (probed.video is null && probed.audio is null)
+        {
+            // Listed as well as logged. This is the failure that was costing
+            // whole films silently, so it belongs somewhere a person looks.
+            OnProblem?.Invoke("probe", file, "could not be read — ffprobe returned nothing");
+            return probed;
+        }
 
         bool flush;
         lock (_lock)

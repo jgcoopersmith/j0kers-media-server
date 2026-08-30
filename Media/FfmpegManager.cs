@@ -91,6 +91,13 @@ public sealed class FfmpegManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// Told when something goes wrong that a person may want to see — a
+    /// conversion exiting non-zero, a source that has gone. Set by Program so
+    /// this class stays unaware of where the list lives.
+    /// </summary>
+    public Action<string, string, string>? OnProblem { get; set; }
+
     private readonly Dictionary<string, VodProgress> _vodProgress = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Process> _liveJobs = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<ChannelDef> _channels = new();
@@ -2707,7 +2714,16 @@ public sealed class FfmpegManager : IDisposable
                 if (code == 0)
                     Log.Info("ffmpeg", $"{label}: finished");
                 else
+                {
                     Log.Warn("ffmpeg", $"{label}: exited with code {code}{(tail.Length > 0 ? " — " + tail : "")}");
+                    // A conversion that failed is the thing most worth seeing
+                    // and the thing this log line was least good at showing:
+                    // one warning in a stream of thousands, hours before
+                    // anybody looks. Also listed, with ffmpeg's own last words
+                    // as the detail, because they usually name the cause.
+                    OnProblem?.Invoke("conversion", label,
+                        $"ffmpeg exited with code {code}" + (tail.Length > 0 ? " — " + tail : ""));
+                }
             }
             catch { /* process already reaped/disposed — nothing to report */ }
 

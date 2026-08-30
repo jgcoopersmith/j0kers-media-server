@@ -1,4 +1,4 @@
-/* The header tiles and the poll that feeds them. tick() is the heartbeat of
+﻿/* The header tiles and the poll that feeds them. tick() is the heartbeat of
    the whole page: it runs every POLL_MS, asks the server what it is doing,
    and hands the answer to the renderers in the other files. Split out of
    dashboard.html; see dashboard-core.js for why every function here stays
@@ -106,6 +106,11 @@ async function tick() {
   renderSessions(sessions.sessions);
   // the card is server-admin-only, and so is the endpoint behind it
   if (document.body.classList.contains("is-server-admin")) {
+    /* The Problems card. The count rides this poll; the list itself is only
+       fetched when the count changes, so a healthy server never asks for it
+       at all. Same tier as the log, and for the same reason — these name
+       file paths. */
+    if (typeof status.problems === "number") paintProblems(status.problems);
     refreshLog();
     tcBoot();
     renderConversions(transcodingNow, status.transcodeQueue || []);
@@ -269,3 +274,97 @@ function renderSessions(list) {
   $("sessions").innerHTML = h + '</table>';
 }
 
+
+
+/* ---- Problems ----
+   Shown only when there is something wrong. A card reading "0 problems" on a
+   healthy server is one people learn to skip, which would defeat it: the
+   value here is that seeing this card at all means something needs looking
+   at. Server-admin only, by the class on the card. */
+let probLastCount = -1;
+
+async function paintProblems(count) {
+  const card = $("problemcard");
+  if (!card) return;
+  if (!count) { card.style.display = "none"; probLastCount = 0; return; }
+  card.style.display = "";
+  $("prob-count").textContent = "· " + count + (count === 1 ? " item" : " items");
+  // Only re-fetch the detail when the count actually moved. The list is a
+  // handful of rows and this poll runs every two seconds.
+  if (count === probLastCount) return;
+  probLastCount = count;
+  try {
+    const d = await api("/api/problems");
+    renderProblems(d.problems || []);
+  } catch { /* a read-only account cannot see these; the card is hidden anyway */ }
+}
+
+const PROB_LABEL = { conversion: "conversion failed", probe: "could not be read", source: "source missing" };
+
+function renderProblems(items) {
+  const list = $("prob-list");
+  if (!list) return;
+  list.innerHTML = "";
+  for (const it of items) {
+    const row = document.createElement("div");
+    row.className = "tc-row";
+    row.style.cursor = "default";
+
+    const icon = document.createElement("span");
+    icon.style.flex = "none";
+    icon.textContent = it.kind === "conversion" ? "🎞" : it.kind === "probe" ? "🔍" : "📄";
+
+    const nm = document.createElement("span");
+    nm.className = "tc-name";
+    nm.textContent = it.name;
+    nm.title = it.path + "\n\n" + it.detail;   // the full path and ffmpeg's own words
+
+    const what = document.createElement("span");
+    what.className = "tc-badge b-need";
+    what.textContent = PROB_LABEL[it.kind] || it.kind;
+
+    row.appendChild(icon); row.appendChild(nm); row.appendChild(what);
+
+    if (it.count > 1) {
+      const n = document.createElement("span");
+      n.className = "tc-badge b-ok";
+      n.title = "How many times this same failure has happened";
+      n.textContent = "\u00d7" + it.count;
+      row.appendChild(n);
+    }
+
+    const when = document.createElement("span");
+    when.className = "tc-badge b-ok";
+    when.style.flex = "none";
+    when.textContent = agoText(it.whenUtc);
+    row.appendChild(when);
+
+    const x = document.createElement("button");
+    x.className = "danger"; x.style.flex = "none"; x.textContent = "\u2715";
+    x.title = "Forget this one";
+    x.onclick = () => forgetProblem(it.path);
+    row.appendChild(x);
+
+    list.appendChild(row);
+  }
+}
+
+function agoText(whenUtc) {
+  const s = Math.max(0, (Date.now() - new Date(whenUtc).getTime()) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+
+async function forgetProblem(path) {
+  await send("POST", "/api/problems/clear?path=" + encodeURIComponent(path));
+  probLastCount = -1;   // force the next poll to re-read
+}
+
+async function clearProblems() {
+  await send("POST", "/api/problems/clear");
+  probLastCount = -1;
+  renderProblems([]);
+  $("problemcard").style.display = "none";
+}

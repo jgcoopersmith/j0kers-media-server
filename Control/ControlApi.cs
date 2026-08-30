@@ -261,6 +261,9 @@ public sealed partial class ControlApi : IDisposable
     private readonly HashSet<string> _relayProviders;
     private readonly Media.TvCodecs? _tvCodecs;
 
+    /// <summary>What has gone wrong lately, for the Problems card.</summary>
+    public readonly Services.Problems Problems = new();
+
     /// <summary>
     /// Writes out whatever this API is holding in memory. Called on a timer
     /// and on the way down — see Services.StateSaver for why both.
@@ -307,7 +310,14 @@ public sealed partial class ControlApi : IDisposable
         // with, so it stays null without one and the DLNA path falls back
         // to handing over originals, as it always did.
         if (ffmpeg is not null)
+        {
             _tvCodecs = new Media.TvCodecs(baseDirectory, ffmpeg.FfprobePath);
+            // Both places that already notice a failure now also record it
+            // somewhere a person will actually see. They stay unaware of the
+            // list itself; they just report.
+            _tvCodecs.OnProblem = Problems.Record;
+            ffmpeg.OnProblem = Problems.Record;
+        }
 
         if (serverConfig.Discovery.Dlna) _dlna = NewDlna();
 
@@ -949,6 +959,9 @@ public sealed partial class ControlApi : IDisposable
             case "/api/log":
             case "/api/log/files":   // listing the rotated history
             case "/api/log/file":    // reading one rotated file
+            // the problem list names file paths, exactly as the log does
+            case "/api/problems":
+            case "/api/problems/clear":
             // batch transcoding runs the machine hard and reaches any path on
             // disk, the same class of power as the log and the config
             case "/api/transcode":
@@ -1399,6 +1412,8 @@ public sealed partial class ControlApi : IDisposable
     private static readonly Dictionary<(string Method, string Path), Route> Routes = new()
     {
         [("GET", "/api/status")] = Sync((api, ctx, auth) => api.WriteStatus(ctx, auth)),
+        [("GET", "/api/problems")] = Sync((api, ctx, _) => api.WriteProblems(ctx)),
+        [("POST", "/api/problems/clear")] = Sync((api, ctx, _) => api.ClearProblems(ctx)),
         [("GET", "/api/config")] = Sync((api, ctx, _) => api.WriteConfig(ctx)),
         [("GET", "/api/mounts")] = Sync((api, ctx, _) => api.WriteMounts(ctx)),
         [("GET", "/api/sessions")] = Sync((api, ctx, _) => api.WriteSessions(ctx)),
@@ -1499,6 +1514,34 @@ public sealed partial class ControlApi : IDisposable
     };
 
     /// <summary>GET /api/status - identity, uptime, and every live counter the dashboard polls.</summary>
+    /// <summary>
+    /// GET /api/problems - what has failed lately. Server Admin, the same tier
+    /// as the log it is drawn from: these name file paths.
+    /// </summary>
+    private void WriteProblems(HttpListenerContext ctx)
+    {
+        WriteJson(ctx.Response, 200, new
+        {
+            problems = Problems.All.Select(p => new
+            {
+                kind = p.Kind,
+                path = p.Path,
+                name = Path.GetFileName(p.Path) is { Length: > 0 } n ? n : p.Path,
+                detail = p.Detail,
+                whenUtc = p.WhenUtc,
+                count = p.Count,
+            }),
+        });
+    }
+
+    /// <summary>POST /api/problems/clear - forget one path, or all of them.</summary>
+    private void ClearProblems(HttpListenerContext ctx)
+    {
+        var path = ctx.Request.QueryString["path"];
+        Problems.Clear(path: string.IsNullOrWhiteSpace(path) ? null : path);
+        WriteJson(ctx.Response, 200, new { ok = true, remaining = Problems.Count });
+    }
+
     private void WriteStatus(HttpListenerContext ctx, AuthResult auth)
     {
         var res = ctx.Response;
@@ -1515,6 +1558,7 @@ public sealed partial class ControlApi : IDisposable
             // so it is an administrator's to see and nobody else's. Hiding the
             // pill in CSS would not be enough — the answer must not be in the
             // response at all for a read-only account.
+            problems = Problems.Count,
             accounts = _auth.AccountCount,
             signedIn = _auth.SignedInCount,
             signedInUsers = auth.IsAdmin
