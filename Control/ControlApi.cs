@@ -492,6 +492,18 @@ public sealed partial class ControlApi : IDisposable
         return viewers > 0 ? $"{viewers} viewer(s) streaming" : null;
     }
 
+    /// <summary>
+    /// A page said it is going. Recorded rather than acted on: the sweep
+    /// decides, and it decides on whether anything is still open a moment
+    /// later, which is the only question that matters and the only one a
+    /// beacon cannot answer on its own.
+    /// </summary>
+    private void MarkPageClosing()
+    {
+        if (Volatile.Read(ref _liveDashboards) > 0) return;
+        lock (_shutdownLock) _zeroSinceUtc ??= DateTime.UtcNow;
+    }
+
     private Timer? _linkSweepTimer;
 
     /// <summary>
@@ -548,17 +560,22 @@ public sealed partial class ControlApi : IDisposable
             Services.KeepAwake.Busy(converting);
 
             if (!_config.ShutdownOnClose || !_sawDashboard) return;
-            // A page is open, and that is now a fact rather than a hope. It
-            // used to be neither: a link was held until a write failed, so an
-            // immortal one meant this check could never be reached — which is
-            // why this watch was written to ignore the count and go by silence
-            // instead. Links expire and are remade now, so a count above zero
-            // cannot be a ghost, and the sweep owns the zero case.
+            // Deliberately NOT gated on _liveDashboards.
             //
-            // It has to defer, too. The sign-in page holds a link and does not
-            // poll anything, so going by silence alone shut the server down
-            // half a minute after somebody opened it and simply looked at it.
-            if (Volatile.Read(ref _liveDashboards) > 0) return;
+            // Gating it there felt tidy and was the same mistake in a new
+            // place: one handler stuck on a write nobody will ever answer
+            // would hold the count above zero, and this watch — the backstop
+            // for exactly that — would politely stand down. Two mechanisms,
+            // one shared assumption, which is how this bug survived so long
+            // the first time.
+            //
+            // They are independent now, and the ordering is what makes that
+            // safe: a link lasts 20 seconds and opening one refreshes the
+            // timestamp below, so a browser that is really there keeps this
+            // quiet by reconnecting, well inside the 30 seconds. A stuck
+            // handler cannot reconnect and cannot refresh anything — the
+            // heartbeat no longer touches this field — so silence falls and
+            // this watch takes it down. That is the case it is for.
             if (DateTime.UtcNow - _lastSeenUtc < DashboardGoneAfter) return;
             // Converting counts as being in use just as much as watching does.
             // Without this, locking the screen stopped the work: the browser
@@ -676,6 +693,19 @@ public sealed partial class ControlApi : IDisposable
         using var life = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
         life.CancelAfter(LinkLifetime);
         var tok = life.Token;
+
+        // And a hand on the response itself, because cancelling the token is
+        // not enough. A CancellationToken can only be observed at an await
+        // that checks it; a write already inside http.sys does not, so a write
+        // that never returns is not interrupted by cancelling — the handler
+        // stays parked and the count never falls. Aborting the response closes
+        // the connection underneath it, which makes that parked write throw.
+        // That is the only lever here that does not depend on the write
+        // co-operating, and this whole design exists because it does not.
+        using var abort = new Timer(_ =>
+        {
+            try { res.Abort(); } catch { }
+        }, null, (int)LinkLifetime.TotalMilliseconds + 2000, Timeout.Infinite);
         try
         {
             await res.OutputStream.WriteAsync(hello, tok);
@@ -1400,6 +1430,26 @@ public sealed partial class ControlApi : IDisposable
                 return;
             }
 
+            // The close beacon belongs up here with the link it partners.
+            //
+            // It sat below the sign-in gate while the link sat above it, so on
+            // the sign-in page — which any fresh install serves, to anyone —
+            // the page could say "I am here" and was refused with a 401 when
+            // it tried to say "I am going". Half a conversation, and the half
+            // that was dropped is the one that stops the server.
+            if (method == "POST" && path == "/api/server/closing")
+            {
+                if (IsCrossSite(ctx)) { res.StatusCode = 403; res.Close(); return; }
+                // No count test. It used to fire only when this looked like
+                // the last page, which meant a single stuck link could veto
+                // the beacon as well — a third mechanism disabled by the same
+                // stale entry. Marking zero is the sweep's job; all this has
+                // to do is be heard.
+                MarkPageClosing();
+                WriteJson(res, 200, new { noted = true });
+                return;
+            }
+
             // Everything else is gated. Administration (configuration, the
             // power button, accounts, the filesystem picker) needs an admin;
             // watching needs any account.
@@ -1430,12 +1480,7 @@ public sealed partial class ControlApi : IDisposable
             // browser a coin toss: measured, the beacon simply did not turn
             // up. Only the last page leaving counts, so shutting one of two
             // tabs is not a close.
-            if (method == "POST" && path == "/api/server/closing")
-            {
-                if (Volatile.Read(ref _liveDashboards) <= 1) DashboardWentAway();
-                WriteJson(res, 200, new { scheduled = _config.ShutdownOnClose });
-                return;
-            }
+
             if (method == "GET" && path == "/api/status") { _sawDashboard = true; NoteActivity(); }
 
             // Everything past this point is a plain route. The table maps

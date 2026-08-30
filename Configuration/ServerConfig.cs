@@ -207,7 +207,17 @@ public sealed class ServerConfig
         if (s.HlsPort is int hp) Hls.Port = hp;
         if (s.ControlPort is int cp) Control.Port = cp;
         if (!string.IsNullOrWhiteSpace(s.AuthToken)) Control.AuthToken = s.AuthToken;
-        if (s.MinimizeToTray is bool tray) MinimizeToTray = tray;
+        if (s.MinimizeToTray is bool tray)
+        {
+            // Worth a line, because this quietly beats server.json and the two
+            // disagreeing is exactly the state nobody could see: server.json
+            // says false, settings.json says true, and the server runs in the
+            // tray while the file somebody edited says it should not.
+            if (tray != MinimizeToTray)
+                J0kersMediaServer.Logging.Log.Info("config", $"settings.json sets minimizeToTray={tray}, "
+                                         + $"overriding server.json's {MinimizeToTray}");
+            MinimizeToTray = tray;
+        }
         if (s.LinkLifetimeHours is int hours) Hls.LinkLifetimeHours = hours;
         if (s.DiscoveryEnabled is bool announce) Discovery.Enabled = announce;
         if (s.DlnaEnabled is bool dlna) Discovery.Dlna = dlna;

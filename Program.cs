@@ -490,6 +490,19 @@ try
             autoHideMs: 3000);
 
         control.SetTrayMode = ApplyTrayMode;
+
+        // Say which mode this is, out loud, and what it means for closing the
+        // page. This was the single most expensive silence in the product: a
+        // settings.json saved from the dashboard overrides minimizeToTray in
+        // server.json, nothing said so, and in tray mode closing the dashboard
+        // is *correctly* a no-op. So a server behaving exactly as configured
+        // looked identical to a broken shutdown, and the configuration that
+        // decided it was in a different file from the one being read.
+        Log.Info("main", config.MinimizeToTray
+            ? "background mode is ON — closing the dashboard will NOT stop this server. " +
+              "Untick 'Minimize to the system tray' in ⚙ Config to change that."
+            : "background mode is OFF — closing the last dashboard page stops this server.");
+
         if (config.MinimizeToTray) ApplyTrayMode(true);
         // Started in the foreground and staying there: the same rule as turning
         // background mode off. The dashboard is the session, so closing it ends
