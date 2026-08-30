@@ -527,8 +527,34 @@ public sealed partial class ControlApi : IDisposable
                 if (Volatile.Read(ref _liveDashboards) > 0) return;
                 DateTime? since;
                 lock (_shutdownLock) since = _zeroSinceUtc;
-                if (since is null || DateTime.UtcNow - since.Value < TimeSpan.FromMilliseconds(CloseGraceMs))
-                    return;
+                if (since is null) return;
+
+                // How long to wait before believing it, and it depends on what
+                // is at stake.
+                //
+                // A link ending is not proof that anybody closed anything. The
+                // page closing ends it, and so does a Wi-Fi blip, a VPN flap,
+                // the client machine going to sleep, and a browser quietly
+                // discarding a background tab. All four arrive here identically
+                // and the server cannot tell them apart — it only knows the
+                // link is not there any more.
+                //
+                // With nothing running that ambiguity is cheap: stop promptly,
+                // and if it was a blip the next start costs a few seconds. With
+                // an encode in flight it is expensive — this is what "twice
+                // just died and went offline while processing transcodes" was,
+                // a network hiccup between two machines on the same LAN reading
+                // as a deliberate close and taking hours of encoding with it.
+                //
+                // So while there is work to lose, wait long enough that a real
+                // page comes back. It reconnects in about half a second; half a
+                // minute of silence is a page that is genuinely gone. Closing
+                // the browser still stops the server — that promise is intact —
+                // it just stops being decided by one dropped packet.
+                var converting = _ffmpeg is not null
+                                 && (_ffmpeg.ActiveVodStreams.Count > 0 || _ffmpeg.VodQueueDepth > 0);
+                var grace = converting ? ConvertingCloseGraceMs : CloseGraceMs;
+                if (DateTime.UtcNow - since.Value < TimeSpan.FromMilliseconds(grace)) return;
 
                 lock (_shutdownLock)
                 {
@@ -537,8 +563,9 @@ public sealed partial class ControlApi : IDisposable
                 }
                 _linkSweepTimer?.Dispose();
                 _linkSweepTimer = null;
-                Log.Info("control", "no page has been open for "
-                                    + (CloseGraceMs / 1000) + "s — shutting down");
+                Log.Info("control", converting
+                    ? $"no page has been open for {ConvertingCloseGraceMs / 1000}s while converting — shutting down"
+                    : $"no page has been open for {CloseGraceMs / 1000}s — shutting down");
                 _requestShutdown();
             }
             catch (Exception ex) { Log.Warn("control", "link sweep failed: " + ex.Message); }
@@ -830,6 +857,14 @@ public sealed partial class ControlApi : IDisposable
     /// Deliberately well inside DashboardGoneAfter below: every reconnect is
     /// also what refreshes the timestamp that watch reads, so a link must be
     /// remade comfortably before that watch would give up on the page.
+    /// <summary>
+    /// The same wait, when there is an encode in flight worth protecting from
+    /// a dropped packet. Long enough that any real page reconnects, short
+    /// enough that a deliberate close still ends in the server stopping while
+    /// somebody is still standing there.
+    /// </summary>
+    private const int ConvertingCloseGraceMs = 30_000;
+
     private static readonly TimeSpan LinkLifetime = TimeSpan.FromSeconds(20);
 
     /// <summary>
