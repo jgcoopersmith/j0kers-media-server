@@ -639,7 +639,7 @@ public sealed class FfmpegManager : IDisposable
             // from the first moment instead of growing behind the encoder.
             try { File.WriteAllText(Path.Combine(dir, "duration.txt"), Inv(duration)); } catch { }
 
-            var job = Spawn(args, $"vod {info.Name}", dir,
+            var job = Spawn(args, $"vod {info.Name}", dir, background: true,
                 onProgressLine: line => NoteVodProgress(stream, title, duration, line),
                 onExited: p =>
                 {
@@ -2718,8 +2718,14 @@ public sealed class FfmpegManager : IDisposable
     /// has already fired is never called, which would strand the job's entry
     /// in the tables it was meant to clean up.
     /// </summary>
+    /// <param name="background">
+    /// Batch work nobody is waiting on: started at below-normal priority so
+    /// it fills idle cores instead of competing for busy ones. See
+    /// <see cref="LowerPriority"/>.
+    /// </param>
     private Process Spawn(IEnumerable<string> args, string label, string? workingDir = null,
-        Action<string>? onProgressLine = null, Action<Process>? onExited = null)
+        Action<string>? onProgressLine = null, Action<Process>? onExited = null,
+        bool background = false)
     {
         var psi = new ProcessStartInfo(FfmpegPath)
         {
@@ -2809,11 +2815,49 @@ public sealed class FfmpegManager : IDisposable
         // hard kill of this server becomes a second writer in the same
         // channel directory the next time the server starts. See ProcessJob.
         Services.ProcessJob.Adopt(p);
+        if (background) LowerPriority(p, label);
         RememberPid(p);
         p.BeginErrorReadLine();
         if (onProgressLine is not null) p.BeginOutputReadLine();
         Log.Info("ffmpeg", $"started: {label}");
         return p;
+    }
+
+    /// <summary>
+    /// Drops a batch conversion to below-normal priority.
+    ///
+    /// A queue of conversions is work nobody is waiting on — it was queued
+    /// precisely so it could happen without anybody watching it. But ffmpeg
+    /// is launched with no thread limit, so each encode spreads across every
+    /// core it can reach, and six of them at once (this server's own
+    /// maxParallel) will take the machine from whoever is using it. The
+    /// symptom is not a slow conversion, which nobody would notice; it is
+    /// everything else on the box going treacly while the queue drains.
+    ///
+    /// Below-normal fixes that without costing throughput, because it is not
+    /// a cap. The scheduler hands these threads every core nothing else
+    /// wants, which on an otherwise idle machine is all of them — the queue
+    /// runs exactly as fast as it did. It only yields when something at
+    /// normal priority actually wants the CPU, which is the entire point.
+    ///
+    /// Deliberately not applied to the other two things this class spawns.
+    /// A live channel is feeding a television in real time and a seek
+    /// conversion has somebody sitting in front of the player waiting for it;
+    /// both are somebody waiting, which is the one thing a batch job is not.
+    /// </summary>
+    private static void LowerPriority(Process p, string label)
+    {
+        try
+        {
+            p.PriorityClass = ProcessPriorityClass.BelowNormal;
+        }
+        catch (Exception ex)
+        {
+            // Never worth failing a conversion over: a job at the wrong
+            // priority still converts. It can also simply have finished
+            // already, which throws here and is not a fault at all.
+            Log.Debug("ffmpeg", $"{label}: could not lower priority ({ex.Message})");
+        }
     }
 
     /// <summary>
