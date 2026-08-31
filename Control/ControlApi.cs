@@ -403,11 +403,15 @@ public sealed partial class ControlApi : IDisposable
             _history.Record(name, file, stream, file.Length > 0 ? "file" : "stream", user);
         };
 
-        _providerHttp = new HttpClient(new SocketsHttpHandler
+        // Both of these fetch URLs that came out of somebody else's playlist,
+        // so both get the connect-time address check: MayFetch judges the
+        // name, this refuses the address it actually dials, and the gap
+        // between those two lookups is where DNS rebinding lives.
+        _providerHttp = new HttpClient(Services.PrivateNetwork.GuardPrivateAddresses(new SocketsHttpHandler
         {
             AutomaticDecompression = System.Net.DecompressionMethods.All,
             PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-        })
+        }))
         { Timeout = TimeSpan.FromSeconds(20) };
         _providers = Media.Providers.ProviderStore.Load(baseDirectory, _providerHttp);
         _relayProviders = Media.Providers.ProviderStore.RelaySet(baseDirectory);
@@ -417,12 +421,12 @@ public sealed partial class ControlApi : IDisposable
         // obeyed silently. The providers keep the shared client and its
         // ordinary redirect handling - they fetch known vendor endpoints,
         // and GitHub-hosted playlists genuinely do redirect.
-        _proxyHttp = new HttpClient(new SocketsHttpHandler
+        _proxyHttp = new HttpClient(Services.PrivateNetwork.GuardPrivateAddresses(new SocketsHttpHandler
         {
             AutomaticDecompression = System.Net.DecompressionMethods.All,
             PooledConnectionLifetime = TimeSpan.FromMinutes(5),
             AllowAutoRedirect = false,
-        })
+        }))
         { Timeout = TimeSpan.FromSeconds(20) };
         _tvProxy = new Media.Providers.HlsProxy(_proxyHttp, mediaLinks);
     }
@@ -520,6 +524,24 @@ public sealed partial class ControlApi : IDisposable
     private string? ConversionsInProgress()
     {
         if (_ffmpeg is null) return null;
+
+        // Work only counts as in progress if it can actually progress.
+        //
+        // Without this the guard was a trap. A queue drains only while ffmpeg
+        // is available - KickVodQueue returns at its first line otherwise -
+        // so with ffmpeg missing, renamed by an upgrade, or quarantined by
+        // antivirus, a queue restored from disk stays at its depth for ever.
+        // This method then reported work in progress for ever, both shutdown
+        // paths refused to act on it for ever, and closing the last dashboard
+        // page stopped working permanently: the only way to stop the server
+        // was Task Manager. That is a worse fault than the one the guard was
+        // added to fix, and it was introduced by fixing it.
+        //
+        // Unavailable ffmpeg means nothing is going to happen to that queue,
+        // so there is nothing to protect and the close proceeds as it did
+        // before the guard existed.
+        if (!_ffmpeg.Available) return null;
+
         var active = _ffmpeg.ActiveVodStreams.Count;
         var queued = _ffmpeg.VodQueueDepth;
         return active > 0 || queued > 0
@@ -1228,6 +1250,16 @@ public sealed partial class ControlApi : IDisposable
             case "/api/server/restart":
                 return AccessLevel.Admin;
 
+            // Watching writes both of these, so they are Read despite being
+            // POSTs: the history entry and the resume position belong to the
+            // person watching, and a read-only account is exactly who watches.
+            // Named here rather than left to the fall-through, which now
+            // refuses unclassified writes - without these two, playback would
+            // stop recording where anyone had got to.
+            case "/api/history":
+            case "/api/history/position":
+                return AccessLevel.Read;
+
             // picking a path off this machine, and the codec list that the
             // add-content forms show
             case "/api/browse":
@@ -1254,6 +1286,23 @@ public sealed partial class ControlApi : IDisposable
 
         // cutting off somebody else's stream is an operator action
         if (method == "DELETE" && path.StartsWith("/api/sessions/", StringComparison.Ordinal))
+            return AccessLevel.Admin;
+
+        // Reading is the default; changing something is not.
+        //
+        // Every path above is listed by hand, and the fall-through used to be
+        // Read for all of them - which meant adding a route to the dispatch
+        // table was on its own enough to expose it, and forgetting the entry
+        // here granted it silently to every signed-in account. Two had
+        // already slipped through that way (POST /api/history and POST
+        // /api/history/position, both writing state at Read).
+        //
+        // A method that changes something and was never classified is a
+        // mistake, not a permission, so it is refused rather than allowed:
+        // the failure becomes a 403 for an administrator to notice, instead
+        // of an unnoticed grant. GET keeps the Read default - a listing that
+        // was forgotten is not a privilege - so nothing that reads breaks.
+        if (method is "POST" or "PUT" or "DELETE" or "PATCH")
             return AccessLevel.Admin;
 
         return AccessLevel.Read;

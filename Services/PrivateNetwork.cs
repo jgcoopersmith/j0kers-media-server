@@ -136,4 +136,61 @@ public static class PrivateNetwork
         }
         return true;
     }
+
+    /// <summary>
+    /// The check that cannot be raced: refuses the connection at the moment
+    /// it is dialled, on the address actually being dialled.
+    ///
+    /// <see cref="MayFetch"/> resolves the name to judge it and then hands
+    /// the URL to HttpClient, which resolves it again to connect. Those are
+    /// two separate lookups, and a name the attacker controls can answer
+    /// publicly for the first and with 127.0.0.1 or 169.254.169.254 for the
+    /// second - DNS rebinding, and the whole point of a check that reads DNS.
+    /// Every address is already checked rather than just the first, which
+    /// closes the multi-answer version of this; only the gap between the two
+    /// lookups was left, and no amount of care in MayFetch can close that
+    /// from where it stands.
+    ///
+    /// So the last word belongs here, in the socket layer, where the endpoint
+    /// is no longer a name that might change but an address about to be
+    /// connected to. Attach it to any HttpClient that fetches a URL this
+    /// server did not choose.
+    /// </summary>
+    public static SocketsHttpHandler GuardPrivateAddresses(SocketsHttpHandler handler)
+    {
+        var inner = handler.ConnectCallback;
+        handler.ConnectCallback = async (context, token) =>
+        {
+            var host = context.DnsEndPoint.Host;
+            var port = context.DnsEndPoint.Port;
+
+            // A literal needs no lookup and cannot rebind; a name is resolved
+            // once here and the connection is made to one of those very
+            // addresses, so nothing can change underneath it afterwards.
+            IPAddress[] addresses = IPAddress.TryParse(host.Trim('[', ']'), out var literal)
+                ? new[] { literal }
+                : await Dns.GetHostAddressesAsync(host, token).ConfigureAwait(false);
+
+            var allowed = addresses.Where(a => !IsPrivate(a) && !IsCloudMetadata(a)).ToArray();
+            if (allowed.Length == 0)
+                throw new HttpRequestException(
+                    $"refused to connect to {host}: it resolves inside this network");
+
+            if (inner is not null)
+                return await inner(context, token).ConfigureAwait(false);
+
+            var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+            try
+            {
+                await socket.ConnectAsync(allowed, port, token).ConfigureAwait(false);
+                return new NetworkStream(socket, ownsSocket: true);
+            }
+            catch
+            {
+                socket.Dispose();
+                throw;
+            }
+        };
+        return handler;
+    }
 }

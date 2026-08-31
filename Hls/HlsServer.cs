@@ -377,8 +377,20 @@ public sealed class HlsServer : IDisposable
                     }
                 }
 
-                var onDisk = Path.Combine(streamDir, parts[1]);
-                if (File.Exists(onDisk) && !parts[1].Contains(".."))
+                // Canonicalised and confined to the stream directory, the same
+                // way the segment path below already does it.
+                //
+                // Contains("..") on its own is not a containment check. On
+                // Windows Path.Combine discards its first argument entirely
+                // when the second is rooted, so a request whose second segment
+                // is a drive-qualified name ending in .m3u8 resolved to
+                // somewhere else on disk, passed the "no dots" test, and was
+                // read straight back to the caller. Any valid media token
+                // reaches this - including a single-stream share link, which
+                // exists to be given to people who are not trusted with the
+                // rest of the machine.
+                var onDisk = SafeChildPath(streamDir, parts[1]);
+                if (onDisk is not null && File.Exists(onDisk))
                 {
                     var text = ReadSharedText(onDisk);
 
@@ -450,8 +462,8 @@ public sealed class HlsServer : IDisposable
                 return;
             }
 
-            var segment = Path.GetFullPath(Path.Combine(streamDir, parts[1]));
-            if (!segment.StartsWith(streamDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+            var segment = SafeChildPath(streamDir, parts[1]);
+            if (segment is null ||
                 !SegmentExtensions.Contains(Path.GetExtension(segment).ToLowerInvariant()))
             {
                 WriteText(res, 404, "text/plain", "not found");
@@ -574,7 +586,12 @@ public sealed class HlsServer : IDisposable
 
         var sb = new StringBuilder();
         sb.Append("#EXTM3U\n");
-        sb.Append("#EXT-X-VERSION:3\n");
+        // 6 when there is a map, because RFC 8216 §7 requires it: a playlist
+        // that uses EXT-X-MAP must declare version 6 or higher. This said 3
+        // and appended the map anyway, which lenient players forgive and
+        // strict ones - televisions - refuse, so the same URL played in a
+        // browser and failed on the set it was made for.
+        sb.Append(fmp4 ? "#EXT-X-VERSION:6\n" : "#EXT-X-VERSION:3\n");
         sb.Append($"#EXT-X-TARGETDURATION:{seconds}\n");
         sb.Append("#EXT-X-MEDIA-SEQUENCE:0\n");
         sb.Append("#EXT-X-PLAYLIST-TYPE:VOD\n");
@@ -713,6 +730,29 @@ public sealed class HlsServer : IDisposable
         return count;
     }
 
+    /// <summary>
+    /// A file inside <paramref name="streamDir"/> named by a request, or null
+    /// if the name does not stay inside it.
+    ///
+    /// One method because there were two rules. The segment path resolved the
+    /// combined path and checked the result was under the stream directory;
+    /// the playlist path a few lines above it tested the raw name for ".."
+    /// and combined without looking. That second one is not a containment
+    /// check at all: Path.Combine drops its first argument when the second is
+    /// rooted, so a rooted name never contains ".." and never stays inside
+    /// either. Whichever rule is right, they must not be two.
+    /// </summary>
+    private static string? SafeChildPath(string streamDir, string name)
+    {
+        if (string.IsNullOrEmpty(name)) return null;
+        string full;
+        try { full = Path.GetFullPath(Path.Combine(streamDir, name)); }
+        catch { return null; }        // illegal characters, over-long, bad root
+        return full.StartsWith(streamDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            ? full
+            : null;
+    }
+
     private string BuildPlaylist(string streamDir)
     {
         var segments = Directory.GetFiles(streamDir)
@@ -741,13 +781,33 @@ public sealed class HlsServer : IDisposable
             segments = segments.Skip(firstIndex).ToList();
         }
 
+        // fMP4 fragments are undecodable without their initialization
+        // segment, and this rebuild is what replaces a perfectly good
+        // playlist when the on-disk one disagrees with the directory (see the
+        // caller). Written without the EXT-X-MAP tag, that "repair" took a
+        // working HEVC/AV1/Opus stream and made it permanently unplayable:
+        // the fragments are all listed, nothing says where the moov box is,
+        // and no player can start. init.mp4 is deliberately filtered out of
+        // the segment list above precisely because it is not media - which is
+        // exactly why it has to come back here as the map instead.
+        //
+        // EXT-X-MAP also carries a version floor: RFC 8216 §7 requires 6 or
+        // higher for a playlist that uses it. Version 3 with a map is
+        // ignored by lenient players and rejected outright by strict ones -
+        // televisions above all, which are the devices this server exists to
+        // feed, so the failure lands exactly where it is least visible from
+        // a desktop browser.
+        var fmp4Init = Path.Combine(streamDir, "init.mp4");
+        var fmp4 = File.Exists(fmp4Init);
+
         var sb = new StringBuilder();
         sb.Append("#EXTM3U\n");
-        sb.Append("#EXT-X-VERSION:3\n");
+        sb.Append(fmp4 ? "#EXT-X-VERSION:6\n" : "#EXT-X-VERSION:3\n");
         sb.Append($"#EXT-X-TARGETDURATION:{_config.TargetDurationSeconds}\n");
         sb.Append($"#EXT-X-MEDIA-SEQUENCE:{firstIndex}\n");
         if (!live)
             sb.Append("#EXT-X-PLAYLIST-TYPE:VOD\n");
+        if (fmp4) sb.Append("#EXT-X-MAP:URI=\"init.mp4\"\n");
 
         foreach (var seg in segments)
         {
