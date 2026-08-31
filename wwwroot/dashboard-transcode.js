@@ -148,7 +148,18 @@ function tcShowEmpty() {
 
 let tcReloadGen = 0;
 async function tcReload(path, quiet) {
-  if (!path) { tcShowEmpty(); return; }   // boot, and Up past a drive root
+  /* Nothing to show and the root are different things, and treating them as
+     one is why Up did not work.
+
+     Up from a drive root asks for "" — the parent of G:\ is nothing — and the
+     server answers "" with the drive list, the same one the folder picker
+     shows. This turned back before asking, on a falsy test that cannot tell
+     "" from null, and put up the "click Add folder" prompt instead. So Up
+     appeared to do nothing from the one place it had somewhere to go.
+
+     null/undefined still means nothing to show: that is boot with no folder
+     remembered. "" means the root, and the root is a real listing. */
+  if (path === null || path === undefined) { tcShowEmpty(); return; }
 
   /* Only a person navigating claims a new generation.
 
