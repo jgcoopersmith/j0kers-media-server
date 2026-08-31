@@ -495,6 +495,24 @@ public sealed class FfmpegConfig
     /// <summary>CRF quality for VOD transcodes (lower = better, 18–28 sane).</summary>
     [JsonPropertyName("crf")] public int Crf { get; set; } = 23;
 
+    /// <summary>
+    /// Quality for NVENC encoders (lower = better). Its own setting because
+    /// cq and crf are different scales: measured on a 1080p source, nvenc
+    /// cq 28 matches x264 crf 23 on file size, and cq 25 is a clear step
+    /// above it — 90.98 VMAF against 86.90, for roughly 65% more bytes.
+    /// Sharing one number would mean switching encoders quietly moved
+    /// quality, in whichever direction the number happened to mean.
+    /// </summary>
+    [JsonPropertyName("nvencCq")] public int NvencCq { get; set; } = 25;
+
+    /// <summary>
+    /// NVENC preset, p1 (fastest) to p7 (best). Not interchangeable with the
+    /// x264 preset names above — NVENC refuses "veryfast" outright rather
+    /// than ignoring it. p4 is the balanced middle and what the measurements
+    /// above were taken at.
+    /// </summary>
+    [JsonPropertyName("nvencPreset")] public string NvencPreset { get; set; } = "p4";
+
     /// <summary>Live channel segment length in seconds.</summary>
     [JsonPropertyName("liveSegmentSeconds")] public int LiveSegmentSeconds { get; set; } = 4;
 

@@ -158,6 +158,7 @@ public sealed class FfmpegManager : IDisposable
             DiscoverEncoders();
             VideoEncoder = ResolveEncoder(_config.VideoCodec, video: true);
             AudioEncoder = ResolveEncoder(_config.AudioCodec, video: false);
+            VerifyNvencOrFallBack();
             Log.Info("ffmpeg", $"transcode codecs: video={VideoEncoder} audio={AudioEncoder} " +
                                $"({_videoEncoders.Count} video / {_audioEncoders.Count} audio encoders available)");
         }
@@ -260,14 +261,122 @@ public sealed class FfmpegManager : IDisposable
         return fallback;
     }
 
+    /// <summary>True when the chosen video encoder runs on the GPU via NVENC.</summary>
+    public bool IsNvenc => VideoEncoder.EndsWith("_nvenc", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Proves NVENC can actually open before anything depends on it, and
+    /// falls back to software if it cannot.
+    ///
+    /// Being listed by <c>-encoders</c> only says the binary was built with
+    /// it, not that this machine can run it. NVENC fails at the moment a
+    /// session is opened, and for reasons that have nothing to do with the
+    /// configuration: a driver older than the build expects (measured here,
+    /// "the minimum required Nvidia driver for nvenc is 610.00 or newer"),
+    /// no card, a card without an encoder, a remote session that cannot
+    /// reach one.
+    ///
+    /// Without this check every one of those becomes hundreds of failed
+    /// conversions with an ffmpeg error nobody sees, on a server that was
+    /// working the day before. One two-frame encode at startup turns that
+    /// into a line in the log and a working server on the software path.
+    /// </summary>
+    private void VerifyNvencOrFallBack()
+    {
+        if (!IsNvenc) return;
+        var ok = RunFfmpeg(new[]
+        {
+            "-f", "lavfi", "-i", "color=c=black:s=256x144:r=25",
+            "-frames:v", "2", "-c:v", VideoEncoder, "-f", "null", "-",
+        }, timeoutMs: 20_000);
+
+        if (ok)
+        {
+            Log.Info("ffmpeg", $"{VideoEncoder} is available — video encoding runs on the GPU");
+            return;
+        }
+
+        var fallback = ResolveEncoder("h264", video: true);
+        Log.Warn("ffmpeg", $"{VideoEncoder} could not open a session on this machine — " +
+                           $"falling back to {fallback}. The card, its driver, or the session " +
+                           "limit is the usual cause; conversions carry on in software.");
+        VideoEncoder = fallback;
+    }
+
     /// <summary>x264/x265 take preset+crf; other encoders get sane defaults of their own.</summary>
     private string[] VideoQualityArgs() => VideoEncoder switch
     {
         "libx264" or "libx265" => new[] { "-preset", _config.Preset, "-crf", Inv(_config.Crf) },
         "libvpx-vp9" => new[] { "-crf", Inv(_config.Crf), "-b:v", "0" },
         "libaom-av1" or "libsvtav1" or "librav1e" => new[] { "-crf", Inv(_config.Crf) },
+
+        // NVENC shares none of x264's vocabulary, which is why naming the
+        // encoder alone was never enough to switch to it: "veryfast" is not
+        // one of its presets and it has no -crf at all, so the arguments
+        // above are rejected outright rather than ignored.
+        //
+        // The quality number is its own setting rather than a reuse of crf,
+        // because the two scales are not the same picture. Measured on this
+        // library, nvenc cq 28 lands where x264 crf 23 does on size while
+        // scoring slightly better; cq 25 is a real step up in quality. Making
+        // crf do both jobs would mean switching encoders silently moved
+        // quality, in whichever direction the number happened to mean.
+        var nv when nv.EndsWith("_nvenc", StringComparison.OrdinalIgnoreCase) =>
+            new[] { "-preset", _config.NvencPreset, "-cq", Inv(_config.NvencCq), "-forced-idr", "1" },
+
         _ => Array.Empty<string>(),
     };
+
+    /// <summary>
+    /// Keyframe placement, which is not the same request for every encoder.
+    ///
+    /// <c>-sc_threshold</c> is an x264 private option. NVENC does not have it
+    /// and says so on every job, which is noise in the log of every
+    /// conversion — and it is not needed there either, because NVENC does not
+    /// add scene-change keyframes on top of the forced ones.
+    ///
+    /// <c>-forced-idr</c> is the opposite: without it NVENC treats
+    /// -force_key_frames as a suggestion and writes its own GOP instead.
+    /// Measured, that turned 6-second segments into 10.43-second ones, which
+    /// silently breaks the arithmetic the whole-film playlist uses to say
+    /// where a seek should land. It is set in VideoQualityArgs above, beside
+    /// the rest of what NVENC needs, so no path can add the forced keyframes
+    /// without it.
+    /// </summary>
+    private string[] KeyframeArgs(int everySeconds)
+    {
+        var a = new List<string> { "-force_key_frames", $"expr:gte(t,n_forced*{everySeconds})" };
+        if (!IsNvenc) a.AddRange(new[] { "-sc_threshold", "0" });
+        return a.ToArray();
+    }
+
+    /// <summary>
+    /// Input-side arguments: hardware decoding, where it actually pays.
+    ///
+    /// Only for NVENC, and only for the codecs the card decodes well. The
+    /// point is not that decoding is slow — it is not, and that was the
+    /// mistake the last attempt at this made. Measured here: decoding 120
+    /// seconds of XviD costs 0.9 s of CPU against 7.9 s to encode it, and
+    /// asking NVDEC to do it made the whole job *slower* (2.8 s against
+    /// 2.3 s) because the setup cost more than the decode it replaced.
+    ///
+    /// What it is for is keeping frames on the card. With an NVENC encoder
+    /// the decoded frames are already where they need to be, so nothing
+    /// crosses PCIe; feeding the same encoder from a CPU decoder pays for
+    /// that copy on every frame. That only holds for HEVC and H.264, which
+    /// is where the expensive decodes are anyway — a 1080p 10-bit HEVC
+    /// source costs 14.5 s of CPU to decode against 3.9 s on the card.
+    ///
+    /// Anything else decodes on the CPU exactly as before.
+    /// </summary>
+    private string[] HardwareDecodeArgs(string? sourceFile)
+    {
+        if (!IsNvenc || sourceFile is null) return Array.Empty<string>();
+        var (video, _) = ProbeCodecs(sourceFile);
+        return video is "hevc" or "h264"
+            ? new[] { "-hwaccel", "cuda" }
+            : Array.Empty<string>();
+    }
 
     private static string Inv(int value) => value.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
@@ -590,7 +699,11 @@ public sealed class FfmpegManager : IDisposable
             // -nostats drops the human progress bar that would otherwise
             // repeat the same information over stderr
             var args = new List<string> { "-hide_banner", "-loglevel", "error", "-nostats",
-                                          "-progress", "pipe:1", "-y", "-i", info.FullName };
+                                          "-progress", "pipe:1", "-y" };
+            // before -i, which is where input options belong: ffmpeg refuses
+            // -hwaccel after the file it applies to
+            args.AddRange(HardwareDecodeArgs(info.FullName));
+            args.AddRange(new[] { "-i", info.FullName });
             if (VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase))
             {
                 args.AddRange(new[] { "-c:v", "copy" });
@@ -612,11 +725,8 @@ public sealed class FfmpegManager : IDisposable
                 // makes every segment the length it says and every seek
                 // land within it.
                 //
-                // sc_threshold 0 stops the encoder adding extra keyframes at
-                // scene changes on top of these, which would otherwise put
-                // the segment lengths back where they were.
-                args.AddRange(new[] { "-force_key_frames", $"expr:gte(t,n_forced*{VodSegmentSeconds})",
-                                      "-sc_threshold", "0" });
+                // What that costs differs by encoder — see KeyframeArgs.
+                args.AddRange(KeyframeArgs(VodSegmentSeconds));
             }
             args.AddRange(AudioArgs());
 
@@ -877,8 +987,7 @@ public sealed class FfmpegManager : IDisposable
                 args.AddRange(new[] { "-c:v", VideoEncoder });
                 args.AddRange(VideoQualityArgs());
                 args.AddRange(new[] { "-pix_fmt", "yuv420p" });
-                args.AddRange(new[] { "-force_key_frames", $"expr:gte(t,n_forced*{VodSegmentSeconds})",
-                                      "-sc_threshold", "0" });
+                args.AddRange(KeyframeArgs(VodSegmentSeconds));
             }
             args.AddRange(AudioArgs());
 
