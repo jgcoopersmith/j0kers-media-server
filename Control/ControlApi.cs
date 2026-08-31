@@ -629,32 +629,31 @@ public sealed partial class ControlApi : IDisposable
                 // outside that is indistinguishable from a crash, and it is
                 // what "the server works for a while and then goes dead" was.
                 //
-                // What used to stand here recorded a decision that an
-                // interrupted conversion was an acceptable cost, because the
-                // queue persists and resumes on the next start. It resumes
-                // only if something starts it — and nothing does. The server
-                // is gone and the person who queued the work went away
-                // precisely because they had queued it. "It resumes on the
-                // next start" is a description of a server that is not
-                // running.
+                // Closing the last page is the owner saying stop, and nothing
+                // this server is doing outranks that.
                 //
-                // The silence watch has always held work above a guess (see
-                // SilenceShutdownBlockedBy). A deliberate close is a stronger
-                // signal than silence, but it is still not an instruction to
-                // throw away an hour of encoding. So the close is remembered
-                // rather than cancelled: the mark stands, this timer keeps
-                // running, and the moment the queue drains the pending close
-                // takes effect on the next tick.
+                // A guard used to stand here holding the close open until the
+                // conversion queue drained, so that queueing a batch and
+                // walking away could not lose it. The reasoning was sound and
+                // the behaviour was wrong: it made shutting down conditional
+                // on work the owner had not asked about, with no way to
+                // overrule it from the page they had just closed. Closing
+                // every window and having the process carry on for another
+                // hour is not a server protecting your work, it is a server
+                // ignoring you — and it is worse than the fault it replaced,
+                // because that one at least did what it was told.
                 //
-                // Viewers deliberately do not hold it — see StreamingBlockedBy
-                // for why a close asks nothing about them. Only work this
-                // server was told to do does.
-                if (ConversionsInProgress() is string working)
-                {
-                    Log.Debug("control", $"no page open, but staying up: {working} " +
-                                         "— shutting down when the work is done");
-                    return;
-                }
+                // Nothing is destroyed by stopping here. SaveQueueState has
+                // already written what is still owed, so the queue is on disk
+                // and the next start picks it up; only the encodes actually
+                // in flight are redone. That is a cost the owner can see and
+                // choose, which is the whole difference.
+                //
+                // The silence watch keeps its own version of this guard, and
+                // should: going quiet is not an instruction. A locked screen
+                // or a sleeping laptop is the server guessing nobody is there,
+                // and guessing wrong must not end an overnight run. Deciding
+                // is what happens here; guessing is what happens there.
 
                 lock (_shutdownLock)
                 {
@@ -663,7 +662,15 @@ public sealed partial class ControlApi : IDisposable
                 }
                 _linkSweepTimer?.Dispose();
                 _linkSweepTimer = null;
-                Log.Info("control", $"no page has been open for {CloseGraceMs / 1000}s — shutting down");
+                // Say what the stop cost, where it cost anything. The stop is
+                // what was asked for and happens either way; an abandoned
+                // encode should still be on the record rather than turning up
+                // later as a conversion that mysteriously restarted.
+                var interrupted = ConversionsInProgress();
+                Log.Info("control", $"no page has been open for {CloseGraceMs / 1000}s — shutting down"
+                                    + (interrupted is null
+                                        ? ""
+                                        : $" ({interrupted}; the queue is on disk and resumes on the next start)"));
                 _requestShutdown();
             }
             catch (Exception ex) { Log.Warn("control", "link sweep failed: " + ex.Message); }
