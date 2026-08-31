@@ -306,7 +306,12 @@ let setup = false;
    No sign-in needed: the endpoint carries no information, it only says that a
    page is here and, by dropping, that it has gone. The server allows it
    unauthenticated but same-origin only. */
-try { new EventSource("/api/server/session"); } catch { }
+/* stage=login says which page this is. The server cannot tell otherwise:
+   this page runs before the cookie marking the window it opened for itself
+   exists, so an unlabelled link from here looked like somebody connecting
+   from another machine — and that made the server stop counting its own
+   dashboard, then shut down while one was open. */
+try { new EventSource("/api/server/session?stage=login"); } catch { }
 
 /* Still sent, for the beat before the socket drops. */
 window.addEventListener("pagehide", () => {

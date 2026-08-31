@@ -90,6 +90,15 @@ public sealed partial class ControlApi : IDisposable
     private volatile bool _elsewhereSeen;
 
     /// <summary>
+    /// Whether this live link belongs to the sign-in page rather than a
+    /// dashboard. The page says so on the URL, because there is nothing else
+    /// to tell them apart: sign-in runs before any cookie this server would
+    /// recognise, which is exactly why it was being counted as a stranger.
+    /// </summary>
+    private static bool IsSignInPage(HttpListenerContext ctx) =>
+        string.Equals(ctx.Request.QueryString["stage"], "login", StringComparison.Ordinal);
+
+    /// <summary>
     /// How many open pages are a reason to stay running.
     ///
     /// The rule, in one sentence: a window the server opened for itself keeps
@@ -809,7 +818,29 @@ public sealed partial class ControlApi : IDisposable
         var isSelf = _selfOpenToken is { Length: > 0 } expected
                      && ctx.Request.Cookies[SelfPageCookie]?.Value == expected;
         if (isSelf) Interlocked.Increment(ref _liveSelfPages);
-        else _elsewhereSeen = true;
+        // The sign-in page is a page, and it holds the server open like any
+        // other — but it is not somebody else.
+        //
+        // The self mark rides on a cookie handed to the window the server
+        // opened. Sign-in is served BEFORE that cookie can exist and opens a
+        // live link of its own, so it arrived here unmarked and set this
+        // flag — on the server's own console, one second after startup:
+        //
+        //   12.292  page opened                     (1 open, 1 holding)   <- sign-in
+        //   12.489  GET / 200 16.7 KB               <- login.html
+        //   12.548  page opened (its own window)    (2 open, 1 holding)
+        //
+        // From that point PagesHolding discounted the server's own window
+        // permanently, so when the sign-in link ended the count fell to zero
+        // with a dashboard open and visible, and the server stopped three
+        // seconds later. Twice in one afternoon, the second time with 88
+        // files still queued.
+        //
+        // The rule this flag exists for is about a server administered from
+        // another machine, where the window on its own console belongs to
+        // nobody. A sign-in page on the way to that very window is the
+        // opposite of that, and says nothing about anyone being elsewhere.
+        else if (!IsSignInPage(ctx)) _elsewhereSeen = true;
         _sawDashboard = true;
         NoteActivity();
         Log.Info("control", $"page opened from {_openPages[holder]}"

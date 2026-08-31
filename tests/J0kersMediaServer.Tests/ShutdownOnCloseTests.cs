@@ -99,6 +99,46 @@ public class ShutdownOnCloseTests
     }
 
     /// <summary>
+    /// The sign-in page is not somebody else.
+    ///
+    /// It holds a live link like any page, but it is served before the cookie
+    /// that marks the window the server opened for itself — so it arrived
+    /// unmarked and was counted as a browser on another machine. That is the
+    /// condition under which the server's own window stops holding it open,
+    /// and it was being met one second after startup, on the server's own
+    /// console, every single time anybody signed in.
+    ///
+    /// What followed: the sign-in link ends when the dashboard replaces it,
+    /// the count falls to zero with a dashboard open and visible, and the
+    /// server shuts down three seconds later. Twice in one afternoon on this
+    /// machine, the second time discarding a queue of 88 files.
+    /// </summary>
+    [Fact]
+    public async Task The_sign_in_page_does_not_disown_the_servers_own_window()
+    {
+        using var server = await TestServer.Start(openDashboardOnStart: false, backgroundMode: false,
+                                                 selfToken: SelfToken);
+
+        var mark = await server.ClaimSelfWindow(SelfToken);
+
+        // Sign-in first, exactly as a browser does it, then the dashboard the
+        // server opened for itself.
+        var signIn = await server.OpenPage(query: "stage=login");
+        using var ownWindow = await server.OpenPage(expected: 2, cookie: mark);
+
+        // The sign-in page goes when the dashboard replaces it. The window
+        // the server opened is still there, and is still somebody looking at
+        // this server.
+        signIn.Dispose();
+
+        await Task.Delay(6000);   // comfortably past the close grace
+        Assert.True(server.IsRunning,
+                    "the server shut down after the sign-in page closed, leaving its own dashboard "
+                    + "open and visible — the sign-in link had been counted as somebody on another "
+                    + "machine. Log:\n" + server.ReadLog());
+    }
+
+    /// <summary>
     /// The user's sentence, as an assertion: one page open, that page closes,
     /// the process is gone.
     /// </summary>
@@ -347,9 +387,9 @@ public class ShutdownOnCloseTests
             return mark!.Split(';')[0];
         }
 
-        public async Task<IDisposable> OpenPage(int expected = 1, string? cookie = null)
+        public async Task<IDisposable> OpenPage(int expected = 1, string? cookie = null, string? query = null)
         {
-            var page = await Page.Open(Port, cookie);
+            var page = await Page.Open(Port, cookie, query);
             // The link is counted when the handler runs, not when the request
             // is written, so give the server the moment in between rather than
             // racing it and then blaming it for the difference.
@@ -430,12 +470,12 @@ public class ShutdownOnCloseTests
 
         private Page(TcpClient socket) => _socket = socket;
 
-        public static async Task<Page> Open(int port, string? cookie = null)
+        public static async Task<Page> Open(int port, string? cookie = null, string? query = null)
         {
             var socket = new TcpClient();
             await socket.ConnectAsync(IPAddress.Loopback, port);
             var stream = socket.GetStream();
-            var request = "GET /api/server/session HTTP/1.1\r\n"
+            var request = $"GET /api/server/session{(query is null ? "" : "?" + query)} HTTP/1.1\r\n"
                         + $"Host: 127.0.0.1:{port}\r\n"
                         + "Accept: text/event-stream\r\n"
                         + "Sec-Fetch-Site: same-origin\r\n"
