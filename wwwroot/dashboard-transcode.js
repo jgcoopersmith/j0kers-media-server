@@ -149,7 +149,23 @@ function tcShowEmpty() {
 let tcReloadGen = 0;
 async function tcReload(path, quiet) {
   if (!path) { tcShowEmpty(); return; }   // boot, and Up past a drive root
-  const gen = ++tcReloadGen;              // ignore a slow response a newer one has replaced
+
+  /* Only a person navigating claims a new generation.
+
+     This counter exists so a slow response cannot overwrite a newer one, and
+     every reload used to claim a number — including the heartbeat's quiet
+     re-scan, which runs every six seconds for as long as anything is
+     converting. So pressing Up or Refresh while the queue was busy was a
+     race: if the heartbeat landed in the gap between the click and its
+     answer, it took the newer number and the person's own reload was thrown
+     away on arrival. No error, no movement, nothing in the console — the
+     button simply did nothing, and did it most often when the queue was
+     busiest, which is exactly when somebody is watching this panel.
+
+     A background refresh must never cancel a deliberate act. It still stands
+     aside for one: it reads the generation without claiming it, and drops its
+     own result if a person has navigated since. */
+  const gen = quiet ? tcReloadGen : ++tcReloadGen;
   // Moving to a different folder ends any search; refreshing the same folder
   // keeps it (that's how the search stays put while you tick and convert).
   if (path !== tcState.path) {
@@ -636,7 +652,11 @@ function tcUp() { if (tcState.parent !== null) tcReload(tcState.parent); }
    was opened) and pull a fresh status so the conversion list and free space
    update at once instead of on the next poll. */
 function tcRefresh() {
-  if (tcState.path) tcReload(tcState.path);
+  /* Unconditional: with no folder open this shows the "add a folder" prompt,
+     which is the right answer and a visible one. Guarding it on tcState.path
+     meant the button did nothing at all at the drive root - no movement, no
+     message - which is indistinguishable from a broken button. */
+  tcReload(tcState.path);
   tick();
 }
 

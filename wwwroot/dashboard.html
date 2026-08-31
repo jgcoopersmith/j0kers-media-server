@@ -836,8 +836,6 @@
   <div class="card server-admin-only" id="transcodecard">
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Transcode</span>
       <button id="tc-add" onclick="tcAddFolder()" class="edit-only" title="Browse to any drive or folder">➕ Add folder</button>
-      <button id="tc-up" onclick="tcUp()" title="Up one folder">↑ Up</button>
-      <button id="tc-refresh" onclick="tcRefresh()" title="Re-scan this folder and refresh the conversion list">🔄 Refresh</button>
       <button id="tc-all" class="edit-only" onclick="tcSelectAll()"
               title="Tick or clear everything currently listed">☑ Select all</button>
       <button id="tc-del" class="edit-only danger" onclick="tcDeleteChecked()" disabled
@@ -885,6 +883,8 @@
     <div id="tc-conv-wrap" style="margin:0 0 10px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
         <span style="flex:1;font-weight:600;font-size:12.5px">Conversions <span id="tc-conv-count" style="color:var(--muted);font-weight:400"></span></span>
+        <button id="tc-up" onclick="tcUp()" title="Up one folder">↑ Up</button>
+        <button id="tc-refresh" onclick="tcRefresh()" title="Re-scan this folder and refresh the conversion list">🔄 Refresh</button>
         <button id="tc-conv-order" onclick="tcToggleConvOrder()" title="How the conversion list is ordered">⇅ Active first</button>
         <button id="tc-conv-clear" class="edit-only" onclick="tcClearQueue()" title="Remove everything still waiting (running ones keep going)">🧹 Clear queue</button>
       </div>
