@@ -82,18 +82,34 @@ if ($dirs.Count -eq 0) { Write-Host 'no conversions found.'; return }
 $bad = [System.Collections.Generic.List[object]]::new()
 $scanned = 0
 $skipped = 0
+$unreadable = [System.Collections.Generic.List[string]]::new()
+
+# 'Stop' is right for the setup above - a missing media root should stop the
+# run - and wrong for the loop below, which is the whole point of changing it
+# here rather than at the top.
+#
+# Windows PowerShell turns anything a native program writes to stderr into an
+# error record, and under 'Stop' that record is terminating. ffprobe writes to
+# stderr for a segment it cannot read to the end - a conversion interrupted
+# mid-write leaves exactly that - so the first damaged file in the library
+# aborted the entire scan and reported nothing at all. Which is what happened:
+# 817 conversions, and the run died on one truncated segment having checked
+# only a handful.
+#
+# A file this cannot read is a result, not a catastrophe. It is counted and
+# named at the end, and the scan carries on.
+$ErrorActionPreference = 'Continue'
 
 foreach ($d in $dirs) {
     $scanned++
     Write-Progress -Activity 'Checking conversion audio' -Status "$scanned of $($dirs.Count) - $($d.Name)" `
                    -PercentComplete ([int](100 * $scanned / $dirs.Count))
 
-    # The first segment carries the same encoder settings as every other one,
-    # so there is no reason to read more than one.
-    $seg = Get-ChildItem -LiteralPath $d.FullName -File -ErrorAction SilentlyContinue |
-           Where-Object { $_.Name -like 'seg_*.ts' -or $_.Name -like 'seg_*.m4s' } |
-           Select-Object -First 1
-    if (-not $seg) { $skipped++; continue }
+    $segs = @(Get-ChildItem -LiteralPath $d.FullName -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -like 'seg_*.ts' -or $_.Name -like 'seg_*.m4s' } |
+              Sort-Object Name)
+    if ($segs.Count -eq 0) { $skipped++; continue }
+    $seg = $segs[0]
 
     # No -probesize/-analyzeduration limit here on purpose: capping them makes
     # ffprobe answer "0" for the sample rate on these segments, which would
@@ -104,17 +120,63 @@ foreach ($d in $dirs) {
     # writing, which kills it and leaves $LASTEXITCODE at -1. The reading is
     # correct either way, but the script then exits non-zero on a completely
     # successful run, which is a lie to anything scripting against it.
+    # stderr is NOT redirected here. Doing so is what wraps ffprobe's
+    # complaints in error records; left alone they are just text on the
+    # console, and only stdout is captured. -v error already keeps it quiet
+    # unless something is genuinely wrong with the file.
     $out = @(& $Ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate `
-                        -of csv=p=0 $seg.FullName 2>$null)
+                        -of csv=p=0 $seg.FullName)
     $rate = if ($out.Count -gt 0) { "$($out[0])".Trim() } else { '' }
+
+    # Segment zero is the least representative segment there is.
+    #
+    # A source whose audio is damaged at the very start - and DVD rips are
+    # full of them - produces a first segment with no decodable audio frames
+    # in it, which reads as rate 0 or as nothing at all, while every segment
+    # after it is perfectly good. Judging the conversion by that one segment
+    # condemned a film whose sound was fine from a few seconds in, and would
+    # have gone on condemning it after every re-conversion, for ever.
+    #
+    # So a first segment that reads badly is not an answer, it is a reason to
+    # look further in. One from the middle settles it.
+    if (($rate -eq '' -or $rate -eq '0') -and $segs.Count -gt 1) {
+        $mid = $segs[[int]($segs.Count / 2)]
+        $out2 = @(& $Ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate `
+                             -of csv=p=0 $mid.FullName)
+        if ($out2.Count -gt 0) { $rate = "$($out2[0])".Trim() }
+    }
+
+    # A reading that is not a number means the segment could not be read -
+    # truncated, still being written, or damaged. That is worth naming
+    # separately: it is not an audio-rate problem and re-converting for the
+    # wrong reason wastes an hour of encoding.
+    if ($rate -and $rate -notmatch '^\d+$') {
+        $unreadable.Add($d.Name)
+        continue
+    }
 
     $source = ''
     $srcFile = Join-Path $d.FullName 'source.txt'
     if (Test-Path -LiteralPath $srcFile) { $source = (Get-Content -LiteralPath $srcFile -Raw).Trim() }
 
     if (-not $rate) {
-        if ($IncludeNoAudio) {
-            $bad.Add([PSCustomObject]@{ Rate = 'none'; Conversion = $d.Name; Source = $source })
+        # A conversion with no audio is only worth reporting if the source
+        # HAD some. Measured on this library: 114 conversions have no audio
+        # and 112 of them are DVD structural VOBs - menus, logos, first-play
+        # clips - whose sources are silent, so there was nothing to lose and
+        # nothing to fix. Listing them buries the two that matter in a
+        # hundred that do not, which is the same as not reporting them.
+        #
+        # The remaining two turned out to be silent as well: a declared AC3
+        # track carrying 0 channels at 0 Hz, which is a stub, not audio. The
+        # channel check is what tells those apart from a real track.
+        if ($IncludeNoAudio -and $source -and (Test-Path -LiteralPath $source)) {
+            $s = @(& $Ffprobe -v error -select_streams a:0 `
+                              -show_entries stream=channels -of csv=p=0 $source)
+            $ch = if ($s.Count -gt 0) { "$($s[0])".Trim() } else { '0' }
+            if ($ch -match '^\d+$' -and [int]$ch -gt 0) {
+                $bad.Add([PSCustomObject]@{ Rate = 'none'; Conversion = $d.Name; Source = $source })
+            }
         }
         continue
     }
@@ -125,6 +187,11 @@ foreach ($d in $dirs) {
 Write-Progress -Activity 'Checking conversion audio' -Completed
 
 Write-Host ("scanned {0} conversion(s); {1} had no segments to read." -f $scanned, $skipped)
+if ($unreadable.Count -gt 0) {
+    Write-Host ''
+    Write-Host ("{0} conversion(s) could not be read at all (truncated or damaged, not an audio problem):" -f $unreadable.Count)
+    $unreadable | ForEach-Object { Write-Host "  $_" }
+}
 Write-Host ''
 
 if ($bad.Count -eq 0) {
