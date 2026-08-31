@@ -11,6 +11,7 @@
 const tcState = { path: "", parent: null, booted: false, selected: new Set(), converting: false, search: "" };
 let tcCheckTimer = 0, tcCheckTries = 0;   // re-poll while any pill is still being read
 let tcLastAutoReload = 0;                 // throttles the heartbeat's re-scan (dashboard-status.js)
+let tcWasBusy = false;                    // was anything converting on the previous poll? (see below)
 const TC_FOLDER_KEY = "j0kers-tc-folder";   // last folder browsed, remembered per browser
 
 /* How much longer a conversion has, said the way somebody waiting would say

@@ -74,13 +74,52 @@ if command -v powershell >/dev/null 2>&1; then
         # name the shortcut points at. The next launch is the new version,
         # nothing was interrupted, and the leftover is swept up next time.
         #
-        # "Watching" is an established connection to the media port from
-        # anything other than this machine's own loopback.
-        viewers=$(powershell -NoProfile -Command \
-            "@(Get-NetTCPConnection -LocalPort 8080 -State Established -ErrorAction SilentlyContinue |
-               Where-Object { \$_.RemoteAddress -ne '127.0.0.1' -and \$_.RemoteAddress -ne '::1' }).Count" 2>/dev/null | tr -d '\r ')
+        # "Watching" means bytes of media actually went out recently.
+        #
+        # This used to count established TCP connections on port 8080 and was
+        # wrong in both directions, which is worse than being wrong in one.
+        #
+        # False positives, constantly: every dashboard page holds a keep-alive
+        # connection to the media port whether or not anybody is watching
+        # anything, so the hook reported viewers and skipped the restart on
+        # three publishes out of four. A fix that is published but not running
+        # looks exactly like a fix that did not work.
+        #
+        # False negatives, which is the half that matters: DLNA is what the
+        # televisions here actually stream through, and DLNA is served on the
+        # CONTROL port unless HTTPS moves it (see Services/DlnaEndpoint). A TV
+        # an hour into a film over DLNA holds no connection to 8080 at all, so
+        # the check this replaces would have found the machine idle and killed
+        # the server out from under it. In this install's entire log history
+        # there is not one HLS segment fetch and there are plenty of
+        # /dlna/file transfers - the check was watching the one path nobody
+        # uses.
+        #
+        # So ask the server's own access log what it has been serving, which
+        # is the only record of the thing being asked about. Two minutes of
+        # history: a player fetches continuously while it plays, so anything
+        # genuinely being watched leaves marks far more often than that.
+        #
+        # Unreadable log = assume somebody is watching. The costs are not
+        # symmetric: guessing "busy" delays a restart until the next commit,
+        # guessing "idle" cuts somebody's film off. The old check defaulted
+        # the other way.
+        viewers=$(powershell -NoProfile -Command "
+            \$log = Join-Path '$install_win' 'logs\\j0kers.log'
+            if (-not (Test-Path -LiteralPath \$log)) { '1'; exit }
+            try {
+              \$cut = (Get-Date).AddSeconds(-120)
+              \$n = 0
+              foreach (\$line in (Get-Content -LiteralPath \$log -Tail 400 -ErrorAction Stop)) {
+                if (\$line -notmatch '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})') { continue }
+                \$t = [datetime]::ParseExact(\$Matches[1], 'yyyy-MM-dd HH:mm:ss', \$null)
+                if (\$t -lt \$cut) { continue }
+                if (\$line -match '/dlna/file' -or \$line -match 'seg_\d+\.(ts|m4s)') { \$n++ }
+              }
+              \$n
+            } catch { '1' }" 2>/dev/null | tr -d '\r ')
         if [ -n "$viewers" ] && [ "$viewers" -gt 0 ] 2>/dev/null; then
-            echo "post-commit: $viewers viewer(s) streaming — publishing without restarting"
+            echo "post-commit: media served in the last 2 minutes ($viewers request(s)) — publishing without restarting"
             powershell -NoProfile -Command \
                 "Move-Item -LiteralPath '$install_win\\j0kers-media-server.exe' '$install_win\\j0kers-media-server.exe.inuse' -Force -ErrorAction SilentlyContinue" 2>/dev/null
         else

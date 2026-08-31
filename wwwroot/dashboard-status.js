@@ -188,6 +188,28 @@ async function tick() {
       tcLastAutoReload = performance.now();
       tcReload(tcState.path, true);   // quiet: keeps the "N file(s) queued" message on screen
     }
+
+    /* The last conversion is the one whose result nobody ever saw.
+
+       The throttled refresh above runs only WHILE something is converting, so
+       the newest listing it ever fetches is one taken up to six seconds before
+       the final file finished. The moment the queue empties the condition goes
+       false and no further poll is made, leaving the pills showing the counts
+       as they were mid-run: "12 to convert" on a folder that has just finished
+       converting all twelve. Navigating away and back fixed it, which is
+       exactly what "the pill numbers don't update after transcodes" was.
+
+       So the busy→idle edge gets one more read. It deliberately ignores the
+       throttle (this fires once per run, not every tick) and the selection and
+       search guards above (a quiet reload preserves both, and the whole point
+       is that the person is most likely looking at the panel right now,
+       waiting for it to say the work is done). */
+    const tcIdleNow = !tcBusy;
+    if (tcState.booted && tcIdleNow && tcWasBusy && tcState.path) {
+      tcLastAutoReload = performance.now();
+      tcReload(tcState.path, true);
+    }
+    tcWasBusy = tcBusy;
   }
   refreshHistory();
   refreshMounts();   // cheap, cached-ish
