@@ -824,6 +824,15 @@
       <select id="log-file" class="am-in" style="width:auto;max-width:230px" onchange="onLogFileChange()" onfocus="loadLogFiles()" title="Live view, or an earlier log file from disk (last night, a crash, a previous run)">
         <option value="">🔴 Live</option>
       </select>
+      <!-- Filters the view only. The level select next to it changes what the
+           server records; this changes what you are shown, which is a
+           different question and the one you have when the access log is
+           burying everything else. -->
+      <input id="log-search" class="am-in" style="width:auto;max-width:150px" placeholder="filter, e.g. ffmpeg"
+             oninput="renderLog()"
+             title="Show only lines containing this. Filters what is displayed, not what the server records.">
+      <button id="log-transcodes" onclick="logShowTranscodes()"
+              title="Show only conversion starts and finishes">🎬 Transcodes</button>
       <select id="log-filter" class="am-in" style="width:auto" onchange="onLogFilterChange()" title="Sets what the server actually logs, not just what's shown here">
         <option value="TRACE">Everything</option>
         <option value="DEBUG">Debug and up</option>

@@ -102,7 +102,19 @@ async function onLogFileChange() {
 function renderLog() {
   const box = $("log");
   const floor = LOG_LEVELS[$("log-filter").value] ?? 2;
-  const shown = logLines.filter(e => (LOG_LEVELS[e.level] ?? 2) >= floor);
+
+  /* Filtering what is shown, which is not what the level select does.
+     With the access log on, one line is written per request on every port —
+     measured here, 381 of the last 500 lines — so anything else scrolls past
+     before it can be read. Conversion starts and finishes were being recorded
+     the whole time, 445 of them, and were simply invisible underneath. The
+     level select cannot help: turning the level up hides the transcode lines
+     too, and the only way to quieten the access log is to stop auditing
+     requests. */
+  const q = ($("log-search")?.value || "").trim().toLowerCase();
+  const shown = logLines.filter(e =>
+    (LOG_LEVELS[e.level] ?? 2) >= floor
+    && (!q || (e.area + " " + e.message).toLowerCase().includes(q)));
 
   let h = logMissed
     ? '<div style="color:var(--muted)">… earlier lines have scrolled out of memory — the log file has them</div>'
@@ -117,8 +129,20 @@ function renderLog() {
       + '<span style="color:var(--muted)">[' + esc(e.area) + "]</span> "
       + esc(e.message) + "</div>";
   }
-  box.innerHTML = h || '<div style="color:var(--muted)">nothing at this level yet</div>';
+  box.innerHTML = h || '<div style="color:var(--muted)">'
+    + (q ? "nothing matching “" + esc(q) + "” in what is held here"
+         : "nothing at this level yet") + "</div>";
   if (logFollow) box.scrollTop = box.scrollHeight;
+}
+
+/* One press for the question this was actually asked about: what has been
+   converted, and when. "vod" catches both ends of a conversion — "started:
+   vod X" and "finished: vod X — took 4m 12s" — and nothing else. */
+function logShowTranscodes() {
+  const box = $("log-search");
+  if (!box) return;
+  box.value = box.value.trim().toLowerCase() === "vod" ? "" : "vod";
+  renderLog();
 }
 
 /* Following is off the moment you scroll up — reading anything is
