@@ -11,6 +11,19 @@
 const LOG_LEVELS = { TRACE: 0, DEBUG: 1, INFO: 2, WARN: 3, ERROR: 4 };
 const LOG_KEEP = 500;              // matches the server's ring
 let logLines = [], logSeq = 0, logFollow = true, logMissed = false;
+/* The entries the log box is currently showing, in the order its children are
+   in. Kept so a re-render can find the line somebody was looking at and put
+   the view back on it — see renderLog. */
+let lastShown = [];
+/* Set while this code moves the log box itself, so the scroll listener can
+   tell its own doing from the reader's. */
+let logScrollingOurselves = false;
+function logScrollTo(box, top) {
+  logScrollingOurselves = true;
+  box.scrollTop = top;
+  // cleared after the event loop turn the scroll event is delivered in
+  setTimeout(() => { logScrollingOurselves = false; }, 0);
+}
 let logLevelSynced = false;
 let logViewFile = "";              // "" = live ring; otherwise a rotated file on disk
 
@@ -93,7 +106,7 @@ async function onLogFileChange() {
       : "";
     box.innerHTML = note
       + '<div style="white-space:pre-wrap;word-break:break-word;color:var(--ink-2)">' + esc(d.text) + "</div>";
-    box.scrollTop = box.scrollHeight;
+    logScrollTo(box, box.scrollHeight);   // ours, not the reader's — see the listener
   } catch {
     box.innerHTML = '<div style="color:var(--critical)">could not load ' + esc(logViewFile) + "</div>";
   }
@@ -129,10 +142,43 @@ function renderLog() {
       + '<span style="color:var(--muted)">[' + esc(e.area) + "]</span> "
       + esc(e.message) + "</div>";
   }
+  /* Paused has to mean the lines stay where they are.
+
+     Rebuilding innerHTML destroys every child, and a scroll container with no
+     children has nowhere to be scrolled to — so scrollTop resets to 0 and the
+     next poll threw the reader back to the top of the buffer, two seconds
+     after they pressed Pause. Following worked only because it immediately
+     scrolled to the bottom again and hid the reset.
+
+     Remembering scrollTop is not enough either: the buffer is capped, so old
+     lines fall off the front and everything above shifts up by however tall
+     they were. The fix has to hold onto a line rather than a number — find
+     the first one still visible, note how far below the top edge it sits, and
+     put it back exactly there afterwards. */
+  let anchor = null;
+  if (!logFollow && lastShown.length) {
+    const kids = box.children, lead = kids.length - lastShown.length;   // 0 or 1 (the "missed" note)
+    for (let i = Math.max(0, lead); i < kids.length; i++) {
+      const el = kids[i];
+      if (el.offsetTop + el.offsetHeight > box.scrollTop) {
+        anchor = { entry: lastShown[i - lead], gap: el.offsetTop - box.scrollTop };
+        break;
+      }
+    }
+  }
+
   box.innerHTML = h || '<div style="color:var(--muted)">'
     + (q ? "nothing matching “" + esc(q) + "” in what is held here"
          : "nothing at this level yet") + "</div>";
-  if (logFollow) box.scrollTop = box.scrollHeight;
+  lastShown = shown;
+
+  if (logFollow) { logScrollTo(box, box.scrollHeight); return; }
+  if (!anchor) return;
+  const idx = shown.indexOf(anchor.entry);
+  if (idx < 0) return;                       // that line has aged out of the buffer
+  const lead = box.children.length - shown.length;
+  const el = box.children[idx + Math.max(0, lead)];
+  if (el) logScrollTo(box, el.offsetTop - anchor.gap);
 }
 
 /* One press for the question this was actually asked about: what has been
@@ -149,6 +195,13 @@ function logShowTranscodes() {
    impossible if the newest line keeps yanking the view back — and on again
    when you return to the bottom yourself. */
 $("log").addEventListener("scroll", () => {
+  // Scrolls this code performed are not the reader changing their mind.
+  //
+  // Pressing Pause while already at the bottom used to undo itself: the next
+  // re-render moved the box, the browser raised this event, it read "at the
+  // bottom" and turned following back on. The button appeared to do nothing
+  // at all in the one position people press it from.
+  if (logScrollingOurselves) return;
   const box = $("log");
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
   if (atBottom !== logFollow) { logFollow = atBottom; paintLogFollow(); }
@@ -157,7 +210,7 @@ $("log").addEventListener("scroll", () => {
 function toggleLogFollow() {
   logFollow = !logFollow;
   paintLogFollow();
-  if (logFollow) $("log").scrollTop = $("log").scrollHeight;
+  if (logFollow) logScrollTo($("log"), $("log").scrollHeight);
 }
 
 function paintLogFollow() {
