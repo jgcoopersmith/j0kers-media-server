@@ -378,6 +378,19 @@ public sealed class FfmpegManager : IDisposable
             : Array.Empty<string>();
     }
 
+    /// <summary>
+    /// How long a job ran, in the units somebody reading a log actually wants
+    /// — "4m 12s", not "00:04:12.3471".
+    /// </summary>
+    private static string Elapsed(DateTime startedUtc)
+    {
+        var d = DateTime.UtcNow - startedUtc;
+        if (d < TimeSpan.Zero) d = TimeSpan.Zero;      // clock moved under us
+        if (d.TotalHours >= 1) return $"{(int)d.TotalHours}h {d.Minutes:00}m {d.Seconds:00}s";
+        if (d.TotalMinutes >= 1) return $"{d.Minutes}m {d.Seconds:00}s";
+        return $"{d.TotalSeconds:0.0}s";
+    }
+
     private static string Inv(int value) => value.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     /// <summary>Same, for a time or a length in seconds.</summary>
@@ -2930,6 +2943,12 @@ public sealed class FfmpegManager : IDisposable
                 catch { /* a diagnostic must never disturb the job it watches */ }
             }
         };
+        // When this job began, so the line that reports it ending can say how
+        // long it took. The log already timestamps both, but working a
+        // duration out by subtracting two timestamps by hand — across
+        // hundreds of interleaved jobs — is not the same as being told.
+        var startedAt = DateTime.UtcNow;
+
         if (trace is not null)
             p.Exited += (_, _) => { try { lock (trace) trace.Dispose(); } catch { } };
         p.Exited += (_, _) => Task.Run(() =>
@@ -2955,10 +2974,11 @@ public sealed class FfmpegManager : IDisposable
                 lock (errTail) tail = string.Join(" | ", errTail);
                 var code = p.ExitCode;
                 if (code == 0)
-                    Log.Info("ffmpeg", $"{label}: finished");
+                    Log.Info("ffmpeg", $"finished: {label} — took {Elapsed(startedAt)}");
                 else
                 {
-                    Log.Warn("ffmpeg", $"{label}: exited with code {code}{(tail.Length > 0 ? " — " + tail : "")}");
+                    Log.Warn("ffmpeg", $"failed: {label} after {Elapsed(startedAt)} — exited with code {code}"
+                                       + (tail.Length > 0 ? " — " + tail : ""));
                     // A conversion that failed is the thing most worth seeing
                     // and the thing this log line was least good at showing:
                     // one warning in a stream of thousands, hours before
@@ -2984,6 +3004,9 @@ public sealed class FfmpegManager : IDisposable
         p.BeginErrorReadLine();
         if (onProgressLine is not null) p.BeginOutputReadLine();
         Log.Info("ffmpeg", $"started: {label}");
+        // "started:" and "finished:" both lead with the same word shape on
+        // purpose — one grep for either finds the pair, where "started: vod X"
+        // against "vod X: finished" did not.
         return p;
     }
 
