@@ -16,6 +16,19 @@ let upgradeNoticeShown = false;
 function showUpgradeNotice(serverVersion) {
   if (upgradeNoticeShown) return;
   upgradeNoticeShown = true;
+
+  /* Reload without being asked when there is nothing to lose by it.
+     The reason this asked at all is that reloading mid-selection throws away
+     ticks somebody spent minutes making, and a dialog open on screen is work
+     in progress too. Neither is true most of the time, and when neither is
+     true the prompt is just a chore: the page sits on stale code until
+     somebody notices a bar and presses a button, which is how an already
+     shipped fix keeps looking broken. */
+  const overlayOpen = ["cfg-overlay", "users-overlay", "acct-overlay", "picker-overlay"]
+    .some(id => { const el = $(id); return el && el.style.display !== "none" && el.offsetParent !== null; });
+  const busy = overlayOpen
+            || (typeof tcState !== "undefined" && tcState.selected && tcState.selected.size > 0);
+  if (!busy) { location.reload(); return; }
   const bar = document.createElement("div");
   bar.id = "upgrade-bar";
   bar.style.cssText = "position:fixed;left:50%;transform:translateX(-50%);bottom:16px;z-index:9999;"
