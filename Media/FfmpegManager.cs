@@ -1694,8 +1694,27 @@ public sealed class FfmpegManager : IDisposable
                 dequeued = true;
                 try
                 {
-                    if (VodStatusFor(file) is VodState.Done or VodState.Converting) continue;
-                    if (!File.Exists(file)) continue;
+                    // Say why a file left the queue without being converted.
+                    //
+                    // Both of these were silent, and silence here is
+                    // indistinguishable from losing the work: a queue of 86
+                    // emptied in under a minute with two conversions started,
+                    // and nothing anywhere said the other 84 were already
+                    // done. Twice today that was read as the server throwing
+                    // the queue away, and checking it by hand was the only way
+                    // to find out otherwise.
+                    var state = VodStatusFor(file);
+                    if (state is VodState.Done or VodState.Converting)
+                    {
+                        Log.Info("ffmpeg", $"skipped: {Path.GetFileName(file)} — "
+                            + (state == VodState.Done ? "already converted" : "already converting"));
+                        continue;
+                    }
+                    if (!File.Exists(file))
+                    {
+                        Log.Info("ffmpeg", $"skipped: {Path.GetFileName(file)} — the file is no longer there");
+                        continue;
+                    }
                     // keep: everything in this queue was put there from the
                     // Transcodes window, which is somebody asking for a file
                     // to exist - not the server making itself a copy to play.
