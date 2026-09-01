@@ -586,13 +586,56 @@ public sealed class FfmpegManager : IDisposable
         // labelled with resolutions they didn't have)
         if (VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase)) height = 0;
 
-        // cache key: same file+size+mtime+height+codecs → same output dir, converted once
-        var key = Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(
-            $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}|{height}|{VideoEncoder}|{AudioEncoder}")))[..8].ToLowerInvariant();
         // readable link: filename slug + optional quality + short hash for uniqueness
         var slug = Slugify(Path.GetFileNameWithoutExtension(info.Name));
-        return $"vod-{slug}{(height > 0 ? $"-{height}p" : "")}-{key}";
+        string Named(string videoEncoder)
+        {
+            // cache key: same file+size+mtime+height+codecs → same output dir, converted once
+            var key = Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(
+                $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}|{height}|{videoEncoder}|{AudioEncoder}")))[..8].ToLowerInvariant();
+            return $"vod-{slug}{(height > 0 ? $"-{height}p" : "")}-{key}";
+        }
+
+        var current = Named(VideoEncoder);
+        if (Directory.Exists(Path.Combine(_mediaRoot, current))) return current;
+
+        // A conversion already on disk is a conversion, whichever encoder made
+        // it.
+        //
+        // The encoder name is part of the key, so changing it renames every
+        // conversion this server has ever produced — not on disk, where they
+        // sit untouched, but in the only place that looks for them. Switching
+        // to h264_nvenc did exactly that: 905 finished conversions became
+        // invisible in one restart, the library reported "needs converting"
+        // for all of them, and converting again would have re-encoded the lot
+        // over the top of work that was already there.
+        //
+        // The key has to keep the encoder, because a copy made by a different
+        // one is a different copy and asking for h265 must not hand back an
+        // h264 conversion. But looking for the file is a different question
+        // from naming a new one: if the name this encoder would use is not on
+        // disk and a name a previous encoder would have used is, that is the
+        // conversion, and it is found rather than remade.
+        foreach (var prior in PriorVideoEncoders)
+        {
+            if (prior.Equals(VideoEncoder, StringComparison.OrdinalIgnoreCase)) continue;
+            var name = Named(prior);
+            if (Directory.Exists(Path.Combine(_mediaRoot, name))) return name;
+        }
+        return current;
     }
+
+    /// <summary>
+    /// Encoders this server has shipped with, newest first. Only used to find
+    /// conversions made before the encoder changed — see VodStreamName. A name
+    /// missing from here costs a re-conversion, not a fault, so it is a short
+    /// list of what has actually been default rather than every encoder ffmpeg
+    /// has.
+    /// </summary>
+    private static readonly string[] PriorVideoEncoders =
+    {
+        "libx264", "h264_nvenc", "libx265", "hevc_nvenc",
+    };
 
     /// <summary>
     /// The file that marks a conversion as one the owner asked for, rather
