@@ -786,7 +786,11 @@
     <span class="pill admin-only" id="holdpill" style="white-space:nowrap;text-align:center;line-height:1.25"><span id="hold-count">–</span><br><span id="hold-label">Holding Open</span></span>
     <button class="pill" id="acctbtn" onclick="openAccount()" title="Your account, password, and keys">👤 <span id="acct-pill">…</span></button>
     <button class="pill" id="themebtn" onclick="toggleTheme()" title="Switch theme">🌗</button>
-    <span class="pill" id="clockpill" style="font-variant-numeric:tabular-nums;font-weight:700">–</span>
+    <!-- Two lines, date over time, stacked the same way the Holding Open pill
+         is. The weight is left to .pill like every other one: this carried an
+         inline font-weight:700 that nothing else had, which is the only reason
+         it read as bolder than its neighbours. -->
+    <span class="pill" id="clockpill" style="white-space:nowrap;text-align:center;line-height:1.25;font-variant-numeric:tabular-nums"><span id="clock-date">–</span><br><span id="clock-time"></span></span>
     <span class="pill" id="verpill">v–</span>
   </header>
 

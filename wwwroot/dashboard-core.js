@@ -254,7 +254,12 @@ function noteServerClock(status) {
 function tickClock() {
   const pill = $("clockpill");
   if (!pill) return;
-  if (clockSkewMs === null) { pill.textContent = "—"; return; }
+  // Two spans rather than one string, so the date and the time can stack
+  // without building markup at runtime — textContent on each keeps whatever
+  // the locale produces out of the HTML parser.
+  const dEl = $("clock-date"), tEl = $("clock-time");
+  if (!dEl || !tEl) return;
+  if (clockSkewMs === null) { dEl.textContent = "—"; tEl.textContent = ""; return; }
 
   // shift the instant by the server's offset and then read it as UTC: that
   // prints the server's wall clock whatever zone this browser is in
@@ -263,7 +268,8 @@ function tickClock() {
     hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" });
   const date = shifted.toLocaleDateString([], {
     weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
-  pill.textContent = date + " · " + time + (clockZone ? " " + clockZone : "");
+  dEl.textContent = date;
+  tEl.textContent = time + (clockZone ? " " + clockZone : "");
   pill.title = (clockZoneFull || clockZone || "server time") + " — the server's clock";
 }
 tickClock();
