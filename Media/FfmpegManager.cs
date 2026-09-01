@@ -264,6 +264,76 @@ public sealed class FfmpegManager : IDisposable
     /// <summary>True when the chosen video encoder runs on the GPU via NVENC.</summary>
     public bool IsNvenc => VideoEncoder.EndsWith("_nvenc", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>How many times a file has been put back for want of a GPU session.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _nvencRetries =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private const int MaxNvencRetries = 20;
+
+    private int _nvencRefusals;
+
+    /// <summary>
+    /// The most conversions this card has actually run at once without
+    /// refusing a session. Learned, because it cannot be looked up: the
+    /// number moves with the driver, and with whatever else on the machine is
+    /// encoding. Starts unlimited and only ever comes down.
+    /// </summary>
+    private int _gpuSessionCeiling = int.MaxValue;
+
+    /// <summary>
+    /// How many conversions may run at once — the owner's setting, held under
+    /// whatever the GPU has proved willing to serve. Retrying alone was not
+    /// enough: it recovers the file but goes on asking for a session that is
+    /// not there, so the queue keeps failing at the same wall. This stops it
+    /// being asked for.
+    /// </summary>
+    private int EffectiveMaxConcurrentVod =>
+        IsNvenc ? Math.Max(1, Math.Min(MaxConcurrentVod, _gpuSessionCeiling)) : MaxConcurrentVod;
+
+    /// <summary>
+    /// Whether ffmpeg failed because the card would not give it an encoder
+    /// session, rather than because there was anything wrong with the file.
+    ///
+    /// A GeForce card serves a limited number of NVENC sessions at once, and
+    /// the limit is not a number this server can know: it moves with the
+    /// driver, and with what else on the machine is encoding. Ask for one too
+    /// many and ffmpeg exits immediately with a message about the encoder
+    /// failing to open, which reads exactly like a broken source file and is
+    /// nothing of the kind.
+    /// </summary>
+    private static bool IsGpuSessionExhausted(string stderrTail) =>
+        stderrTail.Contains("OpenEncodeSessionEx failed", StringComparison.OrdinalIgnoreCase)
+        || stderrTail.Contains("incompatible client key", StringComparison.OrdinalIgnoreCase)
+        || stderrTail.Contains("No capable devices found", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Puts a file back on the queue after the GPU refused it a session.
+    ///
+    /// Losing the conversion was the alternative, and it is what happened: 36
+    /// files failed this way in one run, each in under half a second, each
+    /// reported as an ffmpeg error and none of them retried. The queue emptied
+    /// and the work was simply gone.
+    ///
+    /// It goes to the back, so the jobs already running get to finish and free
+    /// the sessions this one needs, and it is bounded — a file that cannot be
+    /// converted for some other reason must not circle for ever.
+    /// </summary>
+    private void RequeueForGpuSession(string file, string label)
+    {
+        var tries = _nvencRetries.AddOrUpdate(file, 1, (_, n) => n + 1);
+        if (tries > MaxNvencRetries)
+        {
+            Log.Warn("ffmpeg", $"{label}: the GPU would not give it an encoder session after "
+                             + $"{MaxNvencRetries} attempts — giving up on this one. Lower "
+                             + "\"how many at a time\" in the Transcodes panel.");
+            return;
+        }
+        _vodQueue.Enqueue(file);
+        Log.Info("ffmpeg", $"{label}: no free GPU encoder session — put back in the queue "
+                         + $"(attempt {tries}). Conversions already running will free one.");
+        SaveQueueState();
+    }
+
     /// <summary>
     /// Proves NVENC can actually open before anything depends on it, and
     /// falls back to software if it cannot.
@@ -805,7 +875,7 @@ public sealed class FfmpegManager : IDisposable
 
             var job = Spawn(args, $"vod {info.Name}", dir, background: true,
                 onProgressLine: line => NoteVodProgress(stream, title, duration, line),
-                onExited: p =>
+                onExited: (p, tail) =>
                 {
                     // keep the job table from accumulating finished processes.
                     // Matched by reference so a rerun that has already taken
@@ -829,6 +899,36 @@ public sealed class FfmpegManager : IDisposable
                     // disk (and isn't mistaken for a real one). A rerun that took
                     // the slot owns the dir now, so leave that alone.
                     if (!superseded) ReportIfIncomplete(stream, dir);
+
+                    // Refused a GPU session is not the same as failed, and
+                    // must not cost the conversion. Asking for more encoder
+                    // sessions than the card will serve fails in well under a
+                    // second, so a queue can burn through dozens of files this
+                    // way in a minute with nothing to show for it.
+                    var refused = false;
+                    try { refused = !superseded && p.ExitCode != 0 && IsGpuSessionExhausted(tail); }
+                    catch { /* reaped already */ }
+                    if (refused)
+                    {
+                        _nvencRefusals++;
+                        // Whatever was running when the card said no is one
+                        // more than it will serve. Learn it, so the queue
+                        // stops walking into the same wall.
+                        var running = Math.Max(1, ActiveVodStreams.Count);
+                        if (running < _gpuSessionCeiling)
+                        {
+                            _gpuSessionCeiling = running;
+                            Log.Warn("ffmpeg", $"the GPU refused a {running + 1}th encoder session — "
+                                             + $"holding conversions at {running} at a time. "
+                                             + $"(\"How many at a time\" is set to {MaxConcurrentVod}.)");
+                        }
+                        RequeueForGpuSession(info.FullName, $"vod {info.Name}");
+                    }
+                    else
+                    {
+                        _nvencRetries.TryRemove(info.FullName, out _);
+                    }
+
                     // one fewer file owed — write that down before starting the
                     // next, so a crash cannot resurrect a conversion that is
                     // already done. Outside the lock above: SaveQueueState
@@ -1064,7 +1164,7 @@ public sealed class FfmpegManager : IDisposable
 
             Log.Info("ffmpeg", $"seek-ahead: {stream} from segment {index} ({Inv(at)}s)");
             var proc = Spawn(args, $"seek {stream}@{index}", dir,
-                onExited: p =>
+                onExited: (p, tail) =>
                 {
                     lock (_lock)
                         if (_seekJobs.TryGetValue(stream, out var list))
@@ -1532,7 +1632,7 @@ public sealed class FfmpegManager : IDisposable
             var dequeued = false;
             try
             {
-            while (ActiveVodStreams.Count < MaxConcurrentVod && !_vodQueue.IsEmpty)
+            while (ActiveVodStreams.Count < EffectiveMaxConcurrentVod && !_vodQueue.IsEmpty)
             {
                 // Stagger: leave the configured gap between one start and the
                 // next. It applies only while something is already converting —
@@ -2528,7 +2628,7 @@ public sealed class FfmpegManager : IDisposable
         args.AddRange(new[] { "-hls_segment_filename", Path.Combine(dir, $"seg_%05d.{liveSegExt}"),
                               Path.Combine(dir, "index.m3u8") });
 
-        var proc = Spawn(args, $"channel {name}", dir, onExited: p => OnLiveJobExited(name, url, p));
+        var proc = Spawn(args, $"channel {name}", dir, onExited: (p, _) => OnLiveJobExited(name, url, p));
         _liveJobs[stream] = proc;
         _liveStarted[stream] = DateTime.UtcNow;
     }
@@ -2900,8 +3000,14 @@ public sealed class FfmpegManager : IDisposable
     /// it fills idle cores instead of competing for busy ones. See
     /// <see cref="LowerPriority"/>.
     /// </param>
+    /// <param name="onExited">
+    /// Given the process and the last few lines it wrote to stderr. The tail
+    /// is passed because why a job failed decides what to do about it — an
+    /// encoder that could not open a session is worth retrying, a corrupt
+    /// source is not — and the caller cannot see it otherwise.
+    /// </param>
     private Process Spawn(IEnumerable<string> args, string label, string? workingDir = null,
-        Action<string>? onProgressLine = null, Action<Process>? onExited = null,
+        Action<string>? onProgressLine = null, Action<Process, string>? onExited = null,
         bool background = false)
     {
         var psi = new ProcessStartInfo(FfmpegPath)
@@ -2991,7 +3097,9 @@ public sealed class FfmpegManager : IDisposable
             catch { /* process already reaped/disposed — nothing to report */ }
 
             // caller's cleanup, guarded for the same reason
-            try { onExited?.Invoke(p); }
+            string exitTail;
+            lock (errTail) exitTail = string.Join(" | ", errTail);
+            try { onExited?.Invoke(p, exitTail); }
             catch (Exception ex) { Log.Warn("ffmpeg", $"{label}: exit handler failed: {ex.Message}"); }
         });
         p.Start();
