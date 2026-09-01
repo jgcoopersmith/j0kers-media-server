@@ -1549,8 +1549,26 @@ public sealed class FfmpegManager : IDisposable
                     // keep: everything in this queue was put there from the
                     // Transcodes window, which is somebody asking for a file
                     // to exist - not the server making itself a copy to play.
-                    StartVod(file, keep: true);   // registers the job; its exit pumps the queue again
+                    // Stamped before the work, not after it.
+                    //
+                    // The stagger is the gap between one start and the next,
+                    // and this marked the moment StartVod *finished* setting a
+                    // conversion up — so everything that setting up costs was
+                    // added to the wait. Clearing a partial directory is the
+                    // expensive part: an interrupted 1080p episode leaves
+                    // four to five hundred segment files, and deleting them
+                    // recursively off an archive disk takes many seconds,
+                    // inside the lock, before the clock even started. A 15
+                    // second stagger was firing 26 to 35 seconds apart with
+                    // the pool nowhere near its limit, which is what "the
+                    // timing is not firing at 15s" was.
+                    //
+                    // Marking the start makes the setting say what it means:
+                    // starts are 15 seconds apart. If setting one up takes
+                    // longer than that the next follows immediately after,
+                    // which is the honest reading of a minimum gap.
                     _lastVodStartUtc = DateTime.UtcNow;
+                    StartVod(file, keep: true);   // registers the job; its exit pumps the queue again
                 }
                 catch (Exception ex)
                 {
