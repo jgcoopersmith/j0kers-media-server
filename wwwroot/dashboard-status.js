@@ -4,6 +4,38 @@
    dashboard.html; see dashboard-core.js for why every function here stays
    global. */
 "use strict";
+
+/* The build this page's scripts came from — taken from the first status that
+   answers, because the page cannot read its own version any other way. */
+let pageVersion = null;
+let upgradeNoticeShown = false;
+
+/* Says the server has been upgraded under this page, and offers the reload.
+   Deliberately not automatic: reloading while somebody is part way through
+   ticking files for conversion would throw their selection away. */
+function showUpgradeNotice(serverVersion) {
+  if (upgradeNoticeShown) return;
+  upgradeNoticeShown = true;
+  const bar = document.createElement("div");
+  bar.id = "upgrade-bar";
+  bar.style.cssText = "position:fixed;left:50%;transform:translateX(-50%);bottom:16px;z-index:9999;"
+    + "display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:10px;"
+    + "background:var(--surface-2,#222);color:var(--ink,#eee);border:1px solid var(--grid,#444);"
+    + "box-shadow:0 6px 24px rgba(0,0,0,.4);font-size:13px";
+  const text = document.createElement("span");
+  text.textContent = "Server updated to v" + serverVersion + " — this page is still running v"
+    + pageVersion + ".";
+  const btn = document.createElement("button");
+  btn.className = "primary";
+  btn.textContent = "Reload";
+  btn.onclick = () => location.reload();
+  const dismiss = document.createElement("button");
+  dismiss.textContent = "Later";
+  dismiss.onclick = () => bar.remove();
+  bar.appendChild(text); bar.appendChild(btn); bar.appendChild(dismiss);
+  document.body.appendChild(bar);
+}
+
 function fmtUptime(s) {
   if (s < 3600) return Math.floor(s / 60) + "m " + (s % 60) + "s";
   if (s < 86400) return Math.floor(s / 3600) + "h " + Math.floor(s % 3600 / 60) + "m";
@@ -61,6 +93,22 @@ async function tick() {
   pw.classList.toggle("on", running);
   pw.classList.toggle("off", !running);
   $("verpill").textContent = "v" + (status.version || "?");
+
+  /* The scripts this page is running came from one build; the server
+     answering it may now be another. Nothing told anybody, and this page
+     stays open for days — so an upgrade would land, the server would restart
+     underneath it, and the tab would carry on running the old code. A fix
+     that had shipped, been published and been verified on disk still looked
+     broken to the only person who could see it, because the page holding it
+     was from before. That cost three rounds of chasing a bug that was
+     already fixed.
+     Not a silent reload: a page reloading itself while somebody is halfway
+     through ticking two hundred files for conversion is its own fault. It
+     says so, once, and the reload is theirs to press. */
+  if (status.version) {
+    if (!pageVersion) pageVersion = status.version;
+    else if (status.version !== pageVersion) showUpgradeNotice(status.version);
+  }
 
   /* Accounts on the server, and how many of them have somebody signed in.
      Both ride this poll rather than costing requests of their own. Left at
