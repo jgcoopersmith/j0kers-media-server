@@ -301,10 +301,17 @@ public sealed class FfmpegManager : IDisposable
     /// failing to open, which reads exactly like a broken source file and is
     /// nothing of the kind.
     /// </summary>
+    /// The first three lines are what NVENC says when asked directly. They are
+    /// also what this server never sees: conversions run at -loglevel error,
+    /// and those are logged below it — which is why matching only on them
+    /// caught nothing at all, while the failures went on being lost. The two
+    /// that follow are what does survive that filter.
     private static bool IsGpuSessionExhausted(string stderrTail) =>
         stderrTail.Contains("OpenEncodeSessionEx failed", StringComparison.OrdinalIgnoreCase)
         || stderrTail.Contains("incompatible client key", StringComparison.OrdinalIgnoreCase)
-        || stderrTail.Contains("No capable devices found", StringComparison.OrdinalIgnoreCase);
+        || stderrTail.Contains("No capable devices found", StringComparison.OrdinalIgnoreCase)
+        || stderrTail.Contains("Error while opening encoder", StringComparison.OrdinalIgnoreCase)
+        || stderrTail.Contains("Could not open encoder", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Puts a file back on the queue after the GPU refused it a session.
@@ -915,7 +922,12 @@ public sealed class FfmpegManager : IDisposable
                         // more than it will serve. Learn it, so the queue
                         // stops walking into the same wall.
                         var running = Math.Max(1, ActiveVodStreams.Count);
-                        if (running < _gpuSessionCeiling)
+                        // Only contention teaches a ceiling. A job that cannot
+                        // open an encoder while it is the only one running is
+                        // not being crowded out — that is the file or the
+                        // arguments, and clamping the queue to one because of
+                        // it would punish the whole library for one bad title.
+                        if (running >= 2 && running < _gpuSessionCeiling)
                         {
                             _gpuSessionCeiling = running;
                             Log.Warn("ffmpeg", $"the GPU refused a {running + 1}th encoder session — "
