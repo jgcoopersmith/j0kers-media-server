@@ -673,10 +673,21 @@ function tcRefresh() {
 
 async function tcTranscode() {
   const paths = [...tcState.selected];
-  if (!paths.length) return;
   const msg = $("tc-msg");
+  /* Pressed with nothing in the selection used to return in silence, which is
+     the same thing on screen as a button that does not work: no request, no
+     message, no error. The button is meant to be disabled in that state, so
+     reaching here at all means the button and the selection had come apart —
+     worth saying out loud rather than swallowing, because from the outside it
+     is indistinguishable from the server having stopped accepting work. */
+  if (!paths.length) {
+    msg.textContent = "nothing is ticked — the selection was empty when Transcode was pressed. "
+                    + "Tick the files or folders you want and press it again.";
+    tcSyncGo();
+    return;
+  }
   $("tc-go").disabled = true;
-  msg.textContent = "queuing…";
+  msg.textContent = "queuing " + paths.length + " selection(s)…";
   let result = "";
   try {
     const r = await fetch("/api/transcode", {
@@ -708,7 +719,14 @@ async function tcTranscode() {
         + (skips.length ? " (" + skips.join(", ") + ")" : "")
         + (gap > 0 ? " — starting one every " + gap + "s once one is running" : "")
       : (skips.length ? "nothing to queue — " + skips.join(", ") : "no video files found");
-  } catch (e) { result = "failed: " + e.message; }
+  } catch (e) {
+    // Anything that stops the request reaching the server — a dropped
+    // connection, a rejected body, a fault in this function — ends here. It
+    // is reported and also written to the console, because a message that is
+    // replaced by the next render is not evidence anyone can come back to.
+    result = "failed to queue: " + (e && e.message ? e.message : e);
+    try { console.error("tcTranscode failed", e); } catch { /* no console */ }
+  }
   // refresh the listing first (it clears the message), then show the result so
   // it doesn't vanish the instant it appears
   await tcReload(tcState.path);
