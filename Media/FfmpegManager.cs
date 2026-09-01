@@ -1473,7 +1473,32 @@ public sealed class FfmpegManager : IDisposable
             if (!_vodQueue.IsEmpty)
                 Log.Info("ffmpeg", $"transcode queue restored: {_vodQueue.Count} file(s) still to convert");
         }
-        catch { /* a bad sidecar is a default, not a failure */ }
+        catch (Exception ex)
+        {
+            // A queue file that cannot be read is not a default.
+            //
+            // This swallowed the exception and carried on with an empty queue,
+            // and the next save wrote that emptiness over the top — so a file
+            // this could not parse destroyed every entry in it, silently, with
+            // nothing in the log to say a queue had ever existed. Ninety-four
+            // files went that way in one restart, and the only clue was the
+            // absence of the "queue restored" line, which is not something
+            // anybody watches for.
+            //
+            // Starting empty is still the right behaviour: refusing to start
+            // over a bad sidecar would be worse. But it is said out loud, and
+            // the file is kept, so what was in it can be recovered rather
+            // than overwritten a second later.
+            Log.Error("ffmpeg", $"could not read the transcode queue ({ex.Message}) — starting with an "
+                              + "empty queue. The unreadable file is kept as transcode-queue.json.unreadable; "
+                              + "nothing that was queued has been converted.");
+            try
+            {
+                var kept = _queueSettingsFile + ".unreadable";
+                File.Copy(_queueSettingsFile, kept, overwrite: true);
+            }
+            catch { /* best effort — the log line above is the part that matters */ }
+        }
     }
 
     /// <summary>Serialises the queue file. One writer at a time.</summary>
