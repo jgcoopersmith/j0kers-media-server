@@ -523,10 +523,12 @@ public sealed class FfmpegManager : IDisposable
             foreach (var a in new[] { "-v", "error", "-show_entries", "stream=codec_type,codec_name",
                                       "-of", "csv=p=0", file })
                 psi.ArgumentList.Add(a);
-            using var p = Services.ProcessJob.Start(psi);
-            if (p is null) return (null, null);
-            var output = p.StandardOutput.ReadToEnd();
-            p.WaitForExit(15_000);
+            // Both pipes read at once - see ProcessJob.Run. Draining only
+            // stdout leaves ffprobe blocked writing a stderr nobody empties,
+            // and this call never returns.
+            var run = Services.ProcessJob.Run(psi, 15_000);
+            if (run is null) return (null, null);
+            var output = run.Value.StdOut;
             string? video = null, audio = null;
             foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
             {
@@ -561,10 +563,9 @@ public sealed class FfmpegManager : IDisposable
             foreach (var a in new[] { "-v", "error", "-show_entries", "format=duration",
                                       "-of", "default=noprint_wrappers=1:nokey=1", file })
                 psi.ArgumentList.Add(a);
-            using var p = Services.ProcessJob.Start(psi);
-            if (p is null) return 0;
-            var output = p.StandardOutput.ReadToEnd().Trim();
-            p.WaitForExit(15_000);
+            var run = Services.ProcessJob.Run(psi, 15_000);   // both pipes, real timeout
+            if (run is null) return 0;
+            var output = run.Value.StdOut.Trim();
             return double.TryParse(output, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var seconds) && seconds > 0
                 ? seconds : 0;

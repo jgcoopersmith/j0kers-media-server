@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using J0kersMediaServer.Logging;
 
 namespace J0kersMediaServer.Services;
@@ -63,14 +63,16 @@ public static class SecretFile
             foreach (var a in new[] { path, "/inheritance:r", "/grant:r", $"{me}:F" })
                 psi.ArgumentList.Add(a);
 
-            using var p = Process.Start(psi);
-            if (p is null) return;
-            p.StandardOutput.ReadToEnd();
-            var err = p.StandardError.ReadToEnd();
-            p.WaitForExit(10_000);
-            if (p.ExitCode != 0)
+            // Both pipes at once - reading one to the end while the other
+            // fills is the deadlock ProcessJob.Run exists to remove.
+            var run = ProcessJob.Run(psi, 10_000);
+            if (run is null) return;
+            var err = run.Value.StdErr.Trim();
+            if (!run.Value.Ok)
                 Log.Warn("secrets", $"could not restrict {Path.GetFileName(path)} to this account: " +
-                                    (err.Trim().Length > 0 ? err.Trim() : $"icacls exit {p.ExitCode}"));
+                                    (err.Length > 0 ? err
+                                     : run.Value.TimedOut ? "icacls did not finish"
+                                     : $"icacls exit {run.Value.ExitCode}"));
             else
                 Log.Debug("secrets", $"{Path.GetFileName(path)} restricted to {me}");
         }

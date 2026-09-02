@@ -176,10 +176,9 @@ public sealed class SubtitleManager
                          "-of", "json", mediaFile,
                      })
                 psi.ArgumentList.Add(a);
-            using var p = Services.ProcessJob.Start(psi);
-            if (p is null) return results;
-            var json = p.StandardOutput.ReadToEnd();
-            p.WaitForExit(15_000);
+            var run = Services.ProcessJob.Run(psi, 15_000);   // both pipes, real timeout
+            if (run is null) return results;
+            var json = run.Value.StdOut;
             if (string.IsNullOrWhiteSpace(json)) return results;
 
             using var doc = JsonDocument.Parse(json);

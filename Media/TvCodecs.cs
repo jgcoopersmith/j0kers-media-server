@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Text.Json;
 using J0kersMediaServer.Logging;
 
@@ -266,10 +266,19 @@ public sealed class TvCodecs
             foreach (var a in new[] { "-v", "error", "-show_entries", "stream=codec_type,codec_name",
                                       "-of", "csv=p=0", file })
                 psi.ArgumentList.Add(a);
-            using var p = Services.ProcessJob.Start(psi);
-            if (p is null) return (null, null);
-            var output = p.StandardOutput.ReadToEnd();
-            if (!p.WaitForExit(20_000)) { try { p.Kill(true); } catch { } return (null, null); }
+            // Both pipes drained together, with a timeout that can actually
+            // fire - see ProcessJob.Run. ffprobe has a great deal to say on
+            // stderr about a damaged file even under "-v error", and reading
+            // only stdout wedged this call, and the whole batch queue behind
+            // it, against the first such file in the library.
+            var run = Services.ProcessJob.Run(psi, 20_000);
+            if (run is null) return (null, null);
+            if (run.Value.TimedOut)
+            {
+                Log.Warn("ffmpeg", $"ffprobe gave up on {Path.GetFileName(file)} after 20s - left unread");
+                return (null, null);
+            }
+            var output = run.Value.StdOut;
 
             string? video = null, audio = null;
             foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))

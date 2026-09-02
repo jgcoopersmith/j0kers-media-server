@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Runtime.InteropServices;
 using J0kersMediaServer.Logging;
 
@@ -165,5 +165,74 @@ public static class ProcessJob
         {
             Log.Debug("ffmpeg", $"could not adopt a child process: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// What a short-lived child process left behind: both pipes, its exit
+    /// code, and whether it had to be killed for outstaying its welcome.
+    /// </summary>
+    public readonly record struct Result(bool TimedOut, int ExitCode, string StdOut, string StdErr)
+    {
+        public bool Ok => !TimedOut && ExitCode == 0;
+    }
+
+    /// <summary>
+    /// Runs a child to completion and hands back everything it printed.
+    ///
+    /// This exists because of a deadlock that stopped batch conversion dead.
+    /// The pattern it replaces was, at six call sites:
+    ///
+    ///     var output = p.StandardOutput.ReadToEnd();
+    ///     p.WaitForExit(20_000);
+    ///
+    /// A redirected pipe is a kernel buffer of a few kilobytes. Nothing was
+    /// reading stderr, so a child with more than that to say filled it, blocked
+    /// forever in its own write, and never exited or closed stdout — and
+    /// ReadToEnd, which has no timeout, waited for a close that could not come.
+    /// The WaitForExit on the next line was unreachable, so the timeout that
+    /// looked like the safety net had never once fired.
+    ///
+    /// Measured on this install: ffprobe emits 39 KB of decode warnings on one
+    /// damaged mp4 in the library despite "-v error". Three ffprobe processes
+    /// were found wedged against that single file, the oldest more than two
+    /// hours old, each holding the thread that started it.
+    ///
+    /// So: read both pipes at once and before waiting, and let the timeout be
+    /// real. Kill the whole tree when it expires, because a child that has
+    /// stopped answering is not going to be talked round.
+    /// </summary>
+    public static Result? Run(ProcessStartInfo psi, int timeoutMs)
+    {
+        psi.UseShellExecute = false;
+        psi.CreateNoWindow = true;
+        psi.RedirectStandardOutput = true;
+        psi.RedirectStandardError = true;
+        // Handed an empty stdin rather than the server's own. A child that
+        // reads input - ffmpeg does, for its keyboard commands - would
+        // otherwise inherit a handle nobody ever writes to and wait on it.
+        psi.RedirectStandardInput = true;
+
+        using var p = Start(psi);
+        if (p is null) return null;
+        try { p.StandardInput.Close(); } catch { }
+
+        // Started before the wait, so neither pipe can back up behind it.
+        var outText = p.StandardOutput.ReadToEndAsync();
+        var errText = p.StandardError.ReadToEndAsync();
+
+        var timedOut = !p.WaitForExit(timeoutMs);
+        if (timedOut) { try { p.Kill(entireProcessTree: true); } catch { } }
+
+        // WaitForExit(int) is documented not to wait for the redirected streams
+        // to finish, unlike the parameterless overload. Without this the reads
+        // are still in flight when the Process is disposed and the text is
+        // lost - which would swap one silent wrong answer for another.
+        try { Task.WaitAll(new Task[] { outText, errText }, 5_000); } catch { }
+
+        var code = -1;
+        if (!timedOut) { try { code = p.ExitCode; } catch { } }
+        return new Result(timedOut, code, Done(outText), Done(errText));
+
+        static string Done(Task<string> t) => t.IsCompletedSuccessfully ? t.Result : "";
     }
 }

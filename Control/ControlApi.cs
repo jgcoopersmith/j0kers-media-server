@@ -4953,6 +4953,7 @@ public sealed partial class ControlApi : IDisposable
             var ffmpeg = _ffmpeg;
             _ = Task.Run(() =>
             {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
                 var group = new List<string>();
                 var added = 0;
                 try
@@ -4972,8 +4973,13 @@ public sealed partial class ControlApi : IDisposable
                     }
                 }
                 catch (Exception ex) { Log.Warn("control", $"transcode: queueing the rest failed: {ex.Message}"); }
-                if (added > 0)
-                    Log.Info("control", $"transcode: {added} more file(s) queued after the first {queued}");
+                // Always said, including "0 more". The silent version was
+                // indistinguishable from this task never finishing - which is
+                // exactly what happened when a probe deadlocked on one damaged
+                // file and 705 selected files were left unqueued with nothing
+                // in the log to show for it. A finished walk now says so.
+                Log.Info("control", $"transcode: {added} more file(s) queued after the first {queued} "
+                    + $"({tail.Count} read, {sw.Elapsed.TotalSeconds:F0}s)");
             });
         }
 
