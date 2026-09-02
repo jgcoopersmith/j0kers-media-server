@@ -33,18 +33,51 @@ public static class AccessLog
     public static bool Enabled { get; set; } = true;
 
     /// <summary>
-    /// Paths that are the dashboard talking to itself rather than a person
-    /// asking for something. Exact matches only - /api/logs/file is somebody
-    /// opening a rotated log and is kept.
+    /// GET paths that are the dashboard's own polling rather than a person
+    /// asking for something.
+    ///
+    /// The method is half of the rule, and leaving it out would have been a
+    /// silent disaster. Five of these paths carry actions on the identical
+    /// path - POST /api/channels adds a channel, DELETE /api/mounts removes a
+    /// mount, DELETE /api/history forgets what was watched - and those are
+    /// precisely the events this log exists to record. Matching on the path
+    /// alone would have stopped recording nine real actions in exchange for
+    /// quietening six timers.
+    ///
+    /// Exact paths only: /api/log/file is somebody opening a rotated log by
+    /// hand and is kept, as is /api/sessions/{id} for terminating a session.
     /// </summary>
-    private static readonly HashSet<string> Heartbeat = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly HashSet<string> HeartbeatGets = new(StringComparer.OrdinalIgnoreCase)
     {
         "/api/status",
         "/api/log",
         // the live link an open dashboard holds: one line per page-open, and
         // it would be written when the page closes rather than when it opened
         "/api/server/session",
+        // The rest of what an open page asks for on a timer, whether or not
+        // anybody is touching it: sessions every 2s, history every 4s,
+        // channels every 10s, and mounts, playlists and favourites every 15s.
+        // That is 63 requests a minute per open window, and measured on this
+        // install it was 88% of the log - 6,738 lines against 930 that
+        // recorded something happening. The six were always the same kind of
+        // traffic as /api/status above; they were simply never added.
+        "/api/sessions",
+        "/api/history",
+        "/api/channels",
+        "/api/mounts",
+        "/api/playlists",
+        "/api/favorites",
     };
+
+    /// <summary>
+    /// Whether this request is the dashboard's own heartbeat rather than
+    /// something a person did. Separate from Served so the rule can be tested
+    /// without standing up an HttpListener - and it is worth testing, because
+    /// the method half of it is easy to drop and the damage would be silent.
+    /// </summary>
+    internal static bool IsHeartbeat(string method, string path) =>
+        string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase)
+        && HeartbeatGets.Contains(path);
 
     /// <summary>
     /// Records one served request. Call it once, from a finally, so a request
@@ -59,7 +92,7 @@ public static class AccessLog
         try
         {
             var path = ctx.Request.Url?.AbsolutePath ?? "/";
-            if (Heartbeat.Contains(path)) return;
+            if (IsHeartbeat(ctx.Request.HttpMethod, path)) return;
 
             var client = ctx.Request.RemoteEndPoint?.Address?.ToString() ?? "-";
             var who = string.IsNullOrWhiteSpace(user) ? "-" : user;
