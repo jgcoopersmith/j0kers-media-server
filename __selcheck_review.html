@@ -1,0 +1,48 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>selection vs button click</title>
+<style>
+  body { font: 14px system-ui; padding: 20px; }
+  h2 { display:flex; align-items:center; gap:8px; }
+  #log { user-select: text; -webkit-user-select: text; height:120px; overflow-y:auto;
+         border:1px solid #999; padding:8px; font-family: monospace; font-size: 13px; }
+  #out { margin-top: 14px; white-space: pre-wrap; font-family: monospace; color: #063; }
+</style>
+<div class="card">
+  <h2><span style="flex:1">Log</span>
+    <button id="b" onclick="report()">Copy</button>
+  </h2>
+  <div id="log">
+    <div>10:00:00.001 [http] line one aaaaaaaa</div>
+    <div>10:00:00.002 [http] line two bbbbbbbb</div>
+    <div>10:00:00.003 [http] line three cccccc</div>
+  </div>
+</div>
+<div id="out">(no click yet)</div>
+<script>
+  window.seenSelectionChange = [];
+  document.addEventListener("selectionchange", () => {
+    const s = getSelection();
+    window.seenSelectionChange.push({ collapsed: s.isCollapsed, text: s.toString().slice(0, 40) });
+  });
+  window.atMouseDown = null;
+  document.getElementById("b").addEventListener("mousedown", () => {
+    const s = getSelection();
+    window.atMouseDown = { collapsed: s.isCollapsed, text: s.toString().slice(0, 40) };
+  });
+  function report() {
+    const s = getSelection();
+    const box = document.getElementById("log");
+    let inBox = null;
+    if (!s.isCollapsed && s.rangeCount) {
+      for (let i = 0; i < s.rangeCount; i++) {
+        const r = s.getRangeAt(i);
+        if (!r.collapsed && box.contains(r.commonAncestorContainer)) { inBox = s.toString(); break; }
+      }
+    }
+    window.atClick = { collapsed: s.isCollapsed, text: s.toString().slice(0, 60), inBox };
+    document.getElementById("out").textContent =
+      "at mousedown: " + JSON.stringify(window.atMouseDown) + "\n" +
+      "at click:     " + JSON.stringify(window.atClick);
+  }
+</script>

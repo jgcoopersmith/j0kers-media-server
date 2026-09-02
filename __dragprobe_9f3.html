@@ -1,0 +1,23 @@
+<!doctype html><meta charset=utf-8><title>drag probe</title>
+<style>#log{height:220px;overflow-y:auto;border:1px solid #888;user-select:text;font:12px/1.5 monospace;padding:8px}</style>
+<h2>Log <button id="copy">Copy</button></h2>
+<div id="log"></div>
+<script>
+let lines=[],held=false,follow=true,ev=[];
+for(let i=1;i<=60;i++)lines.push("2026-09-01 12:00:"+String(i).padStart(2,"0")+" [area] message number "+i);
+function selInBox(){const s=getSelection();if(!s||s.isCollapsed||!s.rangeCount)return null;
+ const b=document.getElementById('log');for(let i=0;i<s.rangeCount;i++){const r=s.getRangeAt(i);
+ if(!r.collapsed&&b.contains(r.commonAncestorContainer))return s.toString();}return null;}
+function render(force){const b=document.getElementById('log');
+ if(!force&&selInBox()!==null){held=true;ev.push('HELD');return;}
+ if(held){held=false;}
+ ev.push('RENDER n='+lines.length);
+ b.innerHTML=lines.map(t=>'<div>'+t+'</div>').join('');
+ if(follow)b.scrollTop=b.scrollHeight;}
+document.addEventListener('selectionchange',()=>{ev.push('selchange sel='+JSON.stringify(selInBox()));
+ if(!held||selInBox()!==null)return;held=false;ev.push('RELEASE->render');render();});
+document.getElementById('log').addEventListener('mousedown',()=>ev.push('mousedown sel='+JSON.stringify(selInBox())));
+document.getElementById('log').addEventListener('mouseup',()=>ev.push('mouseup sel='+JSON.stringify(selInBox())));
+window.probe={render,get ev(){return ev},reset(){ev=[]},get held(){return held},push(n){for(let i=0;i<n;i++)lines.push("NEW LINE "+(lines.length+1));},set follow(v){follow=v},sel(){return String(getSelection())}};
+render(true);
+</script>

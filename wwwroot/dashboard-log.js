@@ -26,6 +26,11 @@ function logScrollTo(box, top) {
 }
 let logLevelSynced = false;
 let logViewFile = "";              // "" = live ring; otherwise a rotated file on disk
+let logFileText = "";              // that file, kept so Copy has something to hand over
+/* Set while a re-render is being held back because the reader has selected
+   something in the log box. See logSelectionInBox. */
+let logRenderHeld = false;
+let logCopyFlash = 0;              // timer restoring the Copy button label
 
 async function refreshLog() {
   // the dropdown on the log card IS the server's real logging level, not
@@ -58,7 +63,7 @@ async function refreshLog() {
 // writes to) — not only what this dropdown hides from the lines already on
 // screen.
 async function onLogFilterChange() {
-  renderLog();
+  renderLog(true);
   try {
     const r = await fetch("/api/settings", {
       method: "POST",
@@ -93,6 +98,7 @@ async function onLogFileChange() {
   logViewFile = $("log-file").value;
   const box = $("log");
   if (!logViewFile) {            // back to the live ring
+    logFileText = "";
     logLines = []; logSeq = 0; logMissed = false; logFollow = true; paintLogFollow();
     box.innerHTML = '<div style="color:var(--muted)">resuming live…</div>';
     refreshLog();
@@ -101,6 +107,7 @@ async function onLogFileChange() {
   box.innerHTML = '<div style="color:var(--muted)">loading ' + esc(logViewFile) + "…</div>";
   try {
     const d = await api("/api/log/file?name=" + encodeURIComponent(logViewFile));
+    logFileText = d.text || "";                // what Copy hands over in this view
     const note = d.truncated
       ? '<div style="color:var(--muted)">… showing the last ' + d.shown + " lines of " + esc(d.name) + "</div>\n"
       : "";
@@ -108,12 +115,148 @@ async function onLogFileChange() {
       + '<div style="white-space:pre-wrap;word-break:break-word;color:var(--ink-2)">' + esc(d.text) + "</div>";
     logScrollTo(box, box.scrollHeight);   // ours, not the reader's — see the listener
   } catch {
+    logFileText = "";
     box.innerHTML = '<div style="color:var(--critical)">could not load ' + esc(logViewFile) + "</div>";
   }
 }
 
-function renderLog() {
+/* ---- copying out of the log ----
+
+   This window was readable and not quotable. Its text could be selected like
+   any other text, and then the next poll - two seconds away at most - rebuilt
+   the box's innerHTML, destroyed every node the selection was anchored in, and
+   took the highlight with them. Dragging across a stack trace and reaching for
+   Ctrl+C lost that race nearly every time, which does not make a fiddly
+   window: it makes a window you cannot copy out of.
+
+   Two halves. Hold the render still while something is selected, so a
+   selection lasts long enough to be used. And put a Copy button beside it,
+   because dragging across five hundred lines inside a 220px box is not a
+   reasonable thing to ask of somebody who just wants the log. */
+
+/* The selected text when the selection is inside the log box, otherwise null.
+   Both halves of that matter: a selection somewhere else on the page must not
+   freeze the log, and a collapsed one - which is all a plain click leaves
+   behind - is not a selection at all and would freeze it for ever. */
+function logSelectionInBox() {
+  const sel = typeof window.getSelection === "function" ? window.getSelection() : null;
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
   const box = $("log");
+  if (!box) return null;
+  for (let i = 0; i < sel.rangeCount; i++) {
+    const r = sel.getRangeAt(i);
+    if (!r.collapsed && box.contains(r.commonAncestorContainer)) return sel.toString();
+  }
+  return null;
+}
+
+function paintLogHeld() {
+  const badge = $("log-held");
+  if (badge) badge.hidden = !logRenderHeld;
+}
+
+/* Released the moment the selection goes - any click collapses it - and the
+   view catches up with whatever landed while it was held.
+
+   Without this the hold outlives its reason. The poll only calls renderLog
+   when new lines actually arrive, so on a quiet server the box would go on
+   showing the moment the selection was made until some unrelated line
+   happened along. */
+document.addEventListener("selectionchange", () => {
+  if (!logRenderHeld || logSelectionInBox() !== null) return;
+  logRenderHeld = false;
+  paintLogHeld();
+  renderLog();
+});
+
+/* What the panel is showing: the level floor from the select, then the search
+   box on top of it. One function, used by the render and by Copy, so the two
+   cannot drift - copying something other than what is on screen would be
+   worse than not copying at all. */
+function logShownEntries() {
+  const floor = LOG_LEVELS[$("log-filter").value] ?? 2;
+  const q = ($("log-search")?.value || "").trim().toLowerCase();
+  return logLines.filter(e =>
+    (LOG_LEVELS[e.level] ?? 2) >= floor
+    && (!q || (e.area + " " + e.message).toLowerCase().includes(q)));
+}
+
+/* Those lines as text, in the shape the log file uses: time, level, area,
+   message. The level is put back in because here it is a colour and in the
+   file it is a word - a line pasted into a bug report has to say ERROR rather
+   than have been red somewhere else. A rotated file is already text, so hand
+   back what was loaded. */
+function logShownText() {
+  if (logViewFile) return logFileText;
+  return logShownEntries()
+    .map(e => e.at + " [" + String(e.level || "").padEnd(5) + "] [" + e.area + "] " + e.message)
+    .join("\n");
+}
+
+/* Copy: the highlighted part if there is one, otherwise everything shown.
+   Deliberately "everything shown" and not "everything held" - the search box
+   and the level select are how somebody narrows this down to the lines they
+   came for, and handing back all five hundred would undo that. */
+async function logCopy(btn) {
+  const picked = logSelectionInBox();
+  const text = picked && picked.trim() ? picked : logShownText();
+  if (!text.trim()) { flashLogCopy(btn, "Nothing to copy"); return; }
+  if (await copyToClipboard(text)) {
+    const lines = text.split("\n").length;
+    flashLogCopy(btn, picked ? "Copied selection"
+                             : "Copied " + lines + " line" + (lines === 1 ? "" : "s"));
+    return;
+  }
+  /* The clipboard refused. Put the lines under the cursor so Ctrl+C still
+     works, rather than the prompt() the URL buttons fall back to: a modal
+     holding five hundred lines is not a fallback anybody can use. */
+  selectLogBox();
+  flashLogCopy(btn, "Press Ctrl+C");
+}
+
+function selectLogBox() {
+  const box = $("log");
+  const sel = typeof window.getSelection === "function" ? window.getSelection() : null;
+  if (!box || !sel) return;
+  const r = document.createRange();
+  r.selectNodeContents(box);
+  sel.removeAllRanges();
+  sel.addRange(r);
+}
+
+/* Says what happened on the button itself. The old label is restored rather
+   than guessed at, and the pending timer is cleared first so a second press
+   cannot have the first press's timer wipe its message. */
+function flashLogCopy(btn, said) {
+  if (!btn) return;
+  const was = btn.dataset.label || btn.textContent;
+  btn.dataset.label = was;
+  btn.classList.add("copied");
+  btn.textContent = said;
+  clearTimeout(logCopyFlash);
+  logCopyFlash = setTimeout(() => {
+    btn.classList.remove("copied");
+    btn.textContent = btn.dataset.label || was;
+  }, 1600);
+}
+
+/* force: this render was asked for by the reader - a different level, a new
+   search - so it has to happen even mid-selection. Swallowing it would leave
+   the filter controls looking broken, which is the same fault this whole
+   change is here to remove. */
+function renderLog(force) {
+  const box = $("log");
+
+  /* Holding still while something is selected. Rebuilding innerHTML underneath
+     a selection is exactly what made this window impossible to quote from, and
+     nothing here is worth doing while somebody is halfway through copying a
+     line out of it. Nothing is lost either: the lines keep accumulating in
+     logLines regardless, and the view catches up when the selection goes. */
+  if (!force && logSelectionInBox() !== null) {
+    if (!logRenderHeld) { logRenderHeld = true; paintLogHeld(); }
+    return;
+  }
+  if (logRenderHeld) { logRenderHeld = false; paintLogHeld(); }
   const floor = LOG_LEVELS[$("log-filter").value] ?? 2;
 
   /* Filtering what is shown, which is not what the level select does.
@@ -125,9 +268,7 @@ function renderLog() {
      too, and the only way to quieten the access log is to stop auditing
      requests. */
   const q = ($("log-search")?.value || "").trim().toLowerCase();
-  const shown = logLines.filter(e =>
-    (LOG_LEVELS[e.level] ?? 2) >= floor
-    && (!q || (e.area + " " + e.message).toLowerCase().includes(q)));
+  const shown = logShownEntries();
 
   let h = logMissed
     ? '<div style="color:var(--muted)">… earlier lines have scrolled out of memory — the log file has them</div>'
@@ -188,7 +329,7 @@ function logShowTranscodes() {
   const box = $("log-search");
   if (!box) return;
   box.value = box.value.trim().toLowerCase() === "vod" ? "" : "vod";
-  renderLog();
+  renderLog(true);
 }
 
 /* Following is off the moment you scroll up — reading anything is

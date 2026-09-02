@@ -692,6 +692,18 @@
      row is worth dragging out of the page. The condensed tiles are exempt,
      because there the tile *is* the drag handle. */
   #hls { user-select: text; -webkit-user-select: text; }
+  /* The log is there to be read and quoted from - a line pasted into a bug
+     report is most of what it is for. Said explicitly rather than left to the
+     default: this box sits among rows that deliberately turn selection off,
+     and one stray inherited rule would take it away without a sound. */
+  #log { user-select: text; -webkit-user-select: text; }
+  /* The log header carries seven controls now. It already overflowed its own
+     card on a narrow window - measured at 375px, three of the six that were
+     there fitted and the rest sat off the edge with no scrollbar to say so -
+     and a Copy button nobody can reach is not a Copy button. Wrapping costs a
+     second row on a phone and nothing at all on a desktop, where the row
+     still fits on one line exactly as it did. */
+  #logcard h2 { flex-wrap: wrap; row-gap: 6px; }
   #hls:not(.tv-grid) a, #hls:not(.tv-grid) img {
     -webkit-user-drag: none; user-drag: none;
   }
@@ -829,7 +841,7 @@
            different question and the one you have when the access log is
            burying everything else. -->
       <input id="log-search" class="am-in" style="width:auto;max-width:150px" placeholder="filter, e.g. ffmpeg"
-             oninput="renderLog()"
+             oninput="renderLog(true)"
              title="Show only lines containing this. Filters what is displayed, not what the server records.">
       <button id="log-transcodes" onclick="logShowTranscodes()"
               title="Show only conversion starts and finishes">🎬 Transcodes</button>
@@ -840,6 +852,13 @@
         <option value="WARN">Warnings and errors</option>
         <option value="ERROR">Errors only</option>
       </select>
+      <!-- Why the log has stopped moving. It holds still while text is
+           selected so the selection survives long enough to be copied, and a
+           view that stops for no visible reason reads as a broken one. -->
+      <span id="log-held" hidden style="color:var(--muted);font-size:11.5px;white-space:nowrap"
+            title="Held while you have text selected, so your selection is not destroyed by the next line arriving. Lines are still being collected; click anywhere in the log to catch up.">⏸ selected</span>
+      <button id="log-copy" onclick="logCopy(this)"
+              title="Copy every line shown here — or just the highlighted part, if you have selected some">⧉ Copy</button>
       <button id="log-follow" onclick="toggleLogFollow()" title="Keep the newest line in view">⏬ Scrolling</button></h2>
     <div id="log" style="height:220px;overflow-y:auto;border:1px solid var(--grid);border-radius:10px;
                          background:var(--surface-2);padding:8px 10px;font-family:ui-monospace,Consolas,monospace;
