@@ -1298,9 +1298,11 @@ public sealed partial class ControlApi : IDisposable
             case "/api/history/position":
                 return AccessLevel.Read;
 
-            // picking a path off this machine, and the codec list that the
-            // add-content forms show
-            case "/api/browse":
+            // The codec list the add-content forms show. /api/browse used to
+            // sit here too, which locked the Media Library card to editors:
+            // one endpoint served both "pick any path on this machine" and
+            // "walk the shared library", so it was gated at the level the
+            // first needs. It is Read now and confines itself - see Browse.
             case "/api/codecs":
             // reading a tuner's lineup and saving channels from it is the
             // same act as adding one by hand
@@ -1790,10 +1792,10 @@ public sealed partial class ControlApi : IDisposable
         [("GET", "/api/sessions")] = Sync((api, ctx, _) => api.WriteSessions(ctx)),
         [("GET", "/api/media/token")] = Sync((api, ctx, _) => api.MintMediaToken(ctx)),
         [("GET", "/api/preview")] = Sync((api, ctx, _) => api.StreamPreview(ctx)),
-        [("GET", "/api/browse")] = Sync((api, ctx, _) => api.Browse(ctx)),
+        [("GET", "/api/browse")] = Sync((api, ctx, auth) => api.Browse(ctx, auth)),
 
         // batch transcoding
-        [("GET", "/api/transcode/scan")] = Sync((api, ctx, _) => api.TranscodeScan(ctx)),
+        [("GET", "/api/transcode/scan")] = Sync((api, ctx, auth) => api.TranscodeScan(ctx, auth)),
         [("POST", "/api/transcode")] = Sync((api, ctx, _) => api.TranscodeBatch(ctx)),
         [("GET", "/api/transcode/config")] = Sync((api, ctx, _) => api.TranscodeConfig(ctx, write: false)),
         [("POST", "/api/transcode/config")] = Sync((api, ctx, _) => api.TranscodeConfig(ctx, write: true)),
@@ -4378,19 +4380,36 @@ public sealed partial class ControlApi : IDisposable
     }
 
     /// <summary>
-    /// Filesystem browser backing the dashboard's pickPath() library:
-    /// GET /api/browse            → drive list
-    /// GET /api/browse?path=C:\x  → folders and files of that directory
-    /// Loopback/token-gated like the rest of the API; this is the operator's
-    /// own machine, so no path restriction beyond what the OS enforces.
+    /// Filesystem browser, behind two different doors depending on who is asking:
+    /// GET /api/browse            -> drive list          (Edit and above only)
+    /// GET /api/browse?path=C:\x  -> folders and files    (Read, confined to the library)
+    ///
+    /// An editor is picking a path off this machine to add as a library folder,
+    /// so they see the drives and everything on them. A read-only account is
+    /// not picking anything - it is walking the Media Library card - and gets
+    /// the same confinement /api/play and /api/image already apply: the shared
+    /// library folders, pinned favourites and saved playlists, and nothing else.
+    ///
+    /// Those two uses shared one endpoint gated at the dangerous one's level,
+    /// which is why a passwordless guest account could see the library folder
+    /// chip and be refused the moment it clicked on it - "cannot open: this
+    /// account is read-only" - while still being allowed to play a file inside
+    /// that folder if it could somehow find one.
     /// </summary>
-    private void Browse(HttpListenerContext ctx)
+    private void Browse(HttpListenerContext ctx, AuthResult auth)
     {
         var res = ctx.Response;
         var path = ctx.Request.QueryString["path"];
 
         if (string.IsNullOrWhiteSpace(path))
         {
+            // The drive list names every volume on the machine and is nobody's
+            // library. It stays where it was.
+            if (auth.Level < AccessLevel.Edit)
+            {
+                WriteJson(res, 403, new { error = "this account can only open the shared library" });
+                return;
+            }
             var drives = DriveInfo.GetDrives().Select(d =>
             {
                 string label = "", free = "";
@@ -4416,6 +4435,9 @@ public sealed partial class ControlApi : IDisposable
                 BadRequest(res, "network paths are not allowed");
                 return;
             }
+            // The same rule /api/play and /api/image use. Returns false for
+            // Edit and above, so an operator still sees the whole machine.
+            if (DenyUnshared(ctx, auth, full)) return;
             if (!Directory.Exists(full))
             {
                 WriteJson(res, 404, new { error = "directory not found", path = full });
@@ -4502,14 +4524,16 @@ public sealed partial class ControlApi : IDisposable
     /// has never been made. No path lists the drives, same as the picker.
     /// A <c>q</c> query does a recursive name search under the folder instead.
     /// </summary>
-    private void TranscodeScan(HttpListenerContext ctx)
+    private void TranscodeScan(HttpListenerContext ctx, AuthResult auth)
     {
         var res = ctx.Response;
         var path = ctx.Request.QueryString["path"];
 
         if (string.IsNullOrWhiteSpace(path))
         {
-            Browse(ctx);   // drive list is identical to the picker's
+            // The drive list, identical to the picker's. This endpoint is
+            // ServerAdmin, so the Edit gate inside Browse always passes.
+            Browse(ctx, auth);
             return;
         }
 
