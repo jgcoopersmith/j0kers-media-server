@@ -104,3 +104,159 @@ converted media.
 from 30 Aug. Nothing launches it — the desktop shortcut and the running server
 both use the install under `%LOCALAPPDATA%` — so it is leftover scratch, not a
 second server waiting to be started by accident.
+
+---
+
+## 2026-09-01 — The log window could not be copied out of (v2.0.235 → v2.0.237)
+
+**Reported:** the Log card's text could not be copied.
+
+### Cause
+
+`renderLog` rebuilt `#log`'s `innerHTML` on every 2-second poll. That destroys
+every node a selection is anchored in, so a highlight survived at most two
+seconds. The text was selectable; it just never lasted long enough to use.
+
+### Changes
+
+- `wwwroot/dashboard-log.js` — the render holds while a selection is inside the
+  box and releases on `selectionchange`; a Copy button that takes the selection
+  or every shown line, with the level word put back; the filter shared between
+  the render and Copy so they cannot drift.
+- `wwwroot/dashboard.html` — Copy button, a "⏸ selected" badge, `user-select:
+  text` on `#log`, and `flex-wrap` on the card header, which already overflowed
+  at 375px (three of six controls fitted) and would have put the new button off
+  the edge.
+
+### Verification
+
+A throwaway page loading the **real** `dashboard-log.js` with the four helpers
+it borrows stubbed, served over `python -m http.server`:
+
+| Check | Result |
+|---|---|
+| selection across two polls | survived; `logRenderHeld` and the badge both set |
+| releasing the selection | view caught up with no further poll |
+| level change mid-selection | rendered (not swallowed) |
+| Copy on `127.0.0.1` (secure) | `navigator.clipboard`, "Copied 6 lines" |
+| Copy on `192.168.8.196` (insecure) | `execCommand(copy)=true`, "Copied 3 lines" |
+| header at 375px | overflow 363px → 0 with wrap; desktop row unchanged |
+
+The insecure-origin test is the one that mattered: this dashboard is reached at
+`http://<lan-ip>:9090`, where `navigator.clipboard` does not exist.
+
+### Live-system actions
+
+- Two local HTTP servers, ports 8791 (loopback) and 8792 (**bound 0.0.0.0**,
+  briefly reachable on the LAN, serving only copies of two dashboard scripts).
+  Both stopped.
+- **The system clipboard was overwritten twice** by real button clicks. Not
+  recoverable; j0ker was notified by the tool at the time.
+- Nothing on the server or under `G:\Archive` was read or written.
+
+### Residue, and what leaked
+
+The harness directory and both servers were removed. Two things did not go
+cleanly:
+
+- Three probe pages (`__dragprobe_9f3.html`, `__selcheck_review.html`,
+  `__seltest_tmp.html`) were written into the **repository root** by review
+  agents and swept into the commit by `git add -A`. Removed in `2ffe49e`.
+- Eight browser tabs were left open on deleted files and only closed later,
+  when the tab cap blocked other work.
+
+Both are the same failure: `git add -A` and a shared working directory assume
+nothing else is writing there.
+
+---
+
+## 2026-09-01 — 88% of the log was the dashboard polling itself (v2.0.238)
+
+**Reported:** repeating `[access] … GET /api/sessions` lines, asked what they
+were and then to stop showing them.
+
+### Measurement
+
+An open dashboard polls on timers: sessions every 2s, history 4s, channels 10s,
+mounts/playlists/favourites 15s — 63 requests a minute per open window. With
+three windows open, 165 access lines a minute. Over one hour: **6,738 access
+lines against 930** that recorded something happening.
+
+`/api/status` and `/api/log` were already skipped for exactly this reason. The
+six were the same traffic and had never been added.
+
+### The near-miss
+
+The obvious change — add the six paths to the skip list — would have been
+wrong, and silently. Five of them carry actions on the **identical path**:
+
+    POST/DELETE /api/channels    POST/DELETE /api/mounts
+    POST/DELETE /api/playlists   POST/DELETE /api/favorites
+    DELETE /api/history
+
+Nine real actions, the exact events this log exists to record, would have
+stopped being written with nothing to indicate it. I had already told j0ker
+those actions were on different paths, which was false and unverified.
+
+The rule matches **method and path**. Extracted to `AccessLog.IsHeartbeat` so it
+can be tested without an HttpListener; 25 tests pin both halves.
+
+### Verification (live)
+
+| | access lines/min |
+|---|---|
+| before, 3 windows | 165 |
+| after, 1 window polling | **0** |
+
+And the record still works, from the same log: `GET /api/log/files` and
+`POST /api/server/closing` both still written.
+
+---
+
+## 2026-09-02 — A read-only account could not open the Media Library (v2.0.239)
+
+**Reported, with a screenshot:** a passwordless guest saw the library folder
+chip and got "cannot open: this account is read-only" on clicking it.
+
+### Cause
+
+`/api/browse` served two jobs through one door: *pick any path on this machine*
+(an editor adding a library folder) and *walk the folders already shared* (the
+Media Library card). It was gated at `Edit`, the level the first job needs.
+
+The inconsistency was stark — `/api/play`, `/api/image` and the thumbnail route
+were all `Read`, confined by `IsShared`. A guest was allowed to **play** a file
+inside the library and not allowed to **find** one.
+
+### Change
+
+`Control/ControlApi.cs` — two doors. The drive list (no `path`) still requires
+`Edit`; a path is `Read` and goes through `DenyUnshared`, the same rule play and
+image already apply. `DenyUnshared` returns false for `Edit` and above, so an
+operator is unaffected. `TranscodeScan` reuses `Browse` for its drive list and
+now passes its caller through.
+
+### Verification
+
+159 tests pass. Confirmed working by j0ker in the running dashboard before I
+could sign in as `guest` myself.
+
+### Live-system actions
+
+`users.json` was read to confirm a passwordless read-only account existed —
+usernames, roles and the passwordless flag only, no hashes. Nothing written.
+
+---
+
+## Across all of the above
+
+- The post-commit hook restarted the server **six times** tonight. Each restart
+  honours `control.openDashboardOnStart`, so each opened another dashboard
+  window; the count reached three before j0ker closed two. The hook is
+  replacing a server that was already running and should not be opening a
+  window at all. **Not fixed.**
+- `[control] page opened from …` is written every 20.5s per open page — the
+  liveness link doing its job, but at INFO and worded as though a new window
+  appeared. **Not changed.**
+- `/api/transcode/scan` is polled every ~6s by the Transcode panel and is still
+  written to the access log. Same class as the six above. **Not changed.**
