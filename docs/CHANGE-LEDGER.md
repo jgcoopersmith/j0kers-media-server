@@ -248,13 +248,54 @@ usernames, roles and the passwordless flag only, no hashes. Nothing written.
 
 ---
 
+
+## 2026-09-02 — Two log lines nobody could act on (v2.0.241, v2.0.242)
+
+### The URL-credential warning was the server scolding itself (v2.0.241)
+
+**Reported:** asked what use this line is —
+`credentials are arriving in URLs (?key=/?token=), 6365 so far`.
+
+The warning throttles to one line per ten minutes, and the count climbed by
+exactly **59 between consecutive lines** — 5.9 requests a minute, which is the
+dashboard's liveness link reopening every 20.5s on each of two open pages.
+
+`EventSource` cannot set an `Authorization` header; `openLiveLink` says so in
+its own comment and puts the token in the query string because the browser
+offers nothing else. So the server advised a change the caller cannot make,
+about a request its own page makes, forever — **537 lines** across these logs.
+That also buried the case the warning exists for: a third-party script really
+putting a key in a URL would have been one line among hundreds.
+
+`AuthService.CanSendAHeader` now exempts `/api/server/session` alone. The
+credential is read and honoured on every path exactly as before; only the
+logging changed. Eleven tests, including that lookalike paths do not inherit
+the exemption — otherwise a caller could silence the warning by inventing one.
+170 tests pass.
+
+### The Holding Open / Stays Up pill (v2.0.242)
+
+Removed on request: added in an earlier session without being asked for. The
+markup and the block in `tick()` that painted it are gone. Nothing else read
+`status.pagesOpen`, `stopsOnClose` or `pagesFrom`, so the API is unchanged —
+other clients may want those fields.
+
+### Live-system actions
+
+Read-only: the log files, and `wwwroot` sources. Two server restarts from the
+publish hook. Nothing under `G:\Archive` and no config touched.
+
+---
+
 ## Across all of the above
 
-- The post-commit hook restarted the server **six times** tonight. Each restart
-  honours `control.openDashboardOnStart`, so each opened another dashboard
-  window; the count reached three before j0ker closed two. The hook is
-  replacing a server that was already running and should not be opening a
-  window at all. **Not fixed.**
+- Every commit republishes and restarts the server, and each start honours
+  `control.openDashboardOnStart` - so each one opens another dashboard window.
+  Across these sessions the log records **23** of them; the count of open
+  windows reached three before j0ker closed two, and each open window costs a
+  full duplicate of the dashboard's polling. The hook is replacing a server
+  that was already running and should not be opening a window at all.
+  **Not fixed.**
 - `[control] page opened from …` is written every 20.5s per open page — the
   liveness link doing its job, but at INFO and worded as though a new window
   appeared. **Not changed.**
