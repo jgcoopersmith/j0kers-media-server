@@ -268,17 +268,42 @@ public sealed class AuthService
         if (!string.IsNullOrWhiteSpace(header)) return header.Trim();
 
         // The query-string fallback exists for clients that cannot set a
-        // header. The dashboard no longer needs it — media has its own
-        // signed links and everything else is same-origin, so the cookie
-        // travels by itself — but scripts and players may still rely on it.
-        // A URL is a leaky place for a credential (history, logs, Referer),
-        // so it is warned about once per key and never accepted for
-        // anything but a key.
+        // header. The dashboard no longer needs it for ordinary requests —
+        // media has its own signed links and everything else is same-origin,
+        // so the cookie travels by itself — but scripts, players and the one
+        // browser API that has no choice still rely on it. A URL is a leaky
+        // place for a credential (history, logs, Referer), so it is warned
+        // about, but only where the warning names something the caller could
+        // actually have done differently: see CanSendAHeader.
         var query = ctx.Request.QueryString["key"] ?? ctx.Request.QueryString["token"];
         if (string.IsNullOrWhiteSpace(query)) return null;
-        NoteKeyInUrl();
+        if (CanSendAHeader(ctx.Request.Url?.AbsolutePath ?? "/")) NoteKeyInUrl();
         return query.Trim();
     }
+
+    /// <summary>
+    /// Endpoints whose clients have no way to send an Authorization header,
+    /// so a credential in the URL is the only option open to them.
+    ///
+    /// EventSource is the entire list. The browser API cannot set a header on
+    /// the request it opens — openLiveLink says so in its own comment — and
+    /// the dashboard reopens that link every twenty seconds per open page. So
+    /// the warning below fired at about six requests a minute, for ever,
+    /// advising a change the caller cannot make: 537 lines of it in this
+    /// install's logs, every one of them the server's own page. A third-party
+    /// script genuinely putting a key in a URL would have been invisible in
+    /// among them, which is the only case the warning exists to catch.
+    ///
+    /// Exact paths, and this list is about the warning alone — the credential
+    /// itself is read and honoured exactly as before, here and everywhere.
+    /// </summary>
+    private static readonly HashSet<string> HeaderlessClients = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "/api/server/session",
+    };
+
+    /// <summary>Whether a caller on this path had the option of a header.</summary>
+    internal static bool CanSendAHeader(string path) => !HeaderlessClients.Contains(path);
 
     private long _rejectedKeyCount;
     private long _rejectedKeyWarnedTicks;
