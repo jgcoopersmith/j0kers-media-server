@@ -3965,6 +3965,18 @@ public sealed partial class ControlApi : IDisposable
                 // H.264/AAC instead, at the same picture size.
                 var transcode = dlna.FindTranscode?.Invoke(file);
 
+                // What was asked for and what it is being served from. The
+                // access log deliberately drops query strings - they carry
+                // signed media links - so it cannot say which title a set is
+                // playing or whether a conversion stood in for it. Without
+                // that, a report of "it looks wrong when I resume" cannot be
+                // told apart from the same words about a different code path.
+                Log.Debug("dlna", $"serving {Path.GetFileName(file)} "
+                    + (transcode is not null
+                        ? $"as a conversion ({transcode.Parts.Count} part(s), {transcode.TotalBytes} bytes, {transcode.ContentType})"
+                        : "as the original file")
+                    + $" range=\"{ctx.Request.Headers["Range"] ?? "none"}\"");
+
                 // The cache-eviction sweep deletes whichever VOD directory
                 // was written to least recently, to make room for a new
                 // conversion — and until now, nothing serving DLNA ever

@@ -693,11 +693,14 @@ public sealed class DlnaService
             if (partial && from > 0)
             {
                 long at = 0;
+                var asked = from;
                 foreach (var (_, length) in tr.Parts)
                 {
                     if (at + length > from) { from = at; break; }
                     at += length;
                 }
+                if (from != asked)
+                    Logging.Log.Debug("dlna", $"resume snapped back {asked - from} byte(s) to a segment start ({asked} -> {from})");
             }
         }
 
