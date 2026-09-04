@@ -136,11 +136,30 @@ function prefRemove(key) { try { localStorage.removeItem(prefKey(key)); } catch 
 
 /* The keys that existed before any of this, so a first sign-in keeps the
    layout and theme somebody already has rather than starting them over. */
+/* Read off the code rather than remembered: the first version of this list
+   guessed "j0kers-cards" for the card order, which is really
+   "j0kers-card-order", and guessed a "j0kers-fold-" prefix for the folded
+   state, which is really "fold:". Neither matched anything, so neither was
+   ever adopted. */
 const PREF_KEYS = [
-  "j0kers-theme", "j0kers-cards", "j0kers-library", "j0kers-shuffle", "j0kers-loop",
-  "j0kers-speed", "j0kers-res", "j0kers-sub-lang", "j0kers-tc-folder",
-  "j0kers-tc-sort", "j0kers-tc-conv-order", "j0kers-hls-order", "tunerHost",
+  "j0kers-theme",         // dashboard-core.js  THEME_KEY
+  "j0kers-card-order",    // dashboard-ui.js    ORDER_KEY
+  "j0kers-library",       // dashboard-library.js
+  "j0kers-shuffle",       // dashboard-library.js
+  "j0kers-loop",          // dashboard-library.js
+  "j0kers-speed",         // dashboard-player.js
+  "j0kers-res",           // dashboard-player.js
+  "j0kers-sub-lang",      // dashboard-player.js
+  "j0kers-tc-folder",     // dashboard-transcode.js  TC_FOLDER_KEY
+  "j0kers-tc-sort",       // dashboard-transcode.js  TC_SORT_KEY
+  "j0kers-tc-conv-order", // dashboard-transcode.js  TC_ORDER_KEY
+  "j0kers-hls-order",     // dashboard-streams.js    REORDER.hls.key
+  "tunerHost",            // dashboard-channels.js
 ];
+
+/* The two families with a key per item rather than a fixed name: one view
+   mode per card, and one folded flag per card. */
+const PREF_PREFIXES = ["j0kers-view-", "fold:"];
 
 /* Called once the server has said who this is. Adopts whatever was already
    stored bare, then re-applies the things that were painted before the answer
@@ -163,8 +182,7 @@ function adoptBarePreferences() {
   for (const key of keys) {
     // bare keys only: anything already carrying "@" belongs to someone
     if (key.includes("@")) continue;
-    const isPref = PREF_KEYS.includes(key)
-      || key.startsWith("j0kers-view-") || key.startsWith("j0kers-fold-");
+    const isPref = PREF_KEYS.includes(key) || PREF_PREFIXES.some(p => key.startsWith(p));
     if (!isPref) continue;
     try {
       // Raw on both sides on purpose: `mine` is already the suffixed
@@ -190,6 +208,9 @@ function reapplyPreferences() {
   } catch { /* private mode */ }
   try { if (typeof applyCardOrder === "function") applyCardOrder(); } catch { }
   try { if (typeof restoreCardViews === "function") restoreCardViews(); } catch { }
+  // Folded state is put back too. It is applied while the fold buttons are
+  // built, which is long before anyone knows whose it should be.
+  try { if (typeof applySavedFolding === "function") applySavedFolding(); } catch { }
 }
 
 const $ = id => document.getElementById(id);

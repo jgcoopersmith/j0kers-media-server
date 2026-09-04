@@ -417,6 +417,23 @@ function setFolded(card, folded, remember = true) {
   }
 }
 
+/* Which cards are folded, put back from storage.
+
+   Split out of the setup loop because it has to be runnable twice. The
+   buttons are built once at load, but the fold state belongs to an account
+   and the account is not known until refreshAuth answers - so on a switch
+   this runs again and the previous account's collapsed cards do not stick.
+
+   With no card given it does the lot, which is what a switch needs. */
+function applySavedFolding(only) {
+  const cards = only ? [only] : [...document.querySelectorAll(".card")];
+  for (const card of cards) {
+    let saved = null;
+    try { saved = prefGet(foldKey(card)); } catch { /* private mode */ }
+    setFolded(card, saved === "1", false);
+  }
+}
+
 function initCardFolding() {
   for (const card of document.querySelectorAll(".card")) {
     const h2 = card.querySelector("h2");
@@ -436,9 +453,7 @@ function initCardFolding() {
     btn.onclick = () => setFolded(card, !card.classList.contains("folded"));
     h2.insertBefore(btn, h2.firstChild);
 
-    let saved = null;
-    try { saved = prefGet(foldKey(card)); } catch {}
-    setFolded(card, saved === "1", false);
+    applySavedFolding(card);
 
     makeCardDraggable(card);
   }
