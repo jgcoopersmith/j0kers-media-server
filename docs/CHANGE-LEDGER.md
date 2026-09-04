@@ -583,8 +583,19 @@ running server:
 
 ### Test residue
 
-The sign-in created two `guest` sessions in `sessions.json`. `POST
-/api/auth/logout` returned 411 (it wants a body) and the cookie jar had already
-been removed, so they were cleared the way the server clears every session — the
-restart this ledger commit causes. Confirmed empty afterwards. No other state
-was touched; nothing under `G:\Archive` was read or written.
+The sign-in created a `guest` session in `sessions.json`. `POST /api/auth/logout`
+returned 411 (it wants a body) and the cookie jar had already been removed, so it
+was cleared the way the server clears every session — the restart this ledger
+commit causes.
+
+Checked rather than assumed, because a `guest` session was present afterwards and
+the first draft of this entry claimed the file was empty. The log says otherwise
+and says whose it is:
+
+    10:13:59  passwordless login: guest (read) from 192.168.8.196   <- the test
+    10:16:17  server starting                                       <- sessions cleared
+    10:16:18  guest POST /api/auth/session                           <- a browser reconnecting
+
+The surviving session was re-established by a browser holding a guest cookie, a
+second after the restart. The test's own session is gone. No other state was
+touched; nothing under `G:\Archive` was read or written.
