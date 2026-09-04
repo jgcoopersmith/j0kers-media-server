@@ -190,7 +190,11 @@ public sealed partial class ControlApi : IDisposable
         var dlna = new Dlna.DlnaService(
             _library, _dlnaShare, () => _serverConfig.ServerName,
             Discovery?.Uuid ?? _serverConfig.Discovery.HostName);
+        _vodIndex ??= new Media.VodIndex(MediaRootPath());
+        _vodIndex.StartBuild();          // off the startup path; nothing waits
         dlna.FindTranscode = FullResTranscodeFor;
+        dlna.ShouldList = DlnaShouldList;
+        dlna.NoteBrowsed = RequestCodecProbe;
         dlna.LiveChannels = () =>
         {
             if (!_serverConfig.Discovery.DlnaLiveTv || _ffmpeg is null)
@@ -213,6 +217,11 @@ public sealed partial class ControlApi : IDisposable
     /// buffers, so there is nothing to tear down when DLNA toggles off.
     /// </summary>
     private Dlna.DlnaLive? _dlnaLive;
+
+    /// <summary>Which conversion belongs to which library file. Built in the
+    /// background at startup; see VodIndex for why the alternative was a
+    /// minute of a television's time per folder.</summary>
+    private Media.VodIndex? _vodIndex;
 
     /// <summary>
     /// A finished, full-resolution conversion of a library file, or null.
@@ -241,59 +250,95 @@ public sealed partial class ControlApi : IDisposable
             // Neither is a setting: which of the two is right is a fact
             // about the file, and the codec answers it.
             //
+            // Cached only. The blocking form launches ffprobe, and this runs
+            // once per file while a television waits for a folder listing:
+            // one unread file could stall the whole reply for twenty seconds.
+            // Unknown means "not offered a conversion", and the browse queues
+            // the folder to be read, so the answer settles shortly after.
+            //
             // dlnaUseTranscode forces substitution regardless, for a set that
             // rejects something this check thinks is fine.
             if (!_serverConfig.Discovery.DlnaUseTranscode
-                && _tvCodecs?.NeedsConversion(sourceFile) != true)
+                && _tvCodecs?.NeedsConversionCached(sourceFile) != true)
                 return null;
 
-            var mediaRoot = MediaRootPath();
-            if (!Directory.Exists(mediaRoot)) return null;
+            // Which conversion belongs to this file, from the index rather
+            // than by reading every source.txt on disk — that scan cost
+            // 1,321ms per file here and is the whole of the minute a
+            // television used to spend opening a folder. See VodIndex.
+            var dir = _vodIndex?.DirectoryFor(sourceFile);
+            if (dir is null) return null;
 
-            foreach (var dir in Directory.EnumerateDirectories(mediaRoot, "vod-*"))
+            // Still verified at the moment of use. The index knows the name,
+            // not whether the conversion is finished and whole: a playlist
+            // without EXT-X-ENDLIST is still being written, and a missing
+            // segment would be a stream that stops partway with no
+            // explanation. Either sends the original instead.
+            var playlist = Path.Combine(dir, "index.m3u8");
+            string text;
+            try { text = File.ReadAllText(playlist); }
+            catch { return null; }
+            if (!text.Contains("#EXT-X-ENDLIST", StringComparison.Ordinal)) return null;
+
+            var parts = new List<(string, long)>();
+            long total = 0;
+            // the fMP4 initialisation segment belongs first, or the
+            // fragments after it are not a playable stream
+            var init = Path.Combine(dir, "init.mp4");
+            if (File.Exists(init)) { var l = new FileInfo(init).Length; parts.Add((init, l)); total += l; }
+
+            foreach (var line in text.Split('\n'))
             {
-                // "vod-dune-720p-a1b2c3d4" was scaled; "vod-dune-a1b2c3d4" was not
-                if (System.Text.RegularExpressions.Regex.IsMatch(
-                        Path.GetFileName(dir), @"-\d+p-[0-9a-f]{8}$")) continue;
-
-                string src;
-                try { src = File.ReadAllText(Path.Combine(dir, "source.txt")).Trim(); }
-                catch { continue; }
-                if (!src.Equals(sourceFile, StringComparison.OrdinalIgnoreCase)) continue;
-
-                var playlist = Path.Combine(dir, "index.m3u8");
-                string text;
-                try { text = File.ReadAllText(playlist); }
-                catch { continue; }
-                if (!text.Contains("#EXT-X-ENDLIST", StringComparison.Ordinal)) continue;  // still converting
-
-                var parts = new List<(string, long)>();
-                long total = 0;
-                // the fMP4 initialisation segment belongs first, or the
-                // fragments after it are not a playable stream
-                var init = Path.Combine(dir, "init.mp4");
-                if (File.Exists(init)) { var l = new FileInfo(init).Length; parts.Add((init, l)); total += l; }
-
-                foreach (var line in text.Split('\n'))
-                {
-                    var name = line.Trim();
-                    if (name.Length == 0 || name[0] == '#') continue;
-                    var seg = Path.Combine(dir, name.Split('?')[0]);
-                    if (!File.Exists(seg)) return null;      // a gap would be a corrupt stream
-                    var len = new FileInfo(seg).Length;
-                    parts.Add((seg, len));
-                    total += len;
-                }
-                if (parts.Count == 0 || total == 0) continue;
-
-                var mp4 = parts[^1].Item1.EndsWith(".m4s", StringComparison.OrdinalIgnoreCase) || File.Exists(init);
-                return new Dlna.DlnaService.Transcode(parts, total, mp4 ? "video/mp4" : "video/mp2t");
+                var name = line.Trim();
+                if (name.Length == 0 || name[0] == '#') continue;
+                var seg = Path.Combine(dir, name.Split('?')[0]);
+                if (!File.Exists(seg)) return null;      // a gap would be a corrupt stream
+                var len = new FileInfo(seg).Length;
+                parts.Add((seg, len));
+                total += len;
             }
+            if (parts.Count == 0 || total == 0) return null;
+
+            var mp4 = parts[^1].Item1.EndsWith(".m4s", StringComparison.OrdinalIgnoreCase) || File.Exists(init);
+            return new Dlna.DlnaService.Transcode(parts, total, mp4 ? "video/mp4" : "video/mp2t");
         }
         catch (Exception ex) { Log.Debug("dlna", $"could not look for a conversion: {ex.Message}"); }
         return null;
     }
 
+    /// <summary>
+    /// Whether a library file belongs in a listing a television is reading.
+    ///
+    /// A file a set cannot decode, with no conversion made yet, is a row that
+    /// can only fail: the set shows it, somebody picks it, and it either
+    /// refuses outright or plays sound over a black screen. Leaving it out
+    /// until its conversion exists is the honest answer, and it is what was
+    /// asked for.
+    ///
+    /// Unread files are left out too, for the same reason: not knowing
+    /// whether a set can play something is not a reason to promise it can.
+    /// The browse queues the folder for reading, so unknown is a short state
+    /// rather than a permanent one.
+    ///
+    /// Nothing here decides what to SERVE - FullResTranscodeFor still does
+    /// that, and still prefers a full-resolution conversion over a scaled
+    /// one. This only decides what is offered.
+    /// </summary>
+    private bool DlnaShouldList(string file)
+    {
+        // No codec knowledge at all (no ffmpeg): behave as this always did
+        // and offer everything, rather than hiding a whole library.
+        if (_tvCodecs is null) return true;
+
+        // Forced substitution: the only thing worth listing is a conversion.
+        if (_serverConfig.Discovery.DlnaUseTranscode)
+            return _vodIndex?.DirectoryFor(file) is not null;
+
+        var needs = _tvCodecs.NeedsConversionCached(file);
+        if (needs is null) return false;        // not read yet
+        if (needs == false) return true;        // the set can play it as it stands
+        return _vodIndex?.DirectoryFor(file) is not null;
+    }
     /// <summary>Turns DLNA on or off while the server runs; returns what it now is.</summary>
     public bool SetDlna(bool on)
     {
@@ -370,7 +415,10 @@ public sealed partial class ControlApi : IDisposable
         // to handing over originals, as it always did.
         if (ffmpeg is not null)
         {
-            _tvCodecs = new Media.TvCodecs(baseDirectory, ffmpeg.FfprobePath);
+            // The media root is handed over so nothing under it is ever
+            // probed: those are this server's own HLS segments, and no one
+            // ever asks whether a television can play one.
+            _tvCodecs = new Media.TvCodecs(baseDirectory, ffmpeg.FfprobePath, MediaRootPath());
             // Both places that already notice a failure now also record it
             // somewhere a person will actually see. They stay unaware of the
             // list itself; they just report.

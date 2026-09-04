@@ -58,6 +58,26 @@ public sealed class DlnaService
     public Func<string, Transcode?>? FindTranscode { get; set; }
 
     /// <summary>
+    /// Whether a library file belongs in a listing. Set by ControlApi, which
+    /// is the only thing that knows what a television can decode and which
+    /// conversions exist. Left null, everything is listed - which is what
+    /// happened before this existed.
+    ///
+    /// Applied before paging, deliberately: NumberReturned and TotalMatches
+    /// have to describe the same set the rows come from, or a set that pages
+    /// through a folder asks for rows that are not there and stops early.
+    /// </summary>
+    public Func<string, bool>? ShouldList { get; set; }
+
+    /// <summary>
+    /// Told which folder a television just opened, so whatever has not been
+    /// read yet can be queued for reading. Without it, a file of unknown
+    /// codec would stay unknown - and therefore unlisted - until some other
+    /// part of the server happened to walk that folder.
+    /// </summary>
+    public Action<string>? NoteBrowsed { get; set; }
+
+    /// <summary>
     /// The running live channels to show under "Live TV", or null/empty for
     /// none. Set by ControlApi when dlnaLiveTv is on; each entry is a channel's
     /// display name and its "ch-…" stream id. Left null, no Live TV folder
@@ -306,6 +326,9 @@ public sealed class DlnaService
                 sb.Append(Container(objectId, ParentId(path), Escape(NameOf(path)), CountChildren(path)));
                 return new BrowseResult(Didl(sb.ToString()), 1, 1);
             }
+            // Queue anything unread in here, so files held back for want of
+            // a codec answer do not stay held back. See ShouldList.
+            try { NoteBrowsed?.Invoke(path); } catch { }
             var children = Children(path);
             var page = Page(children, start, count);
             foreach (var child in page)
@@ -333,12 +356,15 @@ public sealed class DlnaService
     }
 
     /// <summary>Folders first, then playable files, each alphabetical — how a remote expects to scroll.</summary>
-    private static List<string> Children(string folder)
+    private List<string> Children(string folder)
     {
         try
         {
             var dirs = Directory.GetDirectories(folder).OrderBy(d => d, StringComparer.OrdinalIgnoreCase);
-            var files = Directory.GetFiles(folder).Where(IsMedia).OrderBy(f => f, StringComparer.OrdinalIgnoreCase);
+            var files = Directory.GetFiles(folder)
+                .Where(IsMedia)
+                .Where(f => ShouldList is null || ShouldList(f))
+                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase);
             return dirs.Concat(files).ToList();
         }
         catch
@@ -347,7 +373,7 @@ public sealed class DlnaService
         }
     }
 
-    private static int CountChildren(string folder)
+    private int CountChildren(string folder)
     {
         try { return Children(folder).Count; }
         catch { return 0; }
