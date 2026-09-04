@@ -762,7 +762,12 @@
      script at the bottom would show a flash of the wrong one. */
   (function () {
     try {
-      var t = localStorage.getItem("j0kers-theme");
+      // Whoever signed in here last. The theme is set before paint to
+      // avoid a flash of the wrong one, which is long before the server
+      // has said who this is - so the last account is the best guess,
+      // and refreshAuth corrects it if the answer differs.
+      var who = localStorage.getItem("j0kers-prefs-for") || "";
+      var t = localStorage.getItem(who ? "j0kers-theme@" + who : "j0kers-theme");
       if (["light", "dark", "cloud", "forest", "donut", "assassin", "royal"].indexOf(t) < 0)
         t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
       document.documentElement.setAttribute("data-theme", t);

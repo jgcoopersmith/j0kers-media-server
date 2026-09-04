@@ -413,7 +413,7 @@ function setFolded(card, folded, remember = true) {
     btn.setAttribute("aria-expanded", folded ? "false" : "true");
   }
   if (remember) {
-    try { localStorage.setItem(foldKey(card), folded ? "1" : "0"); } catch {}
+    try { prefSet(foldKey(card), folded ? "1" : "0"); } catch {}
   }
 }
 
@@ -437,7 +437,7 @@ function initCardFolding() {
     h2.insertBefore(btn, h2.firstChild);
 
     let saved = null;
-    try { saved = localStorage.getItem(foldKey(card)); } catch {}
+    try { saved = prefGet(foldKey(card)); } catch {}
     setFolded(card, saved === "1", false);
 
     makeCardDraggable(card);
@@ -531,7 +531,7 @@ function clearDropMarks() {
 
 function saveCardOrder() {
   try {
-    localStorage.setItem(ORDER_KEY,
+    prefSet(ORDER_KEY,
       JSON.stringify([...document.querySelectorAll(".card")].map(foldKey)));
   } catch {}
 }
@@ -541,7 +541,7 @@ function saveCardOrder() {
    version — keeps its place at the end rather than disappearing. */
 function applyCardOrder() {
   let order;
-  try { order = JSON.parse(localStorage.getItem(ORDER_KEY) || "null"); } catch { return; }
+  try { order = JSON.parse(prefGet(ORDER_KEY) || "null"); } catch { return; }
   if (!Array.isArray(order) || !order.length) return;
 
   const cards = [...document.querySelectorAll(".card")];

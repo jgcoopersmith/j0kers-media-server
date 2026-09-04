@@ -89,7 +89,7 @@ async function loadSubtitles(url) {
 
   // remember the chosen LANGUAGE (not the positional id) so "English on"
   // carries across movies without enabling the wrong track
-  const wantLang = localStorage.getItem("j0kers-sub-lang") || "";
+  const wantLang = prefGet("j0kers-sub-lang") || "";
   if (wantLang) {
     const match = [...sel.options].find(o => o.dataset && o.dataset.lang === wantLang);
     if (match) { sel.value = match.value; applySubtitleChoice(false); }
@@ -102,7 +102,7 @@ function applySubtitleChoice(remember = true) {
     tt.mode = want && tt.id === want ? "showing" : "disabled";
   if (remember) {
     const opt = [...sel.options].find(o => o.value === want);
-    localStorage.setItem("j0kers-sub-lang", (opt && opt.dataset && opt.dataset.lang) || "");
+    prefSet("j0kers-sub-lang", (opt && opt.dataset && opt.dataset.lang) || "");
   }
 }
 
@@ -296,10 +296,10 @@ function flashPlayerMsg(text) {
   $("hlsvideo").addEventListener(ev, viewerTookControl));
 $("pc-speed").addEventListener("change", () => {
   $("hlsvideo").playbackRate = parseFloat($("pc-speed").value) || 1;
-  localStorage.setItem("j0kers-speed", $("pc-speed").value);
+  prefSet("j0kers-speed", $("pc-speed").value);
 });
 $("pc-res").addEventListener("change", async () => {
-  localStorage.setItem("j0kers-res", $("pc-res").value);
+  prefSet("j0kers-res", $("pc-res").value);
   // switching quality mid-play: restart the same file at the new height,
   // resuming from the current position (playHls enforces the resume point)
   if (!currentMediaPath || mediaKind(currentMediaPath) !== "video") return;
@@ -307,8 +307,8 @@ $("pc-res").addEventListener("change", async () => {
   await playMedia(currentMediaPath, resume > 1 ? resume : 0);
 });
 // restore remembered speed/quality
-if (localStorage.getItem("j0kers-speed")) $("pc-speed").value = localStorage.getItem("j0kers-speed");
-if (localStorage.getItem("j0kers-res")) $("pc-res").value = localStorage.getItem("j0kers-res");
+if (prefGet("j0kers-speed")) $("pc-speed").value = prefGet("j0kers-speed");
+if (prefGet("j0kers-res")) $("pc-res").value = prefGet("j0kers-res");
 
 /* ---- inline HLS player: native where supported, else hls.js from CDN ----
    startAt: 0 = beginning (recordings), null = live edge (channels), or a

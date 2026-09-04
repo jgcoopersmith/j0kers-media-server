@@ -27,7 +27,7 @@ function toggleImportTuner() {
   $("tuner-toggle").textContent = show ? "− Close" : "📡 Import from tuner";
   $("tuner-msg").textContent = "";
   if (show) {
-    $("tuner-host").value = $("tuner-host").value || localStorage.getItem("tunerHost") || "";
+    $("tuner-host").value = $("tuner-host").value || prefGet("tunerHost") || "";
     $("tuner-host").focus();
   }
 }
@@ -46,7 +46,7 @@ async function fetchTunerLineup() {
     msg.textContent = e.message;
     return;
   }
-  localStorage.setItem("tunerHost", host);
+  prefSet("tunerHost", host);
   tunerChannels = data.channels || [];
   renderTunerLineup(data.device);
 }
@@ -398,7 +398,7 @@ function cardView(key) { return cardViews[key] || "default"; }
 
 function setCardView(key, v, rerender) {
   cardViews[key] = VIEW_NAMES.includes(v) ? v : "default";
-  try { localStorage.setItem("j0kers-view-" + key, cardViews[key]); } catch { /* private mode */ }
+  try { prefSet("j0kers-view-" + key, cardViews[key]); } catch { /* private mode */ }
   const sel = $(key + "-view");
   if (sel && sel.value !== cardViews[key]) sel.value = cardViews[key];
   if (rerender) rerender();
@@ -407,7 +407,7 @@ function setCardView(key, v, rerender) {
 /* Restores the remembered choice and points the control at it. */
 function loadCardView(key) {
   try {
-    const saved = localStorage.getItem("j0kers-view-" + key);
+    const saved = prefGet("j0kers-view-" + key);
     if (VIEW_NAMES.includes(saved)) cardViews[key] = saved;
   } catch { /* private mode */ }
   const sel = $(key + "-view");

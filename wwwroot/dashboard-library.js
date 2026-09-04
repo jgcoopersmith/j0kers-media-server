@@ -91,9 +91,9 @@ async function refreshLibraryRoots(force) {
   } catch { return; }
 
   // one-time migration from the old localStorage single-folder library
-  const legacy = localStorage.getItem("j0kers-library");
+  const legacy = prefGet("j0kers-library");
   if (legacy && !libraryRoots.length) {
-    localStorage.removeItem("j0kers-library");
+    prefRemove("j0kers-library");
     await fetch("/api/library", { method: "POST", headers: { "Content-Type": "application/json", ...headers() }, body: JSON.stringify({ folder: legacy }) }).catch(() => {});
     return refreshLibraryRoots(true);
   }
@@ -475,8 +475,8 @@ function libRow(icon, name, detail, act, arg, extra, tooltip) {
    (identity, or shuffled); pos indexes into order. */
 const queue = {
   items: [], order: [], pos: -1, label: null,
-  shuffle: localStorage.getItem("j0kers-shuffle") === "1",
-  loop: localStorage.getItem("j0kers-loop") === "1",
+  shuffle: prefGet("j0kers-shuffle") === "1",
+  loop: prefGet("j0kers-loop") === "1",
 };
 
 function buildOrder(firstItemIndex) {
@@ -562,7 +562,7 @@ $("np-next").addEventListener("click", () => playQueuePos(queue.pos + 1));
 $("np-stop").addEventListener("click", stopQueue);
 $("np-shuf").addEventListener("click", () => {
   queue.shuffle = !queue.shuffle;
-  localStorage.setItem("j0kers-shuffle", queue.shuffle ? "1" : "0");
+  prefSet("j0kers-shuffle", queue.shuffle ? "1" : "0");
   if (queue.items.length) {
     // rebuild the order around the item currently playing
     const currentItem = queue.order[queue.pos];
@@ -574,7 +574,7 @@ $("np-shuf").addEventListener("click", () => {
 });
 $("np-loop").addEventListener("click", () => {
   queue.loop = !queue.loop;
-  localStorage.setItem("j0kers-loop", queue.loop ? "1" : "0");
+  prefSet("j0kers-loop", queue.loop ? "1" : "0");
   syncQueueButtons();
 });
 $("hlsvideo").addEventListener("ended", () => {

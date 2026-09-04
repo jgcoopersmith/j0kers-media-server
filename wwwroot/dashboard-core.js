@@ -105,6 +105,93 @@ let authState = null;       // {authRequired, setupRequired, secure}
   }
 })();
 
+
+/* ---- preferences belong to the account, not to the browser ----
+
+   Every option this page remembers - the theme, which view each card is in,
+   the card order, what is folded, the last transcode folder, shuffle and loop,
+   playback speed and subtitle language - lived in localStorage under a bare
+   key. localStorage is per browser, so on a machine where more than one
+   account signs in they were one shared set: a guest picking the light theme
+   changed it for the owner, and the owner's card layout arrived for the guest.
+
+   So every key is suffixed with the account it belongs to. The token is
+   deliberately left out of this - it is a credential, not a preference, and
+   sign-out already removes it.
+
+   The account is not known at first paint. The theme is applied by an inline
+   script in <head> to avoid a flash of the wrong one, and the card order is
+   applied before refreshAuth has answered. So the name is also kept under a
+   plain key, as the answer to "who was here last" - which is right on every
+   load but the first after a switch, and that one is corrected the moment the
+   server says who this is. */
+const PREF_USER_KEY = "j0kers-prefs-for";
+let prefUser = "";
+try { prefUser = localStorage.getItem(PREF_USER_KEY) || ""; } catch { /* private mode */ }
+
+function prefKey(key) { return prefUser ? key + "@" + prefUser : key; }
+function prefGet(key) { try { return localStorage.getItem(prefKey(key)); } catch { return null; } }
+function prefSet(key, value) { try { localStorage.setItem(prefKey(key), value); } catch { /* private mode */ } }
+function prefRemove(key) { try { localStorage.removeItem(prefKey(key)); } catch { /* private mode */ } }
+
+/* The keys that existed before any of this, so a first sign-in keeps the
+   layout and theme somebody already has rather than starting them over. */
+const PREF_KEYS = [
+  "j0kers-theme", "j0kers-cards", "j0kers-library", "j0kers-shuffle", "j0kers-loop",
+  "j0kers-speed", "j0kers-res", "j0kers-sub-lang", "j0kers-tc-folder",
+  "j0kers-tc-sort", "j0kers-tc-conv-order", "j0kers-hls-order", "tunerHost",
+];
+
+/* Called once the server has said who this is. Adopts whatever was already
+   stored bare, then re-applies the things that were painted before the answer
+   arrived. */
+function usePreferencesFor(username) {
+  const who = username || "";
+  if (who === prefUser) return;
+  prefUser = who;
+  try { localStorage.setItem(PREF_USER_KEY, who); } catch { /* private mode */ }
+  if (who) adoptBarePreferences();
+  reapplyPreferences();
+}
+
+/* A one-time move of the old shared keys into this account's own, and only
+   where the account has nothing of its own yet - so it can never overwrite a
+   preference somebody has already set. */
+function adoptBarePreferences() {
+  let keys = [];
+  try { keys = Object.keys(localStorage); } catch { return; }
+  for (const key of keys) {
+    // bare keys only: anything already carrying "@" belongs to someone
+    if (key.includes("@")) continue;
+    const isPref = PREF_KEYS.includes(key)
+      || key.startsWith("j0kers-view-") || key.startsWith("j0kers-fold-");
+    if (!isPref) continue;
+    try {
+      // Raw on both sides on purpose: `mine` is already the suffixed
+      // key, and `key` is the old shared one that has no suffix. Going
+      // through prefGet/prefSet here would suffix them a second time.
+      const mine = prefKey(key);
+      if (localStorage.getItem(mine) === null)
+        localStorage.setItem(mine, localStorage.getItem(key));
+    } catch { /* private mode */ }
+  }
+}
+
+/* The theme and the card layout are put on the page before anybody knows whose
+   they should be. If the answer turns out to be a different account, they are
+   put right here rather than waiting for a reload. */
+function reapplyPreferences() {
+  try {
+    const t = prefGet("j0kers-theme");
+    if (THEMES.includes(t)) {
+      document.documentElement.setAttribute("data-theme", t);
+      paintThemeButton();
+    }
+  } catch { /* private mode */ }
+  try { if (typeof applyCardOrder === "function") applyCardOrder(); } catch { }
+  try { if (typeof restoreCardViews === "function") restoreCardViews(); } catch { }
+}
+
 const $ = id => document.getElementById(id);
 /* join a browse path and entry name with the OS's separator (the server
    returns native paths — backslashes on Windows, slashes on mac/Linux) */
@@ -307,7 +394,7 @@ function paintThemeButton() {
 function toggleTheme() {
   const next = THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length];
   document.documentElement.setAttribute("data-theme", next);
-  try { localStorage.setItem(THEME_KEY, next); } catch { /* private mode */ }
+  try { prefSet(THEME_KEY, next); } catch { /* private mode */ }
   paintThemeButton();
 }
 paintThemeButton();
@@ -323,6 +410,10 @@ async function refreshAuth() {
   document.body.classList.toggle("is-server-admin", role === "serveradmin");
   document.body.classList.toggle("is-admin", role === "admin" || role === "serveradmin");
   document.body.classList.toggle("can-edit", role === "admin" || role === "edit" || role === "serveradmin");
+  // Preferences follow the account, not the browser. Done here because
+  // this is the first moment anybody knows whose they are - the theme and
+  // the card order have already been painted from whoever was here last.
+  usePreferencesFor(me && me.username);
   $("acct-pill").textContent = me ? (me.username || "local") : "sign in";
   $("acctbtn").style.display = authState.authRequired ? "" : "none";
   if (!authState.authenticated) { showLogin(); return false; }

@@ -380,7 +380,7 @@ const REORDER = {
 const HLS_ORDER_KEY = REORDER.hls.key;
 
 function savedOrder(cfg) {
-  try { return JSON.parse(localStorage.getItem(cfg.key) || "[]"); } catch { return []; }
+  try { return JSON.parse(prefGet(cfg.key) || "[]"); } catch { return []; }
 }
 
 /* Sorts by the remembered order. The stored list is names, not positions, so
@@ -403,7 +403,7 @@ function hlsInChosenOrder(streams) {
 
 function saveOrder(cfg, box) {
   const names = [...box.querySelectorAll(cfg.nameSel)].map(e => e.dataset[cfg.attr]);
-  try { localStorage.setItem(cfg.key, JSON.stringify(names)); } catch {}
+  try { prefSet(cfg.key, JSON.stringify(names)); } catch {}
 }
 
 // only one drag is ever in the air, so one variable serves both cards

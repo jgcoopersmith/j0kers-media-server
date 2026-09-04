@@ -29,11 +29,11 @@ async function tcBoot() {
   tcState.booted = true;
   tcLoadConfig();
   let saved = null;
-  try { saved = localStorage.getItem(TC_FOLDER_KEY); } catch { /* private mode */ }
+  try { saved = prefGet(TC_FOLDER_KEY); } catch { /* private mode */ }
   if (saved) {
     await tcReload(saved);
     // saved folder gone (unplugged drive, moved dir): fall back to empty
-    if (!tcState.path) { try { localStorage.removeItem(TC_FOLDER_KEY); } catch {} tcShowEmpty(); }
+    if (!tcState.path) { try { prefRemove(TC_FOLDER_KEY); } catch {} tcShowEmpty(); }
   } else {
     tcShowEmpty();
   }
@@ -136,7 +136,7 @@ function tcShowEmpty() {
   tcState.path = "";
   tcState.parent = null;
   tcState.selected.clear();
-  try { localStorage.removeItem(TC_FOLDER_KEY); } catch { /* private mode */ }
+  try { prefRemove(TC_FOLDER_KEY); } catch { /* private mode */ }
   tcSyncGo();
   $("tc-path").textContent = "No folder yet";
   $("tc-up").disabled = true;
@@ -211,7 +211,7 @@ async function tcReload(path, quiet) {
 
   tcState.path = data.path || "";
   tcState.parent = data.parent ?? (data.path ? "" : null);
-  try { if (tcState.path) localStorage.setItem(TC_FOLDER_KEY, tcState.path); } catch { /* private mode */ }
+  try { if (tcState.path) prefSet(TC_FOLDER_KEY, tcState.path); } catch { /* private mode */ }
   $("tc-path").textContent = (data.search ? "🔍 “" + data.search + "” in " : "") + (data.path || "Drives")
     + (data.search ? "  ·  " + (data.entries || []).length + " match" + ((data.entries || []).length === 1 ? "" : "es") + (data.capped ? " (first 500)" : "") : "");
   $("tc-up").disabled = !data.path;
@@ -245,7 +245,7 @@ function tcUpdateSpace(data) {
 const TC_SORT_KEY = "j0kers-tc-sort";
 let tcSort = { key: "name", dir: 1 };
 try {
-  const saved = JSON.parse(localStorage.getItem(TC_SORT_KEY) || "null");
+  const saved = JSON.parse(prefGet(TC_SORT_KEY) || "null");
   if (saved && saved.key) tcSort = saved;
 } catch { /* private mode, or nonsense in storage: keep the default */ }
 
@@ -296,7 +296,7 @@ function tcSortEntries(entries) {
 
 function tcSetSort(key) {
   tcSort = (tcSort.key === key) ? { key, dir: -tcSort.dir } : { key, dir: 1 };
-  try { localStorage.setItem(TC_SORT_KEY, JSON.stringify(tcSort)); } catch { }
+  try { prefSet(TC_SORT_KEY, JSON.stringify(tcSort)); } catch { }
   if (tcState.lastEntries) tcRender(tcState.lastEntries);
 }
 
@@ -498,7 +498,7 @@ const TC_ORDER_WHY = {
   az: "Everything by title, running and waiting together.",
 };
 let tcConvOrder = (() => {
-  try { const s = localStorage.getItem(TC_ORDER_KEY); return TC_ORDERS.includes(s) ? s : "active"; }
+  try { const s = prefGet(TC_ORDER_KEY); return TC_ORDERS.includes(s) ? s : "active"; }
   catch { return "active"; }
 })();
 
@@ -512,7 +512,7 @@ function paintTcConvOrder() {
 
 function tcToggleConvOrder() {
   tcConvOrder = TC_ORDERS[(TC_ORDERS.indexOf(tcConvOrder) + 1) % TC_ORDERS.length];
-  try { localStorage.setItem(TC_ORDER_KEY, tcConvOrder); } catch { /* private mode */ }
+  try { prefSet(TC_ORDER_KEY, tcConvOrder); } catch { /* private mode */ }
   paintTcConvOrder();
   renderConversions(lastRunning, lastQueued);   // re-order without waiting for the next poll
 }
