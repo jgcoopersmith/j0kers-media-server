@@ -443,3 +443,95 @@ offset already on a boundary is left exactly alone.
 Read-only: the log, one conversion's segments, and `GET /dlna/file` range
 requests against the running server. One server restart from the publish hook.
 Nothing written under `G:\Archive`.
+
+---
+
+## 2026-09-03 — Chasing the paused resume to its end (v2.0.248 → v2.0.250)
+
+The v2.0.246 fix did not solve the reported case, and finding out why took two
+instrumented builds and ended in a wall. Recorded because the dead ends are the
+valuable part: four different fixes were proposed and none of them would have
+worked.
+
+### Why the earlier fix missed
+
+The film was `Blade.mp4` — identified from `history.json` rather than by asking.
+H.264/AAC in MP4, **no conversion exists**, so it is served as the original.
+The v2.0.246 snapping only touches the conversion path. Different code, never ran.
+
+### What an MP4 resume actually faces
+
+| box | at | size |
+|---|---|---|
+| `ftyp` | 0 | 20 |
+| `moov` | 20 | 3,337,629 — every parameter set lives here |
+| `mdat` | 3,337,649 | 2.1 GB — raw frames, nothing else |
+
+4 MB pulled from the exact offset the TV resumed at, handed to ffmpeg:
+`moov atom not found`. In MP4 the parameter sets are in the header and are
+**never repeated**, so no byte offset can carry them. Unlike MPEG-TS, there is
+nothing to snap to.
+
+"Just hold the header" does not work either: the `moov` carries **31,445
+absolute chunk offsets** (first = 3,337,657) describing the whole file. Prepended
+to a mid-file range it would point the set at positions not in the stream —
+confidently wrong rather than obviously broken. Making it usable means rewriting
+every offset, which is writing an MP4 muxer.
+
+### The two findings that closed it (v2.0.249, instrumentation)
+
+Every request header was logged for one viewing. The set sends **four**:
+
+    Accept: */*
+    Host: 192.168.8.196:9090
+    Range: bytes=0-
+    User-Agent: Mozilla/5.0 ... Chrome/39.0.2171.95 Safari/537.36
+
+No `TimeSeekRange.dlna.org`, no `getcontentFeatures.dlna.org`, no
+`transferMode.dlna.org`. It is a Chromium media element doing plain HTTP byte
+ranges, not a DLNA renderer — so advertising time-seek would have been
+advertising to something that cannot hear it.
+
+And the decisive one:
+
+    22:16:50.744  Range: bytes=0-            reads the header
+    22:16:51.683  Range: bytes=1140711639-   seeks to the saved position
+    22:17:33.541  response completes - 962.59 MB delivered
+                  (nothing further)
+
+962.59 MB is exactly 2,150,064,454 − 1,140,711,639: the whole remainder of the
+film, in 42 seconds. **The set then plays from its own memory and never contacts
+the server again.** Pause and resume happen with every byte already in hand, so
+no server-side change — remux, header rewriting, keyframe snapping, time-seek —
+can reach the fault. It is a decoder teardown bug in the television.
+
+There is no AVTransport traffic either: pause is invisible here by protocol as
+well as by timing.
+
+### Abandoned, deliberately
+
+Capping open-ended ranges so the set streams instead of bulk-downloading was
+started and **stopped by the owner as a rabbit hole** — correctly: it would have
+made the set talk to the server more often while buffering, without making a
+pause visible. No code from it was kept; the edit was rejected before it was
+written.
+
+### v2.0.250 — putting the scaffolding away
+
+The per-header dump was diagnostic and should have come out when the experiment
+ended rather than staying at Info in a live log. Removed. Kept: one line per
+`/dlna/file` naming the title, which of the two paths served it, and the Range —
+which the access log cannot say, because it drops query strings on purpose.
+
+### Live-system actions
+
+Read-only throughout: the log, `history.json`, one film's MP4 boxes, and ranged
+GETs against the running server. Three restarts from the publish hook. Nothing
+written under `G:\Archive`. The owner reset the log level to trace themselves.
+
+### Left standing
+
+The v2.0.244 browse fix (66 s → 116 ms) and the v2.0.246 resume snapping are
+real and unaffected — the latter works for files served as conversions, which
+`Blade.mp4` is not. The owner's workaround stands: exit to the menu and restart,
+which resumes at position.

@@ -3971,34 +3971,25 @@ public sealed partial class ControlApi : IDisposable
                 // playing or whether a conversion stood in for it. Without
                 // that, a report of "it looks wrong when I resume" cannot be
                 // told apart from the same words about a different code path.
-                // What the set actually asked for, in full.
+                // Which title, and which of the two paths served it.
                 //
-                // A television that pauses and resumes an MP4 comes back with
-                // a byte offset and no way to decode from it - the parameter
-                // sets live in the header and are never repeated. Whether that
-                // can be fixed properly turns on one question this log could
-                // not answer: does the set ever ask by TIME instead of by byte?
-                // DLNA has TimeSeekRange.dlna.org for exactly this, and a
-                // server may re-originate a stream to answer it, which is the
-                // one case where handing back different bytes is legitimate.
+                // The access log drops query strings on purpose - they carry
+                // signed media links - so its /dlna/file line names neither.
+                // That is the one thing needed to tell two different reports
+                // of "it looks wrong" apart, because a conversion and an
+                // original do not share a line of code between them.
                 //
-                // So every header is recorded, once per /dlna/file request -
-                // a handful per film, not a poll. Info rather than debug
-                // because the answer is wanted from an ordinary viewing, not
-                // from a session someone remembered to turn logging up for.
+                // One line per request, which is a handful per film rather
+                // than a poll. The full header dump that briefly lived here
+                // was scaffolding for one question - whether a set ever asks
+                // by time rather than by byte - and it answered it: this one
+                // sends Accept, Host, Range and User-Agent, and nothing else.
+                // No DLNA headers at all. It came out once it had answered.
                 Log.Info("dlna", $"serving {Path.GetFileName(file)} "
                     + (transcode is not null
                         ? $"as a conversion ({transcode.Parts.Count} part(s), {transcode.TotalBytes} bytes, {transcode.ContentType})"
-                        : $"as the original file ({new FileInfo(file).Length} bytes)"));
-                foreach (var header in ctx.Request.Headers.AllKeys)
-                {
-                    if (header is null) continue;
-                    // Never the query string and never a credential: the same
-                    // rule the access log keeps.
-                    if (header.Equals("Authorization", StringComparison.OrdinalIgnoreCase)
-                        || header.Equals("Cookie", StringComparison.OrdinalIgnoreCase)) continue;
-                    Log.Info("dlna", $"    {header}: {ctx.Request.Headers[header]}");
-                }
+                        : $"as the original file ({new FileInfo(file).Length} bytes)")
+                    + $" range=\"{ctx.Request.Headers["Range"] ?? "none"}\"");
 
                 // The cache-eviction sweep deletes whichever VOD directory
                 // was written to least recently, to make room for a new
