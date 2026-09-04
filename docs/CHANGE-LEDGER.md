@@ -599,3 +599,65 @@ and says whose it is:
 The surviving session was re-established by a browser holding a guest cookie, a
 second after the restart. The test's own session is gone. No other state was
 touched; nothing under `G:\Archive` was read or written.
+
+---
+
+## 2026-09-04 — Page options belong to the account (v2.0.254)
+
+**Asked for:** hide the Transcode card unless admin, and save the page's
+options per user — window view preference and colour.
+
+### Transcode: not changed, deliberately
+
+It is already `server-admin-only`, which is **stricter** than the `admin-only`
+asked for. Matching the request would have *loosened* it — handing a plain admin
+a panel that reaches any path on disk and can saturate the GPU. Left alone and
+said so rather than doing it quietly.
+
+### Preferences: a real defect, confirmed
+
+`UserAccount` has no preferences field, and all 35 option call sites went
+straight to `localStorage` under bare keys. localStorage is **per browser**, so
+where two accounts sign in on one machine they shared a single set: a guest
+choosing the light theme changed it for the owner, and the owner's card layout
+arrived for the guest.
+
+Affected: theme, per-card view mode, card order, folded state, last transcode
+folder, transcode sort and conversion order, HLS order, library root, shuffle,
+loop, playback speed, resolution, subtitle language, tuner host.
+
+### Change
+
+Every key is suffixed with the account. The **token is excluded** — a credential,
+not a preference, and sign-out already clears it.
+
+Two things needed handling rather than assuming:
+
+- **The account is unknown at first paint.** The theme is set by an inline
+  `<head>` script to avoid a flash, and the card order is applied before
+  `refreshAuth` answers. So the last account is kept under a plain key as the
+  best guess, and `refreshAuth` corrects the page when the server disagrees.
+- **A first sign-in adopts existing bare keys**, so nobody's layout is thrown
+  away — but only where that account has nothing of its own, so adoption can
+  never overwrite a choice already made.
+
+### Verification
+
+A browser harness loading the **real** `dashboard-core.js`, two accounts sharing
+one localStorage. 16 assertions, all passing: adoption on first sign-in,
+isolation in both directions, switching back and forth, adoption never
+overwriting, the token never namespaced and never copied, the first-paint hint
+recorded, signed-out falling back to bare keys, and the too-early theme and
+layout re-applied on a switch.
+
+One self-inflicted bug caught and fixed during the work: the helpers were
+inserted into `dashboard-core.js` *before* the mechanical pass that rewrote
+every call site, so the migration function got its own raw reads rewritten and
+would have suffixed already-suffixed keys. Found by auditing the remaining raw
+accesses rather than by the tests.
+
+### Test residue
+
+A local HTTP server on 127.0.0.1:8795 and a copy of `dashboard-core.js` under
+the scratch directory. Both removed; no python processes left, scratch empty.
+No server state touched, nothing written under `G:\Archive`.
