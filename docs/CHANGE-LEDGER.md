@@ -739,3 +739,81 @@ pass.
 localStorage in the test browser cleared (16 keys). A guest sign-in session,
 cleared by the restart this commit causes. No files written under `G:\Archive`;
 `history.json` untouched.
+
+---
+
+## 2026-09-04 — Preferences follow the account, not the browser (v2.0.260)
+
+**Reported:** guest login still was not saving window view or open/closed
+state, with "do not guess, test and correct".
+
+### The hunt, and why it kept passing
+
+Cache headers ruled out (`Cache-Control: no-store`, so the browser had current
+code). The login flow ruled out (`login.html` does `location.replace("/")`, a
+fresh load — the same thing the tests did). Sign-out ruled out (it removes only
+the token). A full cycle including a **server restart** was run and passed.
+
+Every test passed because the code was right. **The environment was different:
+the owner was using an incognito window.** Chrome gives it a separate
+localStorage that is discarded when the last incognito window closes — so
+settings saved, survived reloads, and vanished with the window.
+
+Reaching the owner's own browser was tried first (`list_connected_browsers`
+returned empty, so Claude-in-Chrome was unavailable). The question of which
+browser context was in use should have been asked far earlier; it was the
+single fact that explained everything and none of the code reading could.
+
+### The real limitation this exposed
+
+Per-account **keys** in localStorage only separate accounts on one browser.
+They do nothing for the same account on a phone, in a second profile, or in
+incognito. v2.0.254 fixed half the problem and the half it fixed was not the
+half being reported.
+
+### Change
+
+- **`Media/UserPreferences.cs`** (new) — a flat per-account store in
+  `preferences.json`, keyed by account **id** so renaming an account keeps its
+  settings. It knows nothing about what a key means; that is the dashboard's
+  business. Capped at 200 keys per account, 128 chars a key, 4096 a value,
+  because a signed-in account writes into it directly.
+- **`GET`/`PUT /api/preferences`** at `Read` — every account has its own and
+  the handlers only ever touch the caller's. `PUT` **merges**, so a page that
+  has not learned about a newer setting cannot delete it; an empty value is how
+  a client says forget one.
+- **Client** — localStorage is demoted to a cache. It still earns its place: it
+  is what the inline `<head>` script reads to set the theme before first paint,
+  which the server's answer cannot arrive in time for. The page paints from the
+  cache, then the account's real settings land over it. Writes are queued 400ms
+  (dragging a card writes an order per drop; finding a theme means cycling
+  seven) and flushed on `pagehide`. On first sign-in anything the browser knows
+  that the account does not is pushed up, so existing settings become theirs
+  everywhere rather than being discarded.
+
+### Verification (live, real accounts)
+
+Set as guest: theme `cloud`, HLS view `info`, one card folded. Confirmed on the
+server, then **localStorage wiped entirely** — which is exactly what closing an
+incognito window does — and the page reloaded:
+
+| | |
+|---|---|
+| storage at load | empty |
+| theme | `cloud` — restored |
+| HLS view | `info` — restored |
+| folded card | `fold:problems` — restored |
+| cache | rebuilt from the server |
+
+`preferences.json` showed the two accounts separate, and the owner's own six
+settings had been pushed up from their browser by the first-sign-in path,
+unprompted — the migration working on real data.
+
+202 tests pass.
+
+### Test residue
+
+The three test settings written under the guest account were removed through
+the API (`PUT` with empty values); `preferences.json` now holds only the
+owner's. Browser localStorage cleared. A guest sign-in session, cleared by the
+next restart. Nothing written under `G:\Archive`.
