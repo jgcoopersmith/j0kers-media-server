@@ -668,6 +668,37 @@ public sealed class DlnaService
                 return;
             }
             if (to > total - 1) to = total - 1;
+
+            // Resume where the picture can actually be decoded.
+            //
+            // Pause a film on a television and press play: the set reopens the
+            // connection with a byte offset, and that offset lands wherever it
+            // happens to land - almost always in the middle of a segment. Each
+            // segment begins with the H.264 parameter sets and a keyframe, and
+            // nothing repeats them in between, so a decoder handed the middle
+            // of one has no idea how to interpret what follows. It does not
+            // fail: it decodes anyway and paints the result. Measured with
+            // ffmpeg against this very server, a mid-segment offset gives
+            // "non-existing PPS 0 referenced" and "no frame!", and the same
+            // request snapped to the segment start decodes without a murmur.
+            // On a set that is a picture reduced to a handful of colours with
+            // sound playing perfectly over it - which is exactly how it was
+            // reported.
+            //
+            // So a partial request starts at the beginning of the segment it
+            // falls in. Content-Range says so honestly, and every byte offset
+            // stays truthful, so seeking still works. The cost is rewinding to
+            // the last keyframe - a few seconds at most, and the film starts a
+            // moment earlier than it was paused rather than in colour bars.
+            if (partial && from > 0)
+            {
+                long at = 0;
+                foreach (var (_, length) in tr.Parts)
+                {
+                    if (at + length > from) { from = at; break; }
+                    at += length;
+                }
+            }
         }
 
         var count = to - from + 1;
