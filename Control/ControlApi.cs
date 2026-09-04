@@ -1364,6 +1364,24 @@ public sealed partial class ControlApi : IDisposable
             // adding one by hand; browsing and watching a lineup is Read
             case "/api/tv/pin":
                 return AccessLevel.Edit;
+
+            // The two cards an ordinary account no longer sees, and the
+            // endpoints behind them.
+            //
+            // Hiding a card in CSS is not a restriction - it makes the page
+            // honest, not the server. /api/mounts returns each mount's source
+            // path on this machine, and /api/channels returns each channel's
+            // URL, which for an IPTV provider routinely carries credentials in
+            // it. That is the same class of thing the log is held back for.
+            //
+            // Every method, not only the reads: an account that cannot see the
+            // card has no business adding a mount either, and a GET gated above
+            // a POST on the same path is a rule nobody can reason about. The
+            // POST/DELETE rule below still covers the paths it names; these two
+            // return here before reaching it.
+            case "/api/mounts":
+            case "/api/channels":
+                return AccessLevel.Admin;
         }
 
         // adding or removing what the server offers; listing it stays Read

@@ -245,7 +245,11 @@ async function tick() {
     tcWasBusy = tcBusy;
   }
   refreshHistory();
-  refreshMounts();   // cheap, cached-ish
+  // Mounts and channels are admin-only cards now, and the endpoints behind
+  // them refuse anybody else - so asking would be a 403 every fifteen seconds
+  // for a card that is not on the page.
+  const canSeeServerConfig = document.body.classList.contains("is-admin");
+  if (canSeeServerConfig) refreshMounts();   // cheap, cached-ish
 
   // The HLS stream list changes only when a conversion starts, a conversion
   // finishes, or the user deletes/rebuilds one. The first two both show up
@@ -258,7 +262,7 @@ async function tick() {
   const transcodeSig = transcodingNow.map(t => t && t.stream).sort().join("\n");
   if (lastHls === null || transcodeSig !== lastTranscodeSig) refreshHls();
   lastTranscodeSig = transcodeSig;
-  await refreshChannels(false);
+  if (canSeeServerConfig) await refreshChannels(false);
   refreshPlaylists(false);
   refreshFavorites(false);
 

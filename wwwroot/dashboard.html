@@ -985,7 +985,7 @@
     </div>
   </div>
 
-  <div class="card">
+  <div class="card admin-only">
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">RTSP mounts</span>
       <button onclick="toggleAddMount()" id="am-toggle" class="edit-only">+ Add mount</button>
       <select id="mounts-view" onchange="setCardView('mounts', this.value, renderMounts)" class="am-in" style="width:auto"
@@ -1062,7 +1062,7 @@
     </div>
   </div>
 
-  <div class="card">
+  <div class="card admin-only">
     <h2 style="display:flex;align-items:center;gap:8px"><span style="flex:1">Live channels</span>
       <button onclick="toggleImportTuner()" id="tuner-toggle" class="edit-only"
               title="Read the channel list off an HDHomeRun tuner">📡 Import from tuner</button>
