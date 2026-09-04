@@ -817,3 +817,94 @@ The three test settings written under the guest account were removed through
 the API (`PUT` with empty values); `preferences.json` now holds only the
 owner's. Browser localStorage cleared. A guest sign-in session, cleared by the
 next restart. Nothing written under `G:\Archive`.
+
+---
+
+## 2026-09-04 — "Why is Avengers transcoding?" (v2.0.262)
+
+### The question, answered
+
+Pressing Play started a conversion of a film that needed none. Two separate
+things were being conflated, both called transcoding:
+
+- **The Transcode panel** asks *does a TV need this converted?* The probe cache
+  says `h264|aac` for all four SciFi_Fantasy Avengers films, so the answer is
+  no and the panel correctly never offered them. It was right.
+- **Play** asks *is there an HLS copy to stream?* The browser player only
+  speaks HLS, so for any plain MP4 the answer is always no, and it makes one.
+
+`POST /api/play` at 14:15:30.184 is in the log alongside `started: vod
+Avengers.Endgame`. Nothing was wrong with the file.
+
+### An error of mine, corrected
+
+I reported Endgame as "40 minutes in of 3 hours" with 2 hours to go. That was
+segments-of-film-produced read as elapsed wall-clock. Both films had already
+finished — 11m 45s and 13m 15s — because NVENC runs ~13x faster than realtime.
+The owner caught it.
+
+### Three real faults found underneath
+
+**1. A timeout that could never fire.** `RunFfmpeg` read stderr to the end and
+*then* checked the clock:
+
+    p.StandardError.ReadToEnd();
+    if (!p.WaitForExit(timeoutMs)) { p.Kill(true); }
+
+`ReadToEnd` returns when the pipe closes, which happens when the process exits,
+so for a process that never exits the timeout below is unreachable. Measured:
+thumbnail grabs given 20 seconds ran **24 minutes**. An earlier session audited
+these exact lines and cleared them — the check then was for an undrained-pipe
+deadlock, and this is a different fault needing no full pipe at all, only a
+child that does not finish. Both copies (`FfmpegManager`, `SubtitleManager`)
+now use `ProcessJob.Run`.
+
+**2. Thumbnails taken from a live playlist.** The thumbnail path falls back to
+`index.m3u8`, and a playlist without `EXT-X-ENDLIST` is a *live* stream to
+ffmpeg — asked to seek 60s into one listing two segments, it waits for the rest
+forever, holding the file open. It was attempted **one second** after the
+conversion started. It now only reads a playlist that says it is finished; the
+segment attempts already cover an unfinished one.
+
+**3. Re-encoding what only needed repackaging** — the fix asked for. See below.
+
+Combined effect: a retry loop spawning stuck ffmpeg processes as fast as they
+were killed. Two respawned within four minutes of being cleared by hand.
+
+### The remux
+
+When the source already carries the codecs being asked for and no particular
+height was requested, the streams are copied. Measured on Endgame:
+
+| | source | re-encode | remux |
+|---|---|---|---|
+| video | h264 1920x800 @ 2.38 Mbps | h264 @ 2.30 Mbps | **identical** |
+| audio | aac 6ch / 5.1 | aac stereo (`-ac 2`) | **aac 6ch / 5.1** |
+| 90s takes | — | ~7s of GPU | **0.17s** |
+
+The surround loss was the worse half and was invisible: `AudioArgs` has
+`-ac 2`, so every conversion folded 5.1 to stereo.
+
+Scaling still encodes, and so does anything whose codecs do not match.
+`NeedsFmp4` was taught about the per-file copy, or remuxing HEVC would have
+asked for MPEG-TS segments that cannot carry it. Hardware decode setup is
+skipped when nothing is decoded.
+
+**The cost, stated:** a copy cannot place keyframes, so a segment ends where
+the source already has one and a seek lands on the nearest — a scrub bar a few
+seconds coarse. Accepted by the owner in exchange for the picture and the mix.
+
+### Damage, measured
+
+Of 2,906 conversions, **one** was left broken: Infinity War, 1497 segments and
+3.4 GB on disk with a playlist listing a single segment and no `ENDLIST` —
+unusable, because the stuck readers held `index.m3u8` open while the muxer
+tried to finalise it. **Outstanding: whether to delete it** so it remakes as a
+fast, lossless remux (~2.4 GB, ~20s) — not deleted without asking.
+
+### Live-system actions
+
+Killed the stuck thumbnail processes (3, then 2 respawned). Read-only
+elsewhere: logs, probe cache, `ffprobe` on three sources. A 90-second remux
+written to scratch and deleted. Nothing under `G:\Archive` written or removed.
+202 tests pass.
