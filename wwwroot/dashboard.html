@@ -936,7 +936,12 @@
       <select id="recent" class="am-in" style="width:auto;max-width:60%" onchange="playFromHistory(this)"
               title="The last ten things you watched — pick one to play it again">
         <option value="">Recently watched…</option>
-      </select></h2>
+      </select>
+      <!-- Clears the Recently-watched list beside it, not the table below:
+           a live session is not a list entry, it is somebody watching, and
+           it clears itself when they stop. -->
+      <button id="recent-clear" class="admin-only" onclick="clearWatchHistory(this)"
+              title="Forget everything in the Recently watched list. Nothing is deleted from disk.">Clear list</button></h2>
     <div id="sessions"></div>
   </div>
 

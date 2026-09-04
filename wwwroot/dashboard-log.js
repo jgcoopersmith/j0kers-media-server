@@ -438,6 +438,25 @@ function renderHistory() {
   sel.innerHTML = h;
 }
 
+/* Empties the Recently-watched list.
+
+   The server clears the caller's own entries and the ones with no account
+   against them - which is exactly what this list shows, DLNA viewings
+   included - so what disappears is what was on screen. Nothing on disk is
+   touched: the films are still there and still playable.
+
+   Asked first, because the list is the only record of what has been watched
+   and there is no undo. */
+async function clearWatchHistory(btn) {
+  if (!await confirmAt(btn, "Forget everything in Recently watched?", "Clear")) return;
+  const [ok, data] = await send("DELETE", "/api/history");
+  if (!ok) { alert(data.error || "could not clear the list"); return; }
+  lastHistory = [];
+  historySig = "";
+  renderHistory();
+  refreshHistory(true);
+}
+
 /* Picking a title plays it again; the box drops back to its label so it
    reads as an action rather than a setting that is now "on". */
 function playFromHistory(sel) {

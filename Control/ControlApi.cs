@@ -1306,6 +1306,18 @@ public sealed partial class ControlApi : IDisposable
         // accounts are the administrator's alone, including creating them
         if (path.StartsWith("/api/users", StringComparison.Ordinal)) return AccessLevel.Admin;
 
+        // Clearing the watch list is an administrator's action.
+        //
+        // Only the DELETE: recording what was watched and how far in has to
+        // stay open to a read account, or playback stops remembering where
+        // anyone had got to - which is what the Read entry below is for.
+        //
+        // Forget() removes the rows with no account against them as well as
+        // the caller's own, because that is what the list shows. Those rows
+        // are what a DLNA viewing leaves, and everyone sees them - so a read
+        // account clearing the list would be clearing what the owner sees.
+        if (method == "DELETE" && path == "/api/history") return AccessLevel.Admin;
+
         switch (path)
         {
             // the log names paths, accounts and client addresses — the most
