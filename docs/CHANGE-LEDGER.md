@@ -301,3 +301,88 @@ publish hook. Nothing under `G:\Archive` and no config touched.
   appeared. **Not changed.**
 - `/api/transcode/scan` is polled every ~6s by the Transcode panel and is still
   written to the access log. Same class as the six above. **Not changed.**
+
+---
+
+## 2026-09-03 — A television waited a minute for every folder of films (v2.0.244)
+
+**Reported:** folders on the TV open instantly, media inside them takes over a
+minute.
+
+### Cause
+
+The folders were the clue: a container needs no lookup, a file needs two. For
+every file, `Item()` called `FullResTranscodeFor`, which
+
+1. called the **blocking** `NeedsConversion` — an ffprobe launch, up to 20s, for
+   any file the codec cache had not read; and
+2. read **every** conversion's `source.txt` in turn until one matched.
+
+| Measured on this install | |
+|---|---|
+| conversion folders | 2,904 |
+| one full `source.txt` sweep | 1,321 ms cold, 127 ms warm |
+| `Movies\Action` | 50 media files |
+| scan cost for that one folder | **66 s cold**, 6.3 s warm |
+
+The set gave up part way through the reply and dropped the connection — 20 ×
+`HTTP 500` with `request failed: The specified network name is no longer
+available` on 2026-09-03 — then retried, restarting the scan.
+
+### Changes
+
+- **`Media/VodIndex.cs`** (new) — source file → conversion, built once in the
+  background at startup. Only a map of names: whether a conversion is finished
+  and whole is still decided by reading its playlist and checking every segment
+  at the moment of use, so a half-written or gap-toothed one still falls back to
+  the original. Maintained by a directory **count** check (12 ms vs ~1 s to
+  read), at most once per 10 s.
+- **`FullResTranscodeFor`** — index lookup instead of the scan, and
+  `NeedsConversionCached` instead of the blocking probe, so no unread file can
+  stall a listing.
+- **`DlnaService.ShouldList` / `NoteBrowsed`** — files a set cannot play with no
+  conversion yet are held back, as asked; so are unread files, and browsing a
+  folder now queues it for reading so "unknown" is short-lived. The filter runs
+  **before paging**, or `NumberReturned`/`TotalMatches` would disagree with the
+  rows and a set paging through would stop early.
+
+### Verification (live, on the endpoint the TV actually calls)
+
+| | |
+|---|---|
+| index build | 2,893 conversions in **177 ms**, background |
+| 50 lookups in `Action` | **0.4 ms** (was 6.3 s warm / 66 s cold) |
+| `POST /dlna/control` root | 200 in **5 ms** |
+| browse `Movies` | 11 ms, 9 containers |
+| browse `Movies\Action` | **116 ms**, 317 entries, 129 KB |
+| held back there | 2 `.mkv` with no conversion, one of them HEVC/x265 |
+| held back library-wide | **11 of 5,366 files (0.2%)** |
+
+178 tests pass, 16 of them new. Quality rule tested rather than assumed: a
+scaled copy is never offered, and where both exist the full-resolution one wins
+whatever order the folders are walked in.
+
+### The probe cache, asked for in the same round
+
+It had reached **14 MB / 114,643 entries** for a library of 5,366 files. The
+cause was not staleness — a first attempt at a generic prune dropped only 15%
+and cost **28 seconds** of file stats. Looking at what was actually in it:
+
+| paths | entries |
+|---|---|
+| `G:\Archive\Transcoded` (this server's own HLS segments) | 108,084 |
+| `G:\Archive\Movies` (real library files) | 6,482 |
+
+Nothing ever asks whether a television can play `seg_00417.ts`, but the
+transcode panel can be pointed at the conversions folder and that queued every
+segment for probing. So `TvCodecs` now knows the media root, never probes or
+caches anything under it, and drops those entries **without a stat**.
+
+**114,643 → 3,802 entries. 14 MB → 613 KB. 0.3 s instead of 28.4 s.**
+
+### Live-system actions
+
+Read-only: logs, the probe cache (worked on a **copy** in scratch, never the
+installed file), the conversions folder, the library. One `POST /dlna/control`
+against the running server — a read. Two server restarts from the publish hook.
+Nothing under `G:\Archive` written.
