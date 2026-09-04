@@ -489,10 +489,51 @@ public sealed class FfmpegManager : IDisposable
     /// they are probed; guessing from config produced impossible command
     /// lines (e.g. remuxing MPEG-2 into fMP4).
     /// </summary>
-    private bool NeedsFmp4(string? sourceFile)
+    /// <summary>
+    /// Whether this file can be packaged for HLS without being encoded again.
+    ///
+    /// A conversion exists to put a film in a shape the player can stream, and
+    /// for a file whose codecs already match the ones being asked for that is
+    /// a container change and nothing more. Encoding it anyway costs three
+    /// things and buys none of them back: hours of GPU, a second lossy
+    /// generation on top of whatever the source already lost, and - through
+    /// AudioArgs - a 5.1 soundtrack folded down to stereo.
+    ///
+    /// Measured here: Avengers Endgame, already h264/aac at 2.38 Mbps, was
+    /// re-encoded to h264 at 2.30 Mbps in 13 minutes. Nothing about it needed
+    /// converting; the player only needed it in segments.
+    ///
+    /// Scaling is the one thing that genuinely requires an encode, so a
+    /// request for a specific height never takes this path.
+    /// </summary>
+    private bool CanRemuxToHls(string file, int height)
     {
-        var copyVideo = VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase);
-        var copyAudio = AudioEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase);
+        if (height > 0) return false;
+        if (VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase)) return false;  // already copying
+        var (video, audio) = ProbeCodecs(file);
+        if (video is null || audio is null) return false;   // unreadable: encode, as before
+        return CodecFamily(video) == CodecFamily(VideoEncoder)
+            && CodecFamily(audio) == CodecFamily(AudioEncoder);
+    }
+
+    /// <summary>
+    /// The codec behind an encoder name, so a source can be compared with what
+    /// is being asked for: h264_nvenc, libx264 and h264 are all h264.
+    /// </summary>
+    private static string CodecFamily(string name)
+    {
+        var n = name.ToLowerInvariant();
+        if (n.StartsWith("lib", StringComparison.Ordinal)) n = n[3..];
+        var cut = n.IndexOf('_');            // h264_nvenc -> h264
+        if (cut > 0) n = n[..cut];
+        return n switch { "x264" => "h264", "x265" or "h265" => "hevc", _ => n };
+    }
+
+    private bool NeedsFmp4(string? sourceFile, bool copyingAnyway = false)
+
+    {
+        var copyVideo = copyingAnyway || VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase);
+        var copyAudio = copyingAnyway || AudioEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase);
         if (!copyVideo && !copyAudio)
             return Fmp4Only.Contains(VideoEncoder) || Fmp4Only.Contains(AudioEncoder);
 
@@ -832,16 +873,35 @@ public sealed class FfmpegManager : IDisposable
             // -progress writes machine-readable key=value lines to stdout;
             // -nostats drops the human progress bar that would otherwise
             // repeat the same information over stderr
+            // Decided once, before anything is built: the container choice
+            // below has to agree with it.
+            var remux = CanRemuxToHls(info.FullName, height);
+            if (remux) Log.Info("ffmpeg", $"{info.Name} is already {VideoEncoder.Split('_')[0]}/{AudioEncoder} - packaging it without re-encoding");
             var args = new List<string> { "-hide_banner", "-loglevel", "error", "-nostats",
                                           "-progress", "pipe:1", "-y" };
             // before -i, which is where input options belong: ffmpeg refuses
-            // -hwaccel after the file it applies to
-            args.AddRange(HardwareDecodeArgs(info.FullName));
+            // -hwaccel after the file it applies to. A remux decodes
+            // nothing, so there is no decoder to accelerate.
+            if (!remux) args.AddRange(HardwareDecodeArgs(info.FullName));
             args.AddRange(new[] { "-i", info.FullName });
-            if (VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase))
+            if (remux)
+            {
+                // Nothing to encode: the file already carries the codecs being
+                // asked for, so the picture and the soundtrack are copied
+                // through untouched, surround channels and all.
+                //
+                // The cost of copying is that keyframes cannot be placed - a
+                // segment can only end where the source already has one, so
+                // segments come out uneven and a seek lands on the nearest.
+                // That is a scrub bar that is a few seconds coarse against a
+                // generation of picture and the whole of the surround mix.
+                args.AddRange(new[] { "-c:v", "copy", "-c:a", "copy" });
+            }
+            else if (VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase))
             {
                 args.AddRange(new[] { "-c:v", "copy" });
             }
+
             else
             {
                 if (height > 0) args.AddRange(new[] { "-vf", $"scale=-2:{height}" });
@@ -862,9 +922,9 @@ public sealed class FfmpegManager : IDisposable
                 // What that costs differs by encoder — see KeyframeArgs.
                 args.AddRange(KeyframeArgs(VodSegmentSeconds));
             }
-            args.AddRange(AudioArgs());
+            if (!remux) args.AddRange(AudioArgs());   // a copy carries the source's own audio
 
-            var fmp4 = NeedsFmp4(info.FullName);
+            var fmp4 = NeedsFmp4(info.FullName, remux);
             var segExt = fmp4 ? "m4s" : "ts";
             args.AddRange(new[] { "-f", "hls", "-hls_time", Inv(VodSegmentSeconds), "-hls_list_size", "0",
                                   "-hls_playlist_type", "event" });
@@ -2111,7 +2171,26 @@ public sealed class FfmpegManager : IDisposable
                 attempts.Add((segs[0], null));
             }
         }
-        if (File.Exists(playlist))
+        // The playlist is only safe to read once it says it is finished.
+        //
+        // Without EXT-X-ENDLIST an HLS playlist is a LIVE stream, and ffmpeg
+        // treats it as one: asked to seek 60 seconds into a playlist that
+        // lists a couple of segments, it waits for the rest to arrive. The
+        // rest arrives into a file it is holding open, and the grab never
+        // ends. Seen here on a conversion that had just started: the thumbnail
+        // was attempted one second in.
+        //
+        // The segment attempts above need no such care - a .ts file is a
+        // finished thing on its own - so an unfinished conversion simply gets
+        // its thumbnail from a segment, or waits for the next attempt.
+        var finished = false;
+        try
+        {
+            finished = File.Exists(playlist)
+                && File.ReadAllText(playlist).Contains("#EXT-X-ENDLIST", StringComparison.Ordinal);
+        }
+        catch { /* unreadable: treat as unfinished */ }
+        if (finished)
         {
             attempts.Add((playlist, "60"));
             attempts.Add((playlist, "5"));
@@ -2158,11 +2237,25 @@ public sealed class FfmpegManager : IDisposable
                 RedirectStandardError = true,
             };
             foreach (var a in args) psi.ArgumentList.Add(a);
-            using var p = Services.ProcessJob.Start(psi);
-            if (p is null) return false;
-            p.StandardError.ReadToEnd();
-            if (!p.WaitForExit(timeoutMs)) { try { p.Kill(true); } catch { } return false; }
-            return p.ExitCode == 0;
+            // The timeout has to be reachable, and it was not.
+            //
+            // This used to read stderr to the end and then check the clock:
+            //
+            //     p.StandardError.ReadToEnd();
+            //     if (!p.WaitForExit(timeoutMs)) ...
+            //
+            // ReadToEnd returns when the pipe closes, and the pipe closes when
+            // the process exits - so for a process that never exits it never
+            // returns, and the line below it is never reached. Measured: three
+            // thumbnail grabs given a 20-second limit ran for twenty-four
+            // minutes, respawning as fast as they were killed.
+            //
+            // An earlier pass over this file looked at exactly these lines and
+            // cleared them, on the grounds that only stdout-not-being-drained
+            // could deadlock. That is a different fault. This one needs no full
+            // pipe at all - only a child that does not finish.
+            var run = Services.ProcessJob.Run(psi, timeoutMs);
+            return run is not null && run.Value.Ok;
         }
         catch
         {

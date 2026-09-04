@@ -352,11 +352,11 @@ public sealed class SubtitleManager
                 CreateNoWindow = true,
             };
             foreach (var a in args) psi.ArgumentList.Add(a);
-            using var p = Services.ProcessJob.Start(psi);
-            if (p is null) return false;
-            p.StandardError.ReadToEnd();
-            if (!p.WaitForExit(60_000)) { try { p.Kill(true); } catch { } return false; }
-            return p.ExitCode == 0;
+            // Same shape, same fault as FfmpegManager.RunFfmpeg: reading
+            // stderr to the end waits for the process to exit, so the
+            // timeout below it could never fire on one that does not.
+            var run = Services.ProcessJob.Run(psi, 60_000);
+            return run is not null && run.Value.Ok;
         }
         catch
         {
