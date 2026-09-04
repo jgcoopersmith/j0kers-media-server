@@ -386,3 +386,60 @@ Read-only: logs, the probe cache (worked on a **copy** in scratch, never the
 installed file), the conversions folder, the library. One `POST /dlna/control`
 against the running server — a read. Two server restarts from the publish hook.
 Nothing under `G:\Archive` written.
+
+---
+
+## 2026-09-03 — A paused film resumed in four colours (v2.0.246)
+
+**Reported:** pause a film on the TV over DLNA and press play again; the video
+looks like four colours only, but it plays and the audio is fine.
+
+### What it was not
+
+Two hypotheses ruled out by measurement before touching anything:
+
+- **Not the byte arithmetic.** A mid-file range from the live server came back
+  byte-for-byte identical to the same offset read from disk, with a correct
+  `Content-Range: bytes 99737384-99745575/199474768`.
+- **Not ffmpeg being interrupted** (the owner's own guess). No ffmpeg runs
+  during playback of a finished conversion at all — the log shows only the
+  `/dlna/file` requests — because it is static segments handed over as one file.
+- **Not missing parameter sets in the file.** A whole segment decoded from its
+  start reports `h264 720x576 yuv420p` with no complaint.
+
+### Cause
+
+Where the set resumes. Each HLS segment opens with the H.264 parameter sets and
+a keyframe and nothing repeats them in between, so an offset landing mid-segment
+hands the decoder a picture it has no instructions for. It does not fail — it
+decodes anyway and paints the result.
+
+Measured with ffmpeg against the running server, same conversion:
+
+| resume offset | result |
+|---|---|
+| 98,094,264 (segment start) | decodes silently |
+| 98,523,656 (mid-segment) | `non-existing PPS 0 referenced`, `no frame!` |
+
+### Change
+
+`DlnaService.ServeTranscode` — a partial request starts at the beginning of the
+segment it falls in. `Content-Range` reports the real start, so every byte
+offset stays truthful and seeking still works. The rewind is bounded by one
+segment.
+
+### Verification (live)
+
+The identical mid-segment request that produced the decoder errors now returns
+`Content-Range: bytes 98094264-101523656/199474768` — a rewind of 429,392 bytes,
+roughly three seconds — and decodes **clean**. 16 tests pin the arithmetic:
+never forward, never before the start, never more than one segment, and an
+offset already on a boundary is left exactly alone.
+
+**Quality is unchanged** — the same bytes, starting slightly earlier.
+
+### Live-system actions
+
+Read-only: the log, one conversion's segments, and `GET /dlna/file` range
+requests against the running server. One server restart from the publish hook.
+Nothing written under `G:\Archive`.
