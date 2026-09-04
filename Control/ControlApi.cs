@@ -3971,11 +3971,34 @@ public sealed partial class ControlApi : IDisposable
                 // playing or whether a conversion stood in for it. Without
                 // that, a report of "it looks wrong when I resume" cannot be
                 // told apart from the same words about a different code path.
-                Log.Debug("dlna", $"serving {Path.GetFileName(file)} "
+                // What the set actually asked for, in full.
+                //
+                // A television that pauses and resumes an MP4 comes back with
+                // a byte offset and no way to decode from it - the parameter
+                // sets live in the header and are never repeated. Whether that
+                // can be fixed properly turns on one question this log could
+                // not answer: does the set ever ask by TIME instead of by byte?
+                // DLNA has TimeSeekRange.dlna.org for exactly this, and a
+                // server may re-originate a stream to answer it, which is the
+                // one case where handing back different bytes is legitimate.
+                //
+                // So every header is recorded, once per /dlna/file request -
+                // a handful per film, not a poll. Info rather than debug
+                // because the answer is wanted from an ordinary viewing, not
+                // from a session someone remembered to turn logging up for.
+                Log.Info("dlna", $"serving {Path.GetFileName(file)} "
                     + (transcode is not null
                         ? $"as a conversion ({transcode.Parts.Count} part(s), {transcode.TotalBytes} bytes, {transcode.ContentType})"
-                        : "as the original file")
-                    + $" range=\"{ctx.Request.Headers["Range"] ?? "none"}\"");
+                        : $"as the original file ({new FileInfo(file).Length} bytes)"));
+                foreach (var header in ctx.Request.Headers.AllKeys)
+                {
+                    if (header is null) continue;
+                    // Never the query string and never a credential: the same
+                    // rule the access log keeps.
+                    if (header.Equals("Authorization", StringComparison.OrdinalIgnoreCase)
+                        || header.Equals("Cookie", StringComparison.OrdinalIgnoreCase)) continue;
+                    Log.Info("dlna", $"    {header}: {ctx.Request.Headers[header]}");
+                }
 
                 // The cache-eviction sweep deletes whichever VOD directory
                 // was written to least recently, to make room for a new
