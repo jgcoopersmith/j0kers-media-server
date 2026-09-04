@@ -200,11 +200,15 @@ function adoptBarePreferences() {
    put right here rather than waiting for a reload. */
 function reapplyPreferences() {
   try {
+    // Always set, never only-when-found. Acting only on a saved value left
+    // the previous account's theme on screen for an account that had none of
+    // its own - which is not "no preference", it is somebody else's. The
+    // fallback is the same one the inline <head> script uses.
     const t = prefGet("j0kers-theme");
-    if (THEMES.includes(t)) {
-      document.documentElement.setAttribute("data-theme", t);
-      paintThemeButton();
-    }
+    document.documentElement.setAttribute("data-theme",
+      THEMES.includes(t) ? t
+        : matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+    paintThemeButton();
   } catch { /* private mode */ }
   try { if (typeof applyCardOrder === "function") applyCardOrder(); } catch { }
   try { if (typeof restoreCardViews === "function") restoreCardViews(); } catch { }

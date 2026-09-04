@@ -406,10 +406,13 @@ function setCardView(key, v, rerender) {
 
 /* Restores the remembered choice and points the control at it. */
 function loadCardView(key) {
-  try {
-    const saved = prefGet("j0kers-view-" + key);
-    if (VIEW_NAMES.includes(saved)) cardViews[key] = saved;
-  } catch { /* private mode */ }
+  // Assigned either way. Setting it only when something was saved meant an
+  // account with no choice of its own kept whatever the account before it had
+  // chosen - the value was already on screen from the pass that ran before
+  // anyone knew whose preferences these were.
+  let saved = null;
+  try { saved = prefGet("j0kers-view-" + key); } catch { /* private mode */ }
+  cardViews[key] = VIEW_NAMES.includes(saved) ? saved : "default";
   const sel = $(key + "-view");
   if (sel) sel.value = cardView(key);
 }
