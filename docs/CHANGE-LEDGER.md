@@ -535,3 +535,56 @@ The v2.0.244 browse fix (66 s → 116 ms) and the v2.0.246 resume snapping are
 real and unaffected — the latter works for files served as conversions, which
 `Blade.mp4` is not. The owner's workaround stands: exit to the menu and restart,
 which resumes at position.
+
+---
+
+## 2026-09-04 — RTSP mounts and Live channels are administrators-only (v2.0.251)
+
+**Asked for:** hide the RTSP mounts and Live channels cards unless you are an
+admin.
+
+### Done, and why it is more than CSS
+
+Both cards carry `admin-only`, which the page already understood. But hiding a
+card makes the page honest, not the server — a read account could still fetch:
+
+| endpoint | what it returns |
+|---|---|
+| `GET /api/mounts` | each mount's **source path on this machine** |
+| `GET /api/channels` | each channel's **URL**, which for an IPTV provider routinely carries credentials |
+
+Checked before claiming it: the six channels configured here have no
+credentials in their URLs today (counted by shape, values never printed), so
+this was clutter rather than an active leak — but the endpoint would carry them
+for anyone who adds an IPTV source.
+
+So both paths are now `AccessLevel.Admin`, for **every method** rather than only
+the reads. An account that cannot see the card has no business adding a mount,
+and a GET gated above a POST on the same path is a rule nobody can reason about.
+
+The dashboard also stops polling both unless the account can see them, so a read
+account is not collecting a 403 every fifteen seconds for a card that is not on
+its page.
+
+### Verification
+
+Signed in as the real passwordless `guest` account (role `read`) against the
+running server:
+
+| endpoint | result |
+|---|---|
+| `/api/mounts` | **403** |
+| `/api/channels` | **403** |
+| `/api/status` | 200 |
+| `/api/library` | 200 |
+| `/api/favorites` | 200 |
+
+202 tests pass.
+
+### Test residue
+
+The sign-in created two `guest` sessions in `sessions.json`. `POST
+/api/auth/logout` returned 411 (it wants a body) and the cookie jar had already
+been removed, so they were cleared the way the server clears every session — the
+restart this ledger commit causes. Confirmed empty afterwards. No other state
+was touched; nothing under `G:\Archive` was read or written.
