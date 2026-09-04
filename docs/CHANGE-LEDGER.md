@@ -661,3 +661,81 @@ accesses rather than by the tests.
 A local HTTP server on 127.0.0.1:8795 and a copy of `dashboard-core.js` under
 the scratch directory. Both removed; no python processes left, scratch empty.
 No server state touched, nothing written under `G:\Archive`.
+
+---
+
+## 2026-09-04 — The per-account preferences did not work (v2.0.256 → v2.0.258)
+
+**Reported:** the view of each window was not being saved as guest.
+
+### Three faults, all introduced with v2.0.254
+
+1. **Two key names were written from memory, not read off the code.** The
+   adoption list said `j0kers-cards` for the card order (really
+   `j0kers-card-order`) and looked for folded state under `j0kers-fold-`
+   (really `fold:` + slug). Neither ever matched, so a first sign-in silently
+   dropped the card order and folded state somebody already had. The list now
+   names the file and constant each key comes from, beside it.
+2. **Folded state was restored only while the fold buttons were built** — at
+   load, long before `refreshAuth` says whose preferences these are. Nothing
+   re-applied it on a switch. Split into `applySavedFolding()` and re-run.
+3. **The theme and card views acted only when they found a saved value.** An
+   account with no choice of its own is not "no preference" — the value on
+   screen belongs to whoever was there before. Both now assign either way,
+   falling back to the same light/dark guess the inline `<head>` script makes,
+   and to `default` for a view.
+
+Fault 3 was found only by staging a browser as one account and signing in as
+another — the case that matters, and the one v2.0.254 was never tried against.
+The harness written for it tested a single account and passed all sixteen
+assertions while three real bugs sat underneath.
+
+### Verification (live, real accounts, real browser)
+
+Browser staged as `j0ker` (theme `royal`, hls view `info`, all 9 cards folded),
+then signed in as `guest`:
+
+| | before the fix | after |
+|---|---|---|
+| theme | `royal` (j0ker's) | `light` (default) |
+| hls view | `info` (j0ker's) | `default` |
+| folded cards | 0/9 | 0/9 |
+| j0ker's keys | — | all 11 intact |
+
+Then guest's own choices — theme `cloud`, hls view `condensed`, one card folded
+— all survived a reload, with `j0kers-theme@j0ker` still `royal` and
+`j0kers-view-hls@j0ker` still `info`.
+
+### What is now stored per account
+
+Suffixed with the account name: theme; card order; folded state per card; view
+mode per card (hls, mounts, tv, ch); last library root; shuffle; loop; playback
+speed; playback resolution; subtitle language; last transcode folder; transcode
+sort; conversion order; HLS stream order; tuner host.
+
+**Not** per account, deliberately: the API token. It is a credential, not a
+preference, and signing out already removes it.
+
+### v2.0.258 — Clear list for Recently watched
+
+The Sessions card holds two lists and only one needed clearing: the table below
+is live viewings inferred from traffic, which expire on their own after 90
+seconds. The Recently-watched list beside the title is what accumulates — 17
+entries here, going back a week.
+
+`DELETE /api/history` already existed and nothing called it, at `Read`. That
+mattered: `Forget` removes the rows with **no account** against them as well as
+the caller's own, and those are what a DLNA viewing leaves — so a guest clearing
+"their" list would have cleared what the owner sees. The DELETE is `Admin` now;
+only the DELETE, so recording what was watched and how far in stays open to a
+read account.
+
+Verified as the real guest: `DELETE /api/history` → **403**,
+`POST /api/history/position` → **200**, history intact at 17 entries. 202 tests
+pass.
+
+### Test residue
+
+localStorage in the test browser cleared (16 keys). A guest sign-in session,
+cleared by the restart this commit causes. No files written under `G:\Archive`;
+`history.json` untouched.
