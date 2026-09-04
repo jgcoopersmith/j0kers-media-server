@@ -131,8 +131,14 @@ try { prefUser = localStorage.getItem(PREF_USER_KEY) || ""; } catch { /* private
 
 function prefKey(key) { return prefUser ? key + "@" + prefUser : key; }
 function prefGet(key) { try { return localStorage.getItem(prefKey(key)); } catch { return null; } }
-function prefSet(key, value) { try { localStorage.setItem(prefKey(key), value); } catch { /* private mode */ } }
-function prefRemove(key) { try { localStorage.removeItem(prefKey(key)); } catch { /* private mode */ } }
+function prefSet(key, value) {
+  try { localStorage.setItem(prefKey(key), value); } catch { /* private mode */ }
+  queuePrefSync(key, value);
+}
+function prefRemove(key) {
+  try { localStorage.removeItem(prefKey(key)); } catch { /* private mode */ }
+  queuePrefSync(key, "");            // an empty value is how the server is told to forget one
+}
 
 /* The keys that existed before any of this, so a first sign-in keeps the
    layout and theme somebody already has rather than starting them over. */
@@ -424,6 +430,99 @@ function toggleTheme() {
 }
 paintThemeButton();
 
+
+/* ---- and the account holds them, not the browser ----
+
+   Suffixing the keys kept two accounts on one browser apart, which was the
+   first half of the problem. It did nothing about the other half: localStorage
+   is per browser AND per profile, so the same account still got a different
+   dashboard on a phone, a second Chrome profile started from nothing, and an
+   incognito window threw everything away when it closed. That last one is what
+   it looked like from the outside - settings saved, survived a reload, and
+   were gone the next time.
+
+   So the server keeps them, keyed by account, and localStorage is demoted to a
+   cache. The cache still matters: it is what the inline <head> script reads to
+   set the theme before the first paint, and the server's answer cannot arrive
+   that early. So the page paints from the cache, then the account's real
+   settings land and are applied over the top if they differ. */
+
+let prefSyncTimer = 0;
+const prefPending = new Map();          // key -> value, waiting to go up
+
+/* Queued rather than sent per change: dragging a card writes an order on every
+   drop, and toggling through seven themes to find one would be seven requests.
+   A short delay collapses a burst into one PUT. */
+function queuePrefSync(key, value) {
+  if (!prefUser) return;                       // nobody signed in: cache only
+  if (!PREF_KEYS.includes(key) && !PREF_PREFIXES.some(p => key.startsWith(p))) return;
+  prefPending.set(key, value === null || value === undefined ? "" : String(value));
+  clearTimeout(prefSyncTimer);
+  prefSyncTimer = setTimeout(flushPrefSync, 400);
+}
+
+async function flushPrefSync() {
+  if (!prefUser || prefPending.size === 0) return;
+  const body = Object.fromEntries(prefPending);
+  prefPending.clear();
+  try {
+    await fetch("/api/preferences", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...headers() },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    // Offline or refused: the browser's copy is still right, and the next
+    // change pushes this one up with it. Losing a setting is not worth an
+    // error message over.
+  }
+}
+
+/* A page being closed mid-burst would otherwise drop the last change. */
+addEventListener("pagehide", () => { if (prefPending.size) flushPrefSync(); });
+
+/* Pulls the account's settings down and puts them in the cache, then re-applies
+   whatever was painted from the old cache.
+ 
+   The server wins where both have a value: it is the same account's own choice
+   made somewhere else, and "somewhere else" is the whole point. Where the
+   server has nothing and the browser does, the browser's is pushed up - so the
+   settings somebody already had on this machine become theirs everywhere
+   rather than being thrown away on the first sign-in. */
+async function pullPreferences() {
+  if (!prefUser) return;
+  let server;
+  try {
+    const r = await fetch("/api/preferences", { headers: headers() });
+    if (!r.ok) return;
+    server = (await r.json()).preferences || {};
+  } catch { return; }                          // offline: the cache stands
+
+  const push = {};
+  for (const key of Object.keys(server)) {
+    try { localStorage.setItem(prefKey(key), server[key]); } catch { /* private mode */ }
+  }
+  // anything this browser knows that the account does not
+  let local = [];
+  try { local = Object.keys(localStorage); } catch { local = []; }
+  const suffix = "@" + prefUser;
+  for (const stored of local) {
+    if (!stored.endsWith(suffix)) continue;
+    const key = stored.slice(0, -suffix.length);
+    if (!PREF_KEYS.includes(key) && !PREF_PREFIXES.some(p => key.startsWith(p))) continue;
+    if (Object.prototype.hasOwnProperty.call(server, key)) continue;
+    try {
+      const v = localStorage.getItem(stored);
+      if (v !== null && v !== "") push[key] = v;
+    } catch { /* private mode */ }
+  }
+  if (Object.keys(push).length) {
+    for (const [k, v] of Object.entries(push)) prefPending.set(k, v);
+    flushPrefSync();
+  }
+  reapplyPreferences();
+}
+
 /* Who are we, and does this server have accounts at all? Drives both the
    sign-in gate and which controls the page is allowed to show. */
 async function refreshAuth() {
@@ -439,6 +538,9 @@ async function refreshAuth() {
   // this is the first moment anybody knows whose they are - the theme and
   // the card order have already been painted from whoever was here last.
   usePreferencesFor(me && me.username);
+  // The account's own settings, from the server. Not awaited: nothing on
+  // the page needs to wait for it, and the cache is already painted.
+  pullPreferences();
   $("acct-pill").textContent = me ? (me.username || "local") : "sign in";
   $("acctbtn").style.display = authState.authRequired ? "" : "none";
   if (!authState.authenticated) { showLogin(); return false; }

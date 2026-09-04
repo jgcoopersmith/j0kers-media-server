@@ -128,6 +128,7 @@ public sealed partial class ControlApi : IDisposable
     private readonly Media.LibraryStore _library;
     private readonly Media.FavoritesStore _favorites;
     private readonly Media.WatchHistory _history;
+    private readonly Media.UserPreferences _preferences;
 
     /// <summary>
     /// The DLNA server, or null when it is off — which is also the switch
@@ -408,6 +409,7 @@ public sealed partial class ControlApi : IDisposable
         _links.HideExistingConversionsOnce(MediaRootPath());
         _favorites = new Media.FavoritesStore(baseDirectory);
         _history = new Media.WatchHistory(baseDirectory);
+        _preferences = new Media.UserPreferences(baseDirectory);
         _dlnaShare = new Dlna.DlnaShare(baseDirectory);
 
         // What a television can and cannot decode — needs ffmpeg to probe
@@ -1356,6 +1358,10 @@ public sealed partial class ControlApi : IDisposable
             // stop recording where anyone had got to.
             case "/api/history":
             case "/api/history/position":
+            // An account's own dashboard settings. Read, because every
+            // signed-in account has them and they are nobody else's
+            // business - the handlers below only ever touch the caller's.
+            case "/api/preferences":
                 return AccessLevel.Read;
 
             // The codec list the add-content forms show. /api/browse used to
@@ -1894,6 +1900,8 @@ public sealed partial class ControlApi : IDisposable
 
         // what has been watched lately
         [("GET", "/api/history")] = Sync((api, ctx, auth) => api.WriteHistory(ctx, auth)),
+        [("GET", "/api/preferences")] = Sync((api, ctx, auth) => api.WritePreferences(ctx, auth)),
+        [("PUT", "/api/preferences")] = Sync((api, ctx, auth) => api.SavePreferences(ctx, auth)),
         [("DELETE", "/api/history")] = Sync((api, ctx, auth) => api.ForgetHistory(ctx, auth)),
 
         // media engine (ffmpeg)
@@ -2476,6 +2484,36 @@ public sealed partial class ControlApi : IDisposable
         // no path clears the caller's whole history
         var target = ctx.Request.QueryString["path"] ?? "";
         WriteJson(res, 200, new { removed = _history.Forget(auth.Name, target) });
+    }
+
+    /// <summary>
+    /// GET /api/preferences - this account's dashboard settings.
+    ///
+    /// Keyed by account id rather than name, so renaming an account keeps its
+    /// settings. An unauthenticated or accountless caller gets an empty set
+    /// rather than an error: the dashboard then simply keeps using the
+    /// browser's own copy, which is what it did before any of this existed.
+    /// </summary>
+    private void WritePreferences(HttpListenerContext ctx, AuthResult auth)
+        => WriteJson(ctx.Response, 200, new { preferences = _preferences.For(auth.User?.Id ?? "") });
+
+    /// <summary>
+    /// PUT /api/preferences - merges the settings the dashboard sends in.
+    ///
+    /// Merge rather than replace, so a page that has not learned about a
+    /// setting a newer build added cannot delete it. An empty value removes a
+    /// key, which is the only way a client has to forget one.
+    /// </summary>
+    private void SavePreferences(HttpListenerContext ctx, AuthResult auth)
+    {
+        var res = ctx.Response;
+        if (auth.User is null) { WriteJson(res, 200, new { preferences = new Dictionary<string, string>() }); return; }
+        if (!TryReadJsonBody<Dictionary<string, string>>(ctx, out var body, out var error))
+        { BadRequest(res, error); return; }
+        WriteJson(res, 200, new
+        {
+            preferences = _preferences.Merge(auth.User.Id, body ?? new Dictionary<string, string>()),
+        });
     }
 
     /// <summary>GET /api/play - whether a conversion has produced enough to start playing.</summary>
