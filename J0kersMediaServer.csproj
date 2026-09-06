@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <!-- Windowed, so the desktop icon opens no console window. Launched from
@@ -9,7 +9,7 @@
     <Nullable>enable</Nullable>
     <RootNamespace>J0kersMediaServer</RootNamespace>
     <AssemblyName>j0kers-media-server</AssemblyName>
-    <Version>2.0.263</Version>
+    <Version>2.0.264</Version>
     <ApplicationIcon>assets\j0kers.ico</ApplicationIcon>
     <!-- Protocol text (HLS EXTINF, RTSP dates) must never be locale-formatted:
          a de-DE machine would otherwise emit "#EXTINF:6,000," and break playback. -->
@@ -53,6 +53,9 @@
        own csproj; nothing under tests\ belongs to this one. -->
   <ItemGroup>
     <Compile Remove="tests\**" />
+    <!-- The setup stub is its own program with its own project; the SDK would
+         otherwise sweep its source into the server. -->
+    <Compile Remove="installer\**" />
     <EmbeddedResource Remove="tests\**" />
     <None Remove="tests\**" />
   </ItemGroup>

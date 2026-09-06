@@ -1,4 +1,4 @@
-# j0kers Media Server - installer.
+﻿# j0kers Media Server - installer.
 #
 # Installs, or upgrades in place. The point of the upgrade path is that a
 # machine already running this server keeps everything it has: accounts, the
@@ -194,6 +194,11 @@ if (-not $Quiet) {
 # server installed elsewhere on the same machine is left alone.
 $running = @(Get-CimInstance Win32_Process -Filter "Name='$exeName'" -ErrorAction SilentlyContinue |
              Where-Object { $_.ExecutablePath -and (Split-Path -Parent $_.ExecutablePath) -eq $TargetDir.TrimEnd('\') })
+# Whether this upgrade interrupted a server that was up. Something that was
+# running before an update should be running after it: leaving it stopped
+# means an update silently takes the media server off the network until
+# somebody notices and clicks the icon.
+$wasRunning = $running.Count -gt 0
 if ($running.Count -gt 0) {
     # Name what is actually running. "Stopping the running server" when the
     # person is sure they shut it down is confusing rather than informative:
@@ -368,7 +373,14 @@ if ($upgrade) {
 }
 Write-Host ''
 
-if (-not $Quiet) {
+if ($wasRunning) {
+    # It was up when this started, so put it back without asking. Asking
+    # would be asking whether to undo the interruption this installer just
+    # caused, which is not a question.
+    Start-Process -FilePath $targetExe -ArgumentList 'server.json' -WorkingDirectory $TargetDir
+    Write-Host 'The server was running, so it has been started again.' -ForegroundColor Green
+}
+elseif (-not $Quiet) {
     $go = Read-Host 'Start the server now? [Y/n]'
     if (-not $go -or $go -match '^(y|yes)$') {
         Start-Process -FilePath $targetExe -ArgumentList 'server.json' -WorkingDirectory $TargetDir

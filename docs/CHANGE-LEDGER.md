@@ -908,3 +908,111 @@ Killed the stuck thumbnail processes (3, then 2 respawned). Read-only
 elsewhere: logs, probe cache, `ffprobe` on three sources. A 90-second remux
 written to scratch and deleted. Nothing under `G:\Archive` written or removed.
 202 tests pass.
+
+---
+
+## 2026-09-06 — One file that installs it anywhere (v2.0.263 → v2.0.264)
+
+**Asked for:** a self-installing package that upgrades cleanly over each
+previous version, sitting on the desktop, and copyable to another Windows 11
+machine. Then: use this ledger to clean up after the testing and audit myself.
+
+### What the package is
+
+    [ setup stub ][ payload.zip ][ 8-byte length ][ 16-byte marker ]
+
+One executable, because it has to be carried to a machine that has nothing.
+`installer/Setup` is a self-contained, trimmed .NET single-file program (13 MB)
+that reads the footer, streams the payload out of its own tail in 1 MB chunks
+to `%TEMP%\j0kers-setup-<8hex>`, runs `Install.cmd` with whatever arguments it
+was given, and deletes the temp directory in a `finally`.
+
+ffmpeg and ffprobe travel inside it. They are most of the 235 MB and they do
+not change between versions, but a package that leaves them out only installs
+onto a machine that already has them, which is not what "copy this to another
+box" means. They are taken from this install first, so what ships is the pair
+the server has been running against — not whatever WinGet has today.
+
+### Two packagers were tried and abandoned before this one
+
+| Approach | Why it was dropped |
+|---|---|
+| 7-Zip SFX | `RunProgram` in the config is ignored by `7z.sfx`; it extracts and stops. |
+| IExpress | Built a package that extracted and never launched the installer. |
+
+Both were discarded on **observed behaviour**, not on reputation. The stub
+replaced them only after checking the premise it depends on: 1 MB was appended
+to a published .NET single-file exe and the exe still ran, so the payload can
+ride in the tail without disturbing the host.
+
+### Upgrading over a running server
+
+Tested as the real thing, not simulated: the package was run `-Quiet` against a
+**running** server (pid 7376). It stopped it, replaced the binary, and started
+it again (pid 5596). Every config file was left as it was.
+
+`Install.ps1` gained the half that was missing — it now records whether the
+server was running *before* it started, and restarts it only in that case.
+Upgrading a server that was down used to leave it running.
+
+### PowerShell 5.1 faults found while building it
+
+* `System.IO.Compression.FileSystem` is not loaded by default — `Add-Type` it.
+* `Where-Object` returning a single item returns *the item*, not a one-element
+  array, so `$ffSources[0]` handed back the character `C`. Wrapped in `@()`.
+* `config/providers.json` does not exist in this repository. The older
+  `build-package.ps1` assumes it does and still has that latent bug; the new
+  script ships without it and lets the server write its own.
+
+### Self-audit: my own residue in the accounts file
+
+Every test sign-in with *remember this device* mints a 365-day API key
+(`ControlApiAuth.cs:301`), and nothing prunes them. The 2026-09-04 preference
+testing left **ten** on the `guest` account, created between 16:07 and 17:27
+UTC, none used since 17:28 that day. j0ker's four are untouched and one is in
+daily use.
+
+`users.json.previous` — the installer's pre-upgrade backup — exists only
+because of the test install above, and holds the twelve-key state.
+
+**Not applied.** Writing to the accounts file is refused by this session's
+permission gate, correctly. The removal is prepared and proven instead:
+`Clean up Claude test keys.ps1` on the desktop cuts exactly those ten key
+objects by id, refuses to write anything that does not parse as JSON, backs the
+file up first, and stops and restarts the server around the edit because the
+running server holds the accounts in memory and would write the old set back.
+
+Verified against a copy: 10 removed, j0ker 4 and guest 2 remaining, output
+**byte-identical** to a separately validated hand-edit, and the live server's
+pid unchanged across the run.
+
+### A mistake made during that verification
+
+The first version of that script was tested before a guard was added, and the
+patch adding the guard failed to apply without my noticing. It ran against a
+copy but still stopped the **live server**, then failed to restart it because
+it was pointed at the copy's directory. The server was down for about ninety
+seconds. The guard now compares the target against the real install path and
+only ever stops the server for that one.
+
+### Live-system actions
+
+| Action | Detail |
+|---|---|
+| Server stopped and started | 4 times: once deliberately, once by the ungated script above, twice to restore it. Idle each time — no media request since 16:08. |
+| Package installed | `-Quiet` upgrade over the running install. Config untouched. |
+| `users.json` | **Read only.** Backed up to the scratchpad. Not modified. |
+| `users.json.previous` | Left in place — deleting it was refused with the same gate. |
+| Dashboard windows | Each restart opens one (`openDashboardOnStart`). Two are live now; close any spares by hand. |
+| Desktop | `j0kers Media Server Setup <version>.exe` replaced; older packages removed. |
+| Scratchpad | `payload.zip`, `sfxtest/`, `iextest/`, `stub/`, `appendtest.exe`, test copies of `users.json` — all under the session scratchpad, none in the repository or the install. |
+
+Checked and **not** a fault: the `page opened` line every ~20 seconds is the
+dashboard's live link being deliberately closed and remade (`ControlApi.cs:899`),
+two open pages reconnecting. Left alone.
+
+### Still outstanding from 2026-09-04
+
+Infinity War's conversion is still the one broken artefact — 1497 segments on
+disk, a playlist listing one, no `ENDLIST`. Deleting it would let it remake as
+a fast lossless remux. Not deleted without asking.

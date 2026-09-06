@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>j0kers-setup-stub</AssemblyName>
+    <RootNamespace>J0kersMediaServer.Setup</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Self-contained so the target machine needs no .NET: a bare Windows 11
+         box is exactly what this has to install onto. Trimmed because the only
+         things used are file I/O, zip and Process - a stub carrying a whole
+         unused runtime would add 60MB to every package for nothing. -->
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishSingleFile>true</PublishSingleFile>
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>full</TrimMode>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <DebugType>none</DebugType>
+    <AssemblyTitle>j0kers Media Server Setup</AssemblyTitle>
+  </PropertyGroup>
+
+</Project>
