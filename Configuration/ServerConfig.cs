@@ -54,11 +54,10 @@ public sealed class ServerConfig
     /// <summary>
     /// Start the server at every Windows logon — after a boot, and after a
     /// sign-out and back in. It changes only *whether* the server starts, not
-    /// what it starts into: <see cref="MinimizeToTray"/> still decides whether
-    /// the console is hidden behind a notification-area icon, and
-    /// <c>control.openDashboardOnStart</c> still decides whether a browser
-    /// opens. Those two are independent of each other, and both are
-    /// independent of this. Windows only; ignored elsewhere.
+    /// what it starts into: <see cref="MinimizeToTray"/> decides that, and when
+    /// it is set the server starts with no window at all — no console and no
+    /// dashboard, whatever <c>control.openDashboardOnStart</c> says.
+    /// Windows only; ignored elsewhere.
     /// See <see cref="Services.WindowsAutostart"/>.
     /// </summary>
     [JsonPropertyName("startWithWindows")]

@@ -42,6 +42,7 @@ async function openConfig() {
 
     $("cfg-startup").checked = !!s.startWithWindows;
     $("cfg-startup").disabled = !s.startWithWindowsSupported;
+    showOpenDashboardState();
     showStartupNote();
 
     $("cfg-announce").checked = !!s.discoveryEnabled;
@@ -390,22 +391,32 @@ function showStartupNote() {
     note.textContent = "Windows only — on macOS/Linux use launchd, systemd, or a login item.";
     return;
   }
-  /* The two boxes above are independent, and it is not obvious that they are:
-     tray mode hides the CONSOLE, and "open the dashboard" opens a BROWSER.
-     Ticking tray does not stop the dashboard from opening. Rather than explain
-     that, the note just says what will actually happen. */
-  const tray = $("cfg-tray").checked, dash = $("cfg-open").checked;
+  const tray = $("cfg-tray").checked;
   note.textContent = "Starts the server at every Windows sign-in, including after a restart. "
     + (tray
-        ? (dash ? "It will run in the notification area and open the dashboard."
-                : "It will run in the notification area, with no window.")
-        : (dash ? "It will start with its console window and open the dashboard."
-                : "It will start with its console window, without opening the dashboard."));
+        ? "It will go straight to the notification area, with no window."
+        : $("cfg-open").checked
+          ? "It will start and open the dashboard."
+          : "It will start without opening anything.");
+}
+
+/* Minimising to the tray means no window, so the dashboard is not opened at
+   startup either. Saying that here — and greying the box out — is better than
+   leaving a ticked setting that silently does nothing. */
+function showOpenDashboardState() {
+  const tray = $("cfg-tray").checked;
+  $("cfg-open").disabled = tray;
+  $("cfg-open-row").style.opacity = tray ? "0.55" : "";
+  $("cfg-open-note").textContent = tray
+    ? "Not while the server is minimised to the tray — it starts with no window at all. "
+      + "Double-click the joker icon for the dashboard."
+    : "Turn this off for a server you use from another PC. The window it opens counts as an open "
+      + "dashboard, so while it is there, closing your browser elsewhere will not stop the server.";
 }
 /* Both of those boxes change the sentence above — the tray one decides whether
    there is a window at all, and the dashboard one decides whether a browser
    opens — so either one has to redraw it. */
-$("cfg-tray").addEventListener("change", showStartupNote);
+$("cfg-tray").addEventListener("change", () => { showOpenDashboardState(); showStartupNote(); });
 $("cfg-open").addEventListener("change", showStartupNote);
 $("cfg-startup").addEventListener("change", showStartupNote);
 

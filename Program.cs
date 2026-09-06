@@ -547,7 +547,17 @@ try
         var openUrl = dashboardUrl
                       + (dashboardUrl.Contains('?') ? "&" : "?") + "j=" + selfToken;
 
-        if (config.Control.OpenDashboardOnStart)
+        // Minimised means minimised. Tray mode hides the console, but opening a
+        // browser at startup put a window on screen anyway — so a server told to
+        // start out of the way started with the dashboard in front of you, and
+        // the one setting that says "no window" appeared not to work. The tray
+        // icon is the way in: double-click it for the dashboard.
+        if (config.MinimizeToTray && config.Control.OpenDashboardOnStart)
+        {
+            Log.Info("main", $"not opening the dashboard: this server is minimised to the tray — "
+                             + $"double-click the joker icon for {dashboardUrl}");
+        }
+        else if (config.Control.OpenDashboardOnStart)
         {
             var urlList = string.Join(" · ", urls);
             if (control.BoundHost == "0.0.0.0")
