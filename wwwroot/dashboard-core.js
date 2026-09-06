@@ -558,10 +558,25 @@ function showLogin() {
 }
 
 async function signOut() {
+  /* Revoke the "remember this device" key before dropping it, while this
+     session can still authenticate the call.
+
+     Forgetting it locally is not the same as ending it: the key is good for a
+     year, and a sign-in that only cleared localStorage left a live one behind
+     on the account every single time. That is how one account here reached
+     twelve of them. The wire format is jmk_<id>_<secret>, and the id half is
+     the handle the revoke endpoint takes. */
+  const saved = localStorage.getItem("j0kers-key") || "";
+  const keyId = saved.startsWith("jmk_") ? saved.slice(4).split("_")[0] : "";
+  if (keyId) await send("DELETE", "/api/auth/keys?id=" + encodeURIComponent(keyId));
+
   await send("POST", "/api/auth/logout");
   token = "";
   localStorage.removeItem("j0kers-key");
   sessionStorage.removeItem("j0kers-token");
-  location.reload();
+  /* replace, not reload: the dashboard URL carries the server's own
+     self-open token, and going "back" onto it after signing out should not
+     be an option. / serves the sign-in form to anyone without a session. */
+  showLogin();
 }
 
