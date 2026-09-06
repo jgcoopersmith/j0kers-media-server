@@ -238,6 +238,12 @@ Log.Info("main", $"{config.ServerName} starting (config: {(File.Exists(configPat
 // first one rather than at whatever moment the flag happened to be read.
 J0kersMediaServer.Logging.AccessLog.Enabled = config.Logging.AccessLog;
 
+// An upgrade replaces this binary and can move it. The logon entry written
+// when the box was ticked still names wherever it used to be, and a Run entry
+// pointing at a file that is gone fails silently — the box stays ticked and
+// nothing starts. Corrected here, once, while the current path is known.
+J0kersMediaServer.Services.WindowsAutostart.Refresh(config.StartWithWindows, config.ConfigFile);
+
 // ---- TLS ----
 // Decided before anything binds, announces, or builds a URL: the scheme is
 // woven through all three, and the control and media ports move together

@@ -52,6 +52,19 @@ public sealed class ServerConfig
     public bool MinimizeToTray { get; set; }
 
     /// <summary>
+    /// Start the server at every Windows logon — after a boot, and after a
+    /// sign-out and back in. It changes only *whether* the server starts, not
+    /// what it starts into: <see cref="MinimizeToTray"/> still decides whether
+    /// the console is hidden behind a notification-area icon, and
+    /// <c>control.openDashboardOnStart</c> still decides whether a browser
+    /// opens. Those two are independent of each other, and both are
+    /// independent of this. Windows only; ignored elsewhere.
+    /// See <see cref="Services.WindowsAutostart"/>.
+    /// </summary>
+    [JsonPropertyName("startWithWindows")]
+    public bool StartWithWindows { get; set; }
+
+    /// <summary>
     /// What removing an HLS stream link should do with a conversion that
     /// already exists: "ask" (the default - the dashboard offers both),
     /// "keep" to always leave the files, or "delete" to always free the disk.
@@ -78,6 +91,14 @@ public sealed class ServerConfig
 
     /// <summary>Dashboard-edited settings (hostname/ports) live in this sidecar.</summary>
     [JsonIgnore] public string SettingsFile { get; private set; } = "settings.json";
+
+    /// <summary>
+    /// The config file this was loaded from, absolute, or empty when the
+    /// built-in defaults were used. Needed by anything that has to start the
+    /// server again later and cannot rely on the working directory to find it
+    /// — see <see cref="Services.WindowsAutostart"/>.
+    /// </summary>
+    [JsonIgnore] public string ConfigFile { get; private set; } = "";
 
     private readonly HashSet<string> _dynamicMountPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _removedMountPaths = new(StringComparer.OrdinalIgnoreCase);
@@ -108,12 +129,22 @@ public sealed class ServerConfig
             var dir = Path.GetDirectoryName(Path.GetFullPath(path))!;
             cfg.DynamicMountsFile = Path.Combine(dir, "mounts.json");
             cfg.SettingsFile = Path.Combine(dir, "settings.json");
+            cfg.ConfigFile = Path.GetFullPath(path);
         }
         else
         {
             cfg = new ServerConfig();
-            cfg.DynamicMountsFile = Path.Combine(Directory.GetCurrentDirectory(), "mounts.json");
-            cfg.SettingsFile = Path.Combine(Directory.GetCurrentDirectory(), "settings.json");
+            // A named-but-absent config still says where its state belongs: the
+            // directory it was asked for. Program.cs's defaults case passes the
+            // bare name "server.json", whose full path is in the working
+            // directory, so that case is unchanged — but pointing the server at
+            // D:\srv\server.json and finding nothing there no longer scatters
+            // settings.json and users.json into wherever it happened to start.
+            var dir = path is not null
+                ? Path.GetDirectoryName(Path.GetFullPath(path)) ?? Directory.GetCurrentDirectory()
+                : Directory.GetCurrentDirectory();
+            cfg.DynamicMountsFile = Path.Combine(dir, "mounts.json");
+            cfg.SettingsFile = Path.Combine(dir, "settings.json");
         }
 
         cfg.LoadSettingsOverrides();
@@ -132,6 +163,7 @@ public sealed class ServerConfig
         [JsonPropertyName("controlPort")] public int? ControlPort { get; set; }
         [JsonPropertyName("authToken")] public string? AuthToken { get; set; }
         [JsonPropertyName("minimizeToTray")] public bool? MinimizeToTray { get; set; }
+        [JsonPropertyName("startWithWindows")] public bool? StartWithWindows { get; set; }
         [JsonPropertyName("openDashboardOnStart")] public bool? OpenDashboardOnStart { get; set; }
         [JsonPropertyName("linkLifetimeHours")] public int? LinkLifetimeHours { get; set; }
         [JsonPropertyName("discoveryEnabled")] public bool? DiscoveryEnabled { get; set; }
@@ -179,6 +211,7 @@ public sealed class ServerConfig
         if (s.ControlPort is not null) _persistedSettings.ControlPort = s.ControlPort;
         if (s.AuthToken is not null) _persistedSettings.AuthToken = s.AuthToken;
         if (s.MinimizeToTray is not null) _persistedSettings.MinimizeToTray = s.MinimizeToTray;
+        if (s.StartWithWindows is not null) _persistedSettings.StartWithWindows = s.StartWithWindows;
         if (s.LinkLifetimeHours is not null) _persistedSettings.LinkLifetimeHours = s.LinkLifetimeHours;
         if (s.DiscoveryEnabled is not null) _persistedSettings.DiscoveryEnabled = s.DiscoveryEnabled;
         if (s.DlnaEnabled is not null) _persistedSettings.DlnaEnabled = s.DlnaEnabled;
@@ -230,6 +263,7 @@ public sealed class ServerConfig
                                          + $"overriding server.json's {MinimizeToTray}");
             MinimizeToTray = tray;
         }
+        if (s.StartWithWindows is bool autostart) StartWithWindows = autostart;
         if (s.LinkLifetimeHours is int hours) Hls.LinkLifetimeHours = hours;
         if (s.DiscoveryEnabled is bool announce) Discovery.Enabled = announce;
         if (s.DlnaEnabled is bool dlna) Discovery.Dlna = dlna;
@@ -328,6 +362,43 @@ public sealed class ServerConfig
     /// keeps its own copy of the two lines rather than depending on the media
     /// sidecar helper.
     /// </summary>
+    /// <summary>
+    /// The absolute path of a config file that definitely exists, creating an
+    /// empty one beside the other sidecars if this server was started on
+    /// built-in defaults.
+    ///
+    /// This exists for one caller — the Windows logon entry — and for one
+    /// reason. That entry is a bare command line with no working directory of
+    /// its own, so it inherits Explorer's, normally C:\Windows\system32.
+    /// Naming the config file is what pins the server back to the directory
+    /// its state actually lives in: settings.json, users.json, mounts.json,
+    /// the media-link signing key and the TLS store all hang off the directory
+    /// the config was found in. Registering a bare executable instead would
+    /// start a server at every logon that finds none of them — wrong ports,
+    /// no accounts, and writes into system32 that fail.
+    ///
+    /// The file has to be created rather than merely named, because a config
+    /// path that is given and does not exist is fatal at startup by design.
+    /// "{}" is exactly equivalent to having no config: every value in it is
+    /// already the default.
+    /// </summary>
+    public string EnsureConfigFile()
+    {
+        if (!string.IsNullOrWhiteSpace(ConfigFile)) return ConfigFile;
+
+        var directory = Path.GetDirectoryName(Path.GetFullPath(SettingsFile))
+                        ?? Directory.GetCurrentDirectory();
+        var path = Path.Combine(directory, "server.json");
+        if (!File.Exists(path))
+        {
+            WriteAtomic(path, "{}", "config");
+            J0kersMediaServer.Logging.Log.Info("config",
+                $"wrote an empty {path} so the server can be started again from outside this directory");
+        }
+        ConfigFile = path;
+        return path;
+    }
+
     private static void WriteAtomic(string file, string json, string label)
     {
         var tmp = $"{file}.{Environment.CurrentManagedThreadId}.tmp";

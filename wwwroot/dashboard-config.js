@@ -40,6 +40,10 @@ async function openConfig() {
       ? "Applies immediately. The icon starts in the taskbar's hidden ^ area — drag it out to pin it."
       : "Windows only — on macOS/Linux run the server under systemd, launchd, or nohup.";
 
+    $("cfg-startup").checked = !!s.startWithWindows;
+    $("cfg-startup").disabled = !s.startWithWindowsSupported;
+    showStartupNote();
+
     $("cfg-announce").checked = !!s.discoveryEnabled;
     $("cfg-announce-note").textContent = s.discoveryHostName
       ? "Applies immediately. Lets devices find the server by name (" + location.protocol + "//"
@@ -377,6 +381,34 @@ function showLinkLifetime() {
 }
 $("cfg-link").addEventListener("input", showLinkLifetime);
 
+/* What starting with Windows actually does depends on the tray box above it,
+   so the note says which of the two it will be rather than leaving it to be
+   discovered at the next logon. */
+function showStartupNote() {
+  const note = $("cfg-startup-note");
+  if ($("cfg-startup").disabled) {
+    note.textContent = "Windows only — on macOS/Linux use launchd, systemd, or a login item.";
+    return;
+  }
+  /* The two boxes above are independent, and it is not obvious that they are:
+     tray mode hides the CONSOLE, and "open the dashboard" opens a BROWSER.
+     Ticking tray does not stop the dashboard from opening. Rather than explain
+     that, the note just says what will actually happen. */
+  const tray = $("cfg-tray").checked, dash = $("cfg-open").checked;
+  note.textContent = "Starts the server at every Windows sign-in, including after a restart. "
+    + (tray
+        ? (dash ? "It will run in the notification area and open the dashboard."
+                : "It will run in the notification area, with no window.")
+        : (dash ? "It will start with its console window and open the dashboard."
+                : "It will start with its console window, without opening the dashboard."));
+}
+/* Both of those boxes change the sentence above — the tray one decides whether
+   there is a window at all, and the dashboard one decides whether a browser
+   opens — so either one has to redraw it. */
+$("cfg-tray").addEventListener("change", showStartupNote);
+$("cfg-open").addEventListener("change", showStartupNote);
+$("cfg-startup").addEventListener("change", showStartupNote);
+
 // keep the list in step with what's typed in the bind field
 $("cfg-bind").addEventListener("input", renderCfgInterfaces);
 $("cfg-ifaces").addEventListener("click", e => {
@@ -398,6 +430,7 @@ async function saveConfig() {
     controlPort: parseInt($("cfg-ctl").value, 10),
     linkLifetimeHours: parseInt($("cfg-link").value, 10),
     minimizeToTray: $("cfg-tray").checked,
+    startWithWindows: $("cfg-startup").checked,
     openDashboardOnStart: $("cfg-open").checked,
     discoveryEnabled: $("cfg-announce").checked,
     dlnaEnabled: $("cfg-dlna").checked,

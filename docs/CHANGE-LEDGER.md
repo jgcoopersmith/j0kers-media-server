@@ -1016,3 +1016,81 @@ two open pages reconnecting. Left alone.
 Infinity War's conversion is still the one broken artefact — 1497 segments on
 disk, a playlist listing one, no `ENDLIST`. Deleting it would let it remake as
 a fast lossless remux. Not deleted without asking.
+
+---
+
+## 2026-09-06 — Start with Windows (v2.0.264 → v2.0.265)
+
+**Asked for:** a "Start with Windows" checkbox under Config. When ticked, the
+server starts at boot or relogin — into the tray if *Minimize to the system
+tray* is set, otherwise just opened.
+
+### How it starts
+
+An entry under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, which
+Windows runs at every interactive logon. Per-user rather than machine-wide on
+purpose: HKLM needs an administrator, and a server started before anybody logs
+in has no desktop to put a tray icon or a dashboard window on — which is the
+half of this the setting exists for.
+
+Raw advapi32 P/Invoke rather than `Microsoft.Win32.Registry`, whose types are
+not in the reference set for this project's platform-neutral `net10.0` target.
+Same reasoning, and the same shape, as `Services/TrayIcon.cs`.
+
+The checkbox changes only *whether* the server starts, not what it starts into.
+`minimizeToTray` and `openDashboardOnStart` were already independent of each
+other — tray mode hides the console, the other opens a browser — so the note
+under the box states the actual combination rather than explaining the rule.
+
+### Two defects found by review, both verified against this machine
+
+**1. A bare executable was registered when no config file was loaded** (high).
+A Run entry inherits Explorer's working directory, normally
+`C:\Windows\system32`. Without a config path on the command line the server
+would look for `settings.json` and `users.json` there, find neither, and come
+up on default ports **with no accounts at all** — `Program.cs` says as much:
+"no administrator account — the dashboard and its configuration are open to
+anyone on this network". The installed case was already safe (`Install.ps1`
+passes `server.json`); a portable publish folder was not.
+
+Fixed by `ServerConfig.EnsureConfigFile()`, which returns the loaded config
+path or writes an empty `{}` beside the other sidecars first. The file has to
+exist rather than merely be named, because a named-but-missing config is fatal
+at startup by design. `Refresh` now refuses to rewrite an entry when it has no
+config path to name, since a bare command is strictly worse than a stale one.
+
+Also corrected while there: a named-but-absent config now anchors the sidecars
+to *its own* directory instead of the working directory.
+
+**2. Task Manager's Startup tab disables without deleting** (medium).
+It leaves the Run value alone and records the decision under
+`…\Explorer\StartupApproved\Run`, first byte 3 for disabled. Reading only the
+Run key reported the box ticked while nothing started — and because the
+approval is keyed by value name, untick-and-retick in the dialog rewrote the
+same name and left the disabled byte in place, so the box could never be
+fixed from the dashboard.
+
+Confirmed on this machine before fixing: OneDrive, Spotify and Docker Desktop
+all sit in the Run key with a 3. `IsEnabled()` now requires both halves, and
+enabling clears the approval record.
+
+The comment in `ControlApi` that claimed Task Manager *clears* the entry was
+simply wrong and has been rewritten.
+
+### Verification
+
+| What | How |
+|---|---|
+| Registry round-trip | A throwaway test wrote, read back, and deleted the real entry — value identical to the composed command, no embedded NUL, delete idempotent. Deleted straight afterwards; the Run key was confirmed back to its four pre-existing entries (OneDrive, Docker Desktop, Spotify, LM Studio). |
+| Suite | 214 pass (202 before this session, 211 after the first cut, 214 after the review fixes). |
+| Review | 5 dimensions, 18 claims, adversarially verified; 4 survived, of which 3 were the same defect found independently. |
+
+The registry half is deliberately **not** in the committed suite: there is one
+`Run` key per user, and a test that died between writing and cleaning up would
+leave this machine launching a server at every logon.
+
+### Live-system actions
+
+Registry: the real HKCU `Run` key was written and deleted once by the probe
+above, and read several times. Verified back to baseline. Nothing else on the
+machine was touched; no server restart beyond the publish hook's own.

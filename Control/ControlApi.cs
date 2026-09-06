@@ -2301,6 +2301,15 @@ public sealed partial class ControlApi : IDisposable
             hlsPort = _serverConfig.Hls.Port,
             controlPort = _serverConfig.Control.Port,
             minimizeToTray = _serverConfig.MinimizeToTray,
+            // Reported from the registry rather than from the config, so a
+            // ticked box always means a logon entry that is really there and
+            // really switched on. Those two are separate: Task Manager's
+            // Startup tab turns an entry off without deleting it, so the value
+            // being present is not the same as it being live.
+            startWithWindows = Services.WindowsAutostart.Supported
+                ? Services.WindowsAutostart.IsEnabled()
+                : _serverConfig.StartWithWindows,
+            startWithWindowsSupported = Services.WindowsAutostart.Supported,
             openDashboardOnStart = _serverConfig.Control.OpenDashboardOnStart,
             linkLifetimeHours = _serverConfig.Hls.LinkLifetimeHours,
             // where transcodes and live-channel streams are written; the
@@ -3034,6 +3043,42 @@ public sealed partial class ControlApi : IDisposable
                 return;
             }
             s.MinimizeToTray = trayNow; // persist what actually happened
+        }
+
+        // Starting with Windows takes effect at the next logon, but the
+        // registry entry is written now — and if writing it fails, the box
+        // must not be saved as ticked. A setting that claims to be on while
+        // nothing starts is the failure this feature can least afford: it is
+        // invisible until the one morning somebody expects the server to be
+        // there and it is not.
+        // The dialog posts every field on every save, so this compares against
+        // what is actually registered rather than rewriting the hive each time
+        // somebody changes a port.
+        if (s.StartWithWindows is bool wantAutostart
+            && wantAutostart != Services.WindowsAutostart.IsEnabled())
+        {
+            // The logon command must always name a config file. Without one the
+            // server it starts inherits Explorer's working directory and finds
+            // none of its own state there — including users.json, which would
+            // bring it up with no accounts at all.
+            string? configPath = null;
+            if (wantAutostart)
+            {
+                try { configPath = _serverConfig.EnsureConfigFile(); }
+                catch (Exception ex)
+                {
+                    WriteJson(res, 400, new { error = "could not prepare a config file for the startup entry: " + ex.Message });
+                    return;
+                }
+            }
+            if (!Services.WindowsAutostart.Apply(wantAutostart, configPath, out var autostartError))
+            {
+                WriteJson(res, 400, new { error = autostartError ?? "could not change the Windows startup entry" });
+                return;
+            }
+            Log.Info("config", wantAutostart
+                ? $"start with Windows: on ({Services.WindowsAutostart.Registered()})"
+                : "start with Windows: off");
         }
 
         // Network announcement toggles live too. Applied before the config is
