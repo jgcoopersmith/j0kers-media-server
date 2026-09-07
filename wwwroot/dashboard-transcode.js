@@ -294,7 +294,7 @@ function tcStatusRank(e) {
   if (ready) return 5;
   if (e.dlnaReady === null || e.dlnaReady === undefined) return 4;   // not read yet
   if (!e.pcReady && e.dlnaReady === false) return 0;                 // needs converting
-  if (!e.pcReady) return 1;                                          // convert for the player
+  if (!e.pcReady) return 1;                                          // convert for the browser
   return 2;                                                          // convert DLNA
 }
 
@@ -332,7 +332,7 @@ function tcFileState(e) {
        Firefox cannot decode at all - so a file marked here often plays
        perfectly if you open it in VLC yourself. What cannot play it is the
        dashboard's own player, and that is what this is about. */
-    return ["b-pc", "Convert for player",
+    return ["b-pc", "Convert for browser",
             "The TV plays this as it stands, and VLC opened directly probably will too. "
             + "The dashboard's player cannot — usually AC-3 audio, which browsers do not "
             + "decode — and there is no conversion yet, so playing it here would wait for one. "
@@ -557,7 +557,7 @@ function tcFolderPills(s) {
     if (orange)
       out += '<span class="tc-badge b-pc" title="' + orange
            + ' file(s) the TV plays as they stand, and VLC too, but the dashboard player cannot — no conversion yet">'
-           + orange + ' for player</span>';
+           + orange + ' for browser</span>';
     if (yellow)
       out += '<span class="tc-badge b-dlna" title="' + yellow
            + ' file(s) that play instantly here, but only as a scaled copy, which DLNA will not hand to a TV">'
