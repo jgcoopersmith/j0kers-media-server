@@ -1644,3 +1644,69 @@ it plainly and I explained that away instead of following it.
 The owner said the files were still there. Through the Shell API, which is how
 the Recycle Bin is meant to be read: **149 items, 92.6 GB, all recoverable** —
 exactly 133 from the first sweep plus 16 from this one. Nothing has been lost.
+
+---
+
+## 2026-09-07 — 120 byte-identical copies recycled, and a scan that was lying about 1,116 files (v2.0.284)
+
+### The container rule, and a wrong count
+
+The previous duplicate scans reported **1,116 files "never probed"**, which the
+owner rightly challenged: everything under the media folder should have been
+read by now.
+
+It had been. `TvCodecs.UnplayableContainers` — `.vob .ifo .divx .rm .rmvb .ogm
+.asf .mkv` — is answered from the extension alone, because a television refuses
+those wrappers whatever is inside them. `NeedsConversionCached` returns *true*
+without probing, and the prefetch then skips the file because it already has an
+answer. So those files are absent from `probe-cache.json` **by design**.
+
+My scan looked each path up in that cache and called a miss "unknown". Measured:
+1,641 uncached files under Movies, of which **874 `.vob` and 763 `.mkv`** — the
+missing set is the unplayable-container set almost exactly. The server knew the
+answer all along; the scan asked the wrong oracle.
+
+Rerun with the container rule applied first:
+
+| | before | after |
+|---|---|---|
+| Ready | 3,048 | **4,057** |
+| not Ready | 321 | **305** |
+| genuinely unknown | 1,116 | **0** |
+
+Nothing is unread. And the duplicate picture collapses to almost nothing: **1
+same-folder group** (DANE COOK, 2.5 GB) and 4 groups elsewhere (11 files,
+8.4 GB) where no copy is Ready.
+
+### Full hashes, because sampling was not enough
+
+125 `X (H.264).mp4` / `X (H.264) (2).mp4` pairs exist. A first pass hashed three
+8 MB windows — head, middle, tail — and called 121 identical.
+
+Hashing both files **in full**, 112 GB read in 45 minutes, called **120**
+identical. The extra exclusion is `Tenacious D - 1x02 - Angel in Disguise`:
+same size, matching at all three sample points, different overall. Sampling
+would have deleted a file that is not a duplicate.
+
+Five pairs excluded in total: three differ in size, two are the same size with
+different content.
+
+### Live-system actions
+
+* **120 files, 55.90 GB** to the Recycle Bin via `SHFileOperation` with
+  `FOF_ALLOWUNDO`. Return code 0, nothing aborted. None remain on disk;
+  **120/120** originals verified still present.
+* The bin now holds exactly those 120 at 55.90 GB. The 149 from the two earlier
+  sweeps are gone from it — emptied by the owner — and free space rose from
+  860.0 GB to 956.6 GB, which matches.
+
+### A measurement mistake worth keeping
+
+Reading the bin with `$item.Size` gave 39.9 GB for the same 120 files that
+`System.Size` reports as 55.90 GB. The first is lazily populated and was simply
+wrong. Earlier the same day, `Get-ChildItem` on `G:\$Recycle.Bin` with errors
+suppressed returned nothing at all and I read that as "empty".
+
+Two different wrong answers about the same folder in one day, both from asking
+Windows casually. The Shell namespace with `System.Size` is the one that agrees
+with free space.
