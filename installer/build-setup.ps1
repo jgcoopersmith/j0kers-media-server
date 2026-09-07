@@ -39,7 +39,19 @@ $version = ([xml](Get-Content $csproj)).Project.PropertyGroup.Version |
            Where-Object { $_ } | Select-Object -First 1
 if (-not $version) { throw "no <Version> found in $csproj" }
 
-$name    = "j0kers Media Server Setup $version.exe"
+# The name deliberately carries no version.
+#
+# It used to. Every build then produced a differently-named file and deleted
+# the previous one, so a path copied out of a message, a shortcut, or a
+# half-finished copy to another machine stopped resolving the moment the next
+# build ran - "this file no longer exists" for something that was there a
+# minute ago. Six versions in one afternoon made that constant.
+#
+# One stable path instead. Which version it is lives in the file's own version
+# information (right-click - Properties - Details) and is printed by the
+# installer as it runs, both of which travel with the file rather than being
+# rubbed off by the next build.
+$name    = "j0kers Media Server Setup.exe"
 $target  = Join-Path $OutputDir $name
 $staging = Join-Path ([IO.Path]::GetTempPath()) ("j0kers-pkg-" + [Guid]::NewGuid().ToString('n').Substring(0,8))
 $payload = Join-Path $staging 'payload'
@@ -113,7 +125,12 @@ try {
     # --- the stub -----------------------------------------------------------
     Write-Host '  building the setup stub...'
     $stubDir = Join-Path ([IO.Path]::GetTempPath()) ('j0kers-stub-' + [Guid]::NewGuid().ToString('n').Substring(0,8))
-    dotnet publish (Join-Path $repo 'installer\Setup\Setup.csproj') -c Release -o $stubDir -v q --nologo
+    # Stamped with the server version, because the file name no longer carries
+    # it: this is what Properties - Details shows, and it is how you tell two
+    # copies apart once they are on different machines.
+    dotnet publish (Join-Path $repo 'installer\Setup\Setup.csproj') -c Release -o $stubDir -v q --nologo `
+        -p:Version=$version -p:FileVersion=$version -p:AssemblyVersion=$version `
+        -p:InformationalVersion=$version
     if ($LASTEXITCODE -ne 0) { throw 'building the setup stub failed' }
     $stub = Join-Path $stubDir 'j0kers-setup-stub.exe'
     if (-not (Test-Path -LiteralPath $stub)) { throw "stub not found at $stub" }
@@ -167,8 +184,10 @@ try {
     Write-Host "Built: $target  (${mb} MB)" -ForegroundColor Green
     Write-Host ''
 
-    # One package on the desktop at a time - several is the confusion this is
-    # meant to remove.
+    # Sweep up the version-stamped packages left by earlier builds. The current
+    # one is not among them - it has no version in its name any more - so this
+    # removes history rather than the thing just built, and the guard below
+    # keeps it that way if the naming ever changes again.
     if (-not $KeepOld) {
         Get-ChildItem -LiteralPath $OutputDir -File -Filter 'j0kers Media Server Setup *.exe' -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -ne $name } |

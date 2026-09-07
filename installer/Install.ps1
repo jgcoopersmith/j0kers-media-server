@@ -45,6 +45,17 @@ if (-not (Test-Path -LiteralPath $payload)) {
 
 $exeName  = 'j0kers-media-server.exe'
 
+# Say which version this package is, before anything is touched. The file name
+# does not carry it - one stable name is what makes the package safe to copy
+# somewhere and still find later - so this is where you read it, along with the
+# file's own Properties - Details tab.
+$payloadExe = Join-Path $payload $exeName
+if (Test-Path -LiteralPath $payloadExe) {
+    Write-Host ('  this package installs version ' +
+                (Get-Item -LiteralPath $payloadExe).VersionInfo.FileVersion)
+    Write-Host ''
+}
+
 # What makes a folder somebody's server, rather than an empty directory.
 #
 # Used in two places that must agree: finding an existing install below, and
