@@ -570,6 +570,49 @@ public sealed class FfmpegManager : IDisposable
         return false;
     }
 
+    /// <summary>
+    /// Containers a browser's &lt;video&gt; element opens directly. VLC opens far
+    /// more than this, but the dashboard player is the binding constraint and
+    /// being wrong here means a black rectangle rather than a wait.
+    /// </summary>
+    private static readonly HashSet<string> DirectPlayExt =
+        new(StringComparer.OrdinalIgnoreCase) { ".mp4", ".m4v", ".webm", ".mov" };
+
+    private static readonly HashSet<string> DirectPlayVideo =
+        new(StringComparer.OrdinalIgnoreCase) { "h264", "vp9", "vp8", "av1" };
+
+    private static readonly HashSet<string> DirectPlayAudio =
+        new(StringComparer.OrdinalIgnoreCase) { "aac", "mp3", "opus", "vorbis" };
+
+    /// <summary>
+    /// Can this file be handed over as it is, instead of being converted?
+    ///
+    /// The question the Transcode window was never asking. A file already in a
+    /// container and codecs a player opens needs nothing done to it — encoding
+    /// it produces a second copy of something that was ready, costs a
+    /// generation of picture, and makes somebody wait for both. The server has
+    /// always known how to send a file untouched; only the television was ever
+    /// offered it.
+    ///
+    /// Deliberately narrower than what VLC manages. Guessing wrong in this
+    /// direction gives a browser a file it cannot decode, which looks like a
+    /// broken server rather than a slow one, so anything uncertain converts.
+    /// HEVC is left out for exactly that reason: Safari plays it, Chrome
+    /// mostly does not.
+    /// </summary>
+    public bool CanPlayDirectly(string file)
+    {
+        try
+        {
+            if (!DirectPlayExt.Contains(Path.GetExtension(file))) return false;
+            var (video, audio) = ProbeCodecs(file);
+            if (video is null || audio is null) return false;   // unread: convert, as before
+            return DirectPlayVideo.Contains(CodecFamily(video))
+                && DirectPlayAudio.Contains(CodecFamily(audio));
+        }
+        catch { return false; }
+    }
+
     /// <summary>First video and audio codec names of a media file, via ffprobe.</summary>
     private (string? video, string? audio) ProbeCodecs(string file)
     {

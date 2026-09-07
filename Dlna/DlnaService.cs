@@ -754,7 +754,18 @@ public sealed class DlnaService
         }
     }
 
-    public void ServeFile(HttpListenerContext ctx, string path, Action<long>? onBytes = null)
+    /// <summary>
+    /// Sends a file as it is, honouring Range so a player can seek.
+    ///
+    /// Static, and with the DLNA headers optional, because this is no longer
+    /// only for televisions: the dashboard and VLC are handed originals
+    /// through the same code rather than waiting for a conversion of a file
+    /// that was already playable. A browser has no use for
+    /// contentFeatures.dlna.org, and sending it would be describing the
+    /// response as something it is not.
+    /// </summary>
+    public static void ServeFile(HttpListenerContext ctx, string path, Action<long>? onBytes = null,
+                                 bool dlnaHeaders = true)
     {
         var res = ctx.Response;
         FileInfo info;
@@ -795,6 +806,7 @@ public sealed class DlnaService
         res.Headers["Accept-Ranges"] = "bytes";
         // the two headers DLNA clients check before they will seek
         res.Headers["transferMode.dlna.org"] = "Streaming";
+        if (dlnaHeaders)
         res.Headers["contentFeatures.dlna.org"] = "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
         if (partial) res.Headers["Content-Range"] = $"bytes {from}-{to}/{length}";
 

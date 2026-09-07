@@ -118,11 +118,21 @@
     });
   }
 
+  // Not a playlist: the server has handed over the file itself, because it
+  // was already in a container and codecs this element opens. Nothing was
+  // converted, so there is no playlist to feed hls.js — and running it
+  // through hls.js anyway would fail on the first byte.
+  if (!/\.m3u8(\?|$)/i.test(src)) {
+    v.src = src;
+    if (resumeAt > 0)
+      v.addEventListener("loadedmetadata", () => { try { v.currentTime = resumeAt; } catch {} }, { once: true });
+    v.play().catch(() => {});
+  }
   // hls.js first. Chromium answers "maybe" to the native HLS
   // question and then cannot play it — asking politely gets a
   // black screen and a MEDIA_ELEMENT_ERROR. Native is the
   // fallback, which is where Safari lands.
-  if (window.Hls && Hls.isSupported()) {
+  else if (window.Hls && Hls.isSupported()) {
     const hls = new Hls({
       enableWorker: true,
       // pins the initial seek; without it hls.js picks its own spot and the

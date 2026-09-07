@@ -1996,6 +1996,7 @@ public sealed partial class ControlApi : IDisposable
         // attach a subtitle file the user picked to an existing stream
         [("POST", "/api/subtitles")] = Sync((api, ctx, _) => api.AttachSubtitle(ctx)),
         [("GET", "/api/image")] = Sync((api, ctx, auth) => api.ServeImage(ctx, auth)),
+        [("GET", "/api/file")] = Sync((api, ctx, auth) => api.ServeOriginal(ctx, auth)),
         [("POST", "/api/mounts")] = Sync((api, ctx, _) => api.AddMount(ctx)),
         [("DELETE", "/api/mounts")] = Sync((api, ctx, _) => api.RemoveMount(ctx)),
         [("DELETE", "/api/hls")] = Sync((api, ctx, _) => api.RemoveHlsStream(ctx)),
@@ -3692,6 +3693,25 @@ public sealed partial class ControlApi : IDisposable
                 return;
             }
             if (DenyUnshared(ctx, auth, file)) return;
+
+            // Already playable, at the resolution asked for: hand it over
+            // rather than converting it. This is the whole point — a file in a
+            // container and codecs a player opens is *finished*, and encoding
+            // it produces a second copy of something that was ready, costs a
+            // generation of picture, and makes somebody wait for both.
+            //
+            // A requested height is a genuine reason to encode: scaling is the
+            // one thing sending the original cannot do.
+            if (height == 0 && _ffmpeg.CanPlayDirectly(file))
+            {
+                WriteJson(res, 200, new
+                {
+                    direct = "/api/file?path=" + Uri.EscapeDataString(file),
+                    ready = true,
+                });
+                return;
+            }
+
             var (stream, ready) = _ffmpeg.StartVod(file, height);
             // Playing it is what re-links it. An unlinked conversion is still
             // on disk, so asking for this media again brings the row back
@@ -4174,7 +4194,7 @@ public sealed partial class ControlApi : IDisposable
                 if (method == "HEAD")
                 {
                     if (transcode is not null) dlna.ServeTranscode(ctx, transcode);
-                    else dlna.ServeFile(ctx, file);
+                    else Dlna.DlnaService.ServeFile(ctx, file);
                     return;
                 }
 
@@ -4200,7 +4220,7 @@ public sealed partial class ControlApi : IDisposable
                                       $"({transcode.TotalBytes / (1024 * 1024)} MB, full resolution)");
                     dlna.ServeTranscode(ctx, transcode, Sent);
                 }
-                else dlna.ServeFile(ctx, file, Sent);
+                else Dlna.DlnaService.ServeFile(ctx, file, Sent);
                 return;
             }
 
@@ -4484,6 +4504,46 @@ public sealed partial class ControlApi : IDisposable
     };
 
     /// <summary>GET /api/image?path= — serves a picture for the library viewer.</summary>
+    /// <summary>
+    /// GET /api/file?path=… — the media file itself, byte for byte, with Range
+    /// so a player can seek.
+    ///
+    /// The route that was missing. A file already in a container and codecs a
+    /// player opens needs no conversion at all, and the server has always
+    /// known how to send one untouched — but only a television was ever
+    /// offered it, so the dashboard and VLC queued an encode for files that
+    /// were ready. That is a generation of picture and an hour of GPU spent
+    /// arriving back where the file started.
+    ///
+    /// Same access rules as every other way of reaching media: a local path,
+    /// and a share the caller is allowed to see.
+    /// </summary>
+    private void ServeOriginal(HttpListenerContext ctx, AuthResult auth)
+    {
+        var res = ctx.Response;
+        var path = ctx.Request.QueryString["path"] ?? "";
+        try
+        {
+            if (!TryLocalPath(path, out var full))
+            {
+                BadRequest(res, "network paths are not allowed");
+                return;
+            }
+            if (DenyUnshared(ctx, auth, full)) return;
+            if (!System.IO.File.Exists(full)) { NotFound(res, "file not found"); return; }
+            // Never hand over something a player cannot open: a black
+            // rectangle reads as a broken server, where a wait only reads as a
+            // slow one. Anything uncertain is left to the conversion path.
+            if (_ffmpeg?.CanPlayDirectly(full) != true)
+            {
+                WriteJson(res, 415, new { error = "this file needs converting before it can be played directly" });
+                return;
+            }
+            Dlna.DlnaService.ServeFile(ctx, full, dlnaHeaders: false);
+        }
+        catch (Exception ex) { BadRequest(res, ex.Message); }
+    }
+
     private void ServeImage(HttpListenerContext ctx, AuthResult auth)
     {
         var res = ctx.Response;
@@ -4775,7 +4835,11 @@ public sealed partial class ControlApi : IDisposable
     private (bool pcReady, bool? dlnaReady) Readiness(
         string file, Media.FfmpegManager.VodState state, bool? needsConversion)
         => Readiness(
-            converted: state == Media.FfmpegManager.VodState.Done,
+            // A conversion is one way to be instant; already being playable is
+            // the other, and it is the better one — nothing was encoded, no
+            // picture was spent, and no disk was used twice.
+            converted: state == Media.FfmpegManager.VodState.Done
+                       || _ffmpeg?.CanPlayDirectly(file) == true,
             fullResConversion: _vodIndex?.DirectoryFor(file) is not null,
             needsConversion: needsConversion,
             // No codec knowledge at all (no ffmpeg): DlnaShouldList offers

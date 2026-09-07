@@ -267,14 +267,16 @@ function tcStatusRank(e) {
   if (ready) return 5;
   if (e.dlnaReady === null || e.dlnaReady === undefined) return 4;   // not read yet
   if (!e.pcReady && e.dlnaReady === false) return 0;                 // needs converting
-  if (!e.pcReady) return 1;                                          // convert PC/VLC
+  if (!e.pcReady) return 1;                                          // convert for the player
   return 2;                                                          // convert DLNA
 }
 
 /* The pill a file row shows: class, label, and the sentence behind it.
    Two independent questions, which this window used to answer as one -
    see ControlApi.Readiness.
-     PC/VLC plays through HLS, so instant means a finished conversion exists.
+     The dashboard's player is a browser: it needs the file to be in a form it
+     can open, or a conversion. VLC is far more permissive, which is why a row
+     marked here often plays fine if you open the file in VLC yourself.
      A television plays the file itself if it can decode it, and is otherwise
      handed a FULL-RESOLUTION conversion; it will not take a scaled one. */
 function tcFileState(e) {
@@ -289,17 +291,25 @@ function tcFileState(e) {
   }
   if (e.pcReady && dlna) {
     return ["b-ready", "Ready",
-            "Plays instantly on PC/VLC from its conversion, and on the TV over DLNA."];
+            "Plays here straight away — either the file itself, or a conversion already made — "
+            + "and on the TV over DLNA."];
   }
   if (e.pcReady && !dlna) {
     return ["b-dlna", "Convert DLNA",
-            "Plays instantly on PC/VLC, but the TV cannot: the only conversion is a "
+            "Plays here straight away, but the TV cannot: the only conversion is a "
             + "scaled copy, and DLNA is only handed full-resolution ones."];
   }
   if (!e.pcReady && dlna) {
-    return ["b-pc", "Convert PC/VLC",
-            "The TV can play this file as it stands, but there is no conversion yet, "
-            + "so playing it here would wait for one."];
+    /* Deliberately NOT "Convert PC/VLC". VLC opens far more than a browser
+       does - AC-3 audio is the common case, which VLC plays and Chrome and
+       Firefox cannot decode at all - so a file marked here often plays
+       perfectly if you open it in VLC yourself. What cannot play it is the
+       dashboard's own player, and that is what this is about. */
+    return ["b-pc", "Convert for player",
+            "The TV plays this as it stands, and VLC opened directly probably will too. "
+            + "The dashboard's player cannot — usually AC-3 audio, which browsers do not "
+            + "decode — and there is no conversion yet, so playing it here would wait for one. "
+            + "That conversion copies the video untouched and only redoes the audio."];
   }
   return ["b-need", "Needs converting",
           "No conversion exists and the TV cannot decode the original — neither way of playing it works yet."];
@@ -510,7 +520,7 @@ function tcFolderPills(s) {
   const green = s.ready || 0, unknown = s.unknown || 0;
 
   if (red + orange + yellow === 0 && unknown === 0) {
-    out += '<span class="tc-badge b-ready" title="Every file here plays instantly on PC/VLC and on the TV">'
+    out += '<span class="tc-badge b-ready" title="Every file here plays straight away in the dashboard and on the TV">'
          + 'Ready · ' + green + '</span>';
   } else {
     if (red)
@@ -519,8 +529,8 @@ function tcFolderPills(s) {
            + red + ' need converting</span>';
     if (orange)
       out += '<span class="tc-badge b-pc" title="' + orange
-           + ' file(s) a TV can play as they stand, but with no conversion — playing them here would wait">'
-           + orange + ' PC/VLC</span>';
+           + ' file(s) the TV plays as they stand, and VLC too, but the dashboard player cannot — no conversion yet">'
+           + orange + ' for player</span>';
     if (yellow)
       out += '<span class="tc-badge b-dlna" title="' + yellow
            + ' file(s) that play instantly here, but only as a scaled copy, which DLNA will not hand to a TV">'

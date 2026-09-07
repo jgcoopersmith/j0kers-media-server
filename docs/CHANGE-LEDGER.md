@@ -1413,3 +1413,60 @@ has 11 tests covering each cell — including the two that used to be invisible
 substitution, and no-ffmpeg matching what `DlnaShouldList` already does.
 
 231 tests pass.
+
+---
+
+## 2026-09-06 — Play the file when the file is already playable (v2.0.278 → v2.0.279)
+
+**Asked:** "if I file browse out to that file and open it with VLC it plays fine.
+Why is it marked?"
+
+Because the pill was answering a question about the server and wearing a label
+about a device.
+
+### What was actually wrong
+
+The server had exactly one route to a PC: `/api/play`, which is HLS, which
+needs a conversion. A television has been handed originals untouched for as
+long as DLNA has existed — `DlnaService.ServeFile`, range requests and all —
+and no one ever offered the same thing to the dashboard. So a file that was
+already finished got queued for an encode purely because that was the only road
+out.
+
+`/api/file` now serves the original with Range, at `AccessLevel.Read` behind the
+same `DenyUnshared` check as every other route to media. `/api/play` returns it
+instead of starting a conversion when the file is already playable and no
+particular height was asked for; scaling is the one thing sending the original
+cannot do, so a height still encodes. `ServeFile` became static, with the DLNA
+headers optional — a browser has no use for `contentFeatures.dlna.org`, and
+sending it would be describing the response as something it is not.
+
+### Then the file in question turned out to prove the other half
+
+`300 (H.264).mp4` is **h264 video, AC-3 audio**.
+
+VLC plays AC-3. Chrome and Firefox cannot decode it at all. So the owner opening
+that file by hand and the dashboard trying to play it are not the same test, and
+"PC/VLC" was one word for two players with different abilities. The file is
+genuinely not playable in the dashboard, and genuinely fine in VLC, and the pill
+said something false either way.
+
+`CanPlayDirectly` is therefore deliberately narrower than VLC: mp4/m4v/webm/mov,
+h264/vp9/vp8/av1, aac/mp3/opus/vorbis. Guessing wrong in this direction hands a
+browser a file it cannot decode, which reads as a broken server rather than a
+slow one. HEVC is left out for the same reason — Safari plays it, Chrome mostly
+does not.
+
+The orange pill is now **"Convert for player"**, and says in its tooltip that
+the TV plays it, VLC probably plays it, the dashboard cannot, and that the
+conversion copies the video untouched and only redoes the audio — which is true
+since the per-stream change earlier today, and is why that conversion is now
+59s rather than 2m51s.
+
+### What this changes in practice
+
+A library of mp4/aac files stops being converted at all: no second copy, no
+generation of picture spent, no wait. Only files a browser genuinely cannot open
+are queued, and those now keep their video exactly as it was.
+
+231 tests pass.

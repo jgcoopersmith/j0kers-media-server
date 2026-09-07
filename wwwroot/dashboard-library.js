@@ -647,6 +647,12 @@ async function prepareMedia(path) {
     });
     const data = await r.json();
     if (!r.ok) { alert(data.error || "could not prepare stream"); return; }
+    /* Nothing was queued because nothing needed converting — say so instead of
+       adding a card to a list of conversions that will never contain it. */
+    if (data.direct) {
+      flashPlayerMsg(started + " needs no conversion — it plays as it is.");
+      return;
+    }
     // Show it as converting straight away. The status poll is two seconds
     // apart, and this card is where the scroll below is about to put them —
     // an empty card in the meantime is what reads as nothing happening.
@@ -695,6 +701,17 @@ async function playMedia(path, startAt) {
     if (!r.ok) { alert(data.error || "playback failed"); return; }
     // the server has just recorded this play — don't leave a stale list
     noteWatched();
+
+    /* Already playable: the server handed back the file itself rather than
+       converting it, so there is nothing to prepare and nothing to wait for.
+       This is the case the whole exercise is about — a file in a container and
+       codecs the player opens is finished, and encoding it would only spend a
+       generation of picture arriving back where it started. */
+    if (data.direct) {
+      if (gen !== playGeneration) { if (tab && !tab.closed) tab.close(); return; }
+      playHls(data.direct, startAt, tab);
+      return;
+    }
 
     const url = mediaUrl(data.playlist);
     $("hlsmsg") && ($("hlsmsg").textContent = "preparing " + name + "…");
