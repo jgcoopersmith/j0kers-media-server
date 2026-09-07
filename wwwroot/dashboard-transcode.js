@@ -797,7 +797,11 @@ async function tcTranscode() {
     const gap = parseInt(($("tc-stagger") || {}).value || "0", 10);
     const pending = d.pending || 0;
     const skips = [];
-    if (d.alreadyGood > 0) skips.push(d.alreadyGood + " already play on a TV");
+    /* "already Ready", not "already play on a TV". The server now skips a file
+       when it is Ready BOTH ways, which is what the pills say; saying "on a TV"
+       described the old, narrower test and would read as an excuse for
+       skipping something the panel had just marked Convert for browser. */
+    if (d.alreadyGood > 0) skips.push(d.alreadyGood + " already Ready — nothing to do");
     const already = d.needs != null ? d.needs - d.queued : d.found - d.queued;
     if (already > 0) skips.push(already + " already converted or in progress");
     if (pending > 0) skips.push(pending + " still being read and queued behind these");

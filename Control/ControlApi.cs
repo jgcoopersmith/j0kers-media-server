@@ -4853,6 +4853,26 @@ public sealed partial class ControlApi : IDisposable
             codecsKnowable: _tvCodecs is not null,
             forceTranscodeForDlna: _serverConfig.Discovery.DlnaUseTranscode);
 
+    /// <summary>
+    /// Is there work to do on this file — the pills' question, asked of one
+    /// file, for the button that acts on them.
+    ///
+    /// Probes if it has to: this is somebody pressing Convert, on a bounded
+    /// batch, where a right answer is worth an ffprobe. That is the opposite
+    /// of the listing path, which must never probe.
+    /// </summary>
+    private bool NotReadyForEither(string file)
+    {
+        var state = _ffmpeg?.VodStatusFor(file) ?? Media.FfmpegManager.VodState.None;
+        // Already in hand. Queueing it again would restart it from nothing.
+        if (state == Media.FfmpegManager.VodState.Converting) return false;
+        // Ask the codecs first, so the cached answer Readiness reads below is
+        // this file's real one rather than a miss.
+        var needs = _tvCodecs is null ? (bool?)null : _tvCodecs.NeedsConversion(file);
+        var (pc, dlna) = Readiness(file, state, needs);
+        return !(pc && dlna == true);
+    }
+
     /// <summary>Playable as it stands, from codecs already known. Never probes.</summary>
     private bool PlayableFromCache(string file)
     {
@@ -5321,10 +5341,19 @@ public sealed partial class ControlApi : IDisposable
 
         var unique = files.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
-        // Only convert what a TV can't already play. Selecting a folder that
-        // holds a film plus its existing H.264 copies should convert the one
-        // that needs it, not re-encode the copies too. Unprobeable files are
-        // left alone (NeedsConversion answers false), matching the pills.
+        // Convert what is not Ready — the same question the pills ask, which
+        // is the whole point of this button.
+        //
+        // It used to ask NeedsConversion, which is only half of it: whether a
+        // *television* can decode the file. Once the panel started reporting
+        // browser playability as well, the two disagreed, and they disagreed
+        // silently. Selecting Action showed rows marked "Convert for browser"
+        // and queued nothing at all — 1,559 files found, 0 queued — because
+        // every one of them was already fine on a TV. The button looked dead
+        // while doing exactly what it had been told.
+        //
+        // A file being converted right now is not work to add; anything else
+        // short of Ready is.
         //
         // Deciding that costs a probe per file that isn't cached yet, and
         // deciding it for *every* file before queueing *any* is why picking a
@@ -5336,7 +5365,7 @@ public sealed partial class ControlApi : IDisposable
         var head = unique.Take(firstBatch).ToList();
         var tail = unique.Skip(firstBatch).ToList();
 
-        var needsConv = head.Where(f => _tvCodecs?.NeedsConversion(f) ?? true).ToList();
+        var needsConv = head.Where(NotReadyForEither).ToList();
         var queued = _ffmpeg.QueueVod(needsConv);
         HideConversions(needsConv);
 
@@ -5355,7 +5384,7 @@ public sealed partial class ControlApi : IDisposable
                 {
                     foreach (var f in tail)
                     {
-                        if (_tvCodecs?.NeedsConversion(f) ?? true) group.Add(f);
+                        if (NotReadyForEither(f)) group.Add(f);
                         if (group.Count < 10) continue;
                         added += ffmpeg.QueueVod(group);
                         HideConversions(group);

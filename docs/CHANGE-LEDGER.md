@@ -1778,3 +1778,54 @@ the owner and are permanent; only the DANE COOK copy is still restorable.
 Four `(2)` pairs remain deliberately untouched, all genuinely different content:
 Tenacious D *Tribute* and *Angel in Disguise* (same size, different streams),
 *Live at the Paramount* and Venture Bros *1x10* (different sizes).
+
+---
+
+## 2026-09-07 — "Transcode selected" queued nothing (v2.0.285 → v2.0.286)
+
+**Reported:** selecting Action in the Transcode window and pressing *Transcode
+selected* did nothing.
+
+### It did exactly what it was told
+
+    transcode: 0 file(s) queued from 1 selection(s) (1559 video file(s) found...)
+    POST /api/transcode 200
+
+The request arrived, 1,559 files were found, and none were queued. The button
+was not broken; the filter behind it was answering a different question from
+the one the panel had just asked.
+
+### The mismatch I introduced
+
+`TranscodeBatch` filtered on `_tvCodecs.NeedsConversion(f)` — whether a
+**television** can decode the file, and nothing else. That was right while the
+panel reported only the TV question. Once the pills started reporting browser
+playability too, the two drifted apart:
+
+* a file that is h264 with AC-3 audio plays on a TV, so `NeedsConversion` is
+  false and the button skips it
+* the same file cannot play in the dashboard, so the pill says **Convert for
+  browser**
+
+Every file under Action is fine on a TV, so the panel showed rows asking to be
+converted and the button queued none of them — silently. The comment above that
+line claimed it matched the pills, which had been true and was not any more.
+
+Both call sites now use `NotReadyForEither`, which asks the pills' own question
+through `Readiness`: a file already converting is not work to add, anything
+else short of Ready is. It probes when it has to, which is right here — this is
+a person pressing Convert on a bounded batch, the opposite of the listing path,
+where a probe per file is what broke Up and Refresh yesterday.
+
+The response field `alreadyGood` now means "Ready both ways" rather than "plays
+on a TV", so the panel's wording was corrected to match; it would otherwise
+have offered the old, narrower reason for skipping a file it had just marked
+Convert for browser.
+
+### Not a silent failure, but not a loud one either
+
+The panel did have a message for the empty case — it would have read *"nothing
+to queue — 1559 already converted or in progress"*. Accurate about the count
+and useless about the cause, next to rows marked as needing conversion.
+
+231 tests pass.
