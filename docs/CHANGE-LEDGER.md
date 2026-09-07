@@ -1094,3 +1094,88 @@ leave this machine launching a server at every logon.
 Registry: the real HKCU `Run` key was written and deleted once by the probe
 above, and read several times. Verified back to baseline. Nothing else on the
 machine was touched; no server restart beyond the publish hook's own.
+
+---
+
+## 2026-09-06 — A Log out button, and where 46 seconds went (v2.0.267 → v2.0.270)
+
+### Log out
+
+Signing out existed but only at the bottom of the Account dialog. It is now a
+pill in the header next to the account button, and both call the same function.
+
+That function had a real fault: it dropped the "remember this device" key from
+`localStorage` without revoking it, and the key is good for a year. Every
+sign-in therefore left a live credential on the account — which is exactly how
+`guest` reached twelve of them earlier today. It is now revoked through the
+self-service endpoint first, while the session can still authorise the call.
+It also lands on `/` with `replace` rather than `reload`, so the dashboard URL
+— which carries the server's self-open token — is not one Back press away.
+
+Correction to something claimed while doing this: I reported `signOut()` as
+having no caller. It had one; my grep covered only the `.js` files and missed
+the button in the HTML. I also reported the tray fix as absent from the built
+binary — that check searched UTF-8, and C# string literals are UTF-16.
+
+### The desktop shortcut kept vanishing
+
+Three times in one afternoon. Neither the post-commit hook nor
+`build-setup.ps1` ever deleted it — they only mention it in messages, which is
+what made it look like one of them did. Publishing replaces the installed
+binary, and for the moment it is missing Windows treats the shortcut as broken.
+The build script now rebuilds it and **reads it back** at the end of a round.
+
+### The 46-second start
+
+Measured, not guessed. The gap sat between `streaming services started` and
+`listening on`, with nothing logged in between, while the three starts before
+it took 1.3 seconds each.
+
+Every step of the `ControlApi` constructor now reports its own time. The answer:
+
+| step | time |
+|---|---|
+| stores | 2 ms |
+| hiding pre-existing conversions | 0 ms |
+| favorites, history, preferences, dlna shares | 4 ms |
+| television codec cache | 29 ms |
+| dlna service | 5 ms |
+| codec prefetch handover | 0 ms |
+| channel providers | 4 ms |
+| tv proxy | 0 ms |
+| **whole constructor** | **47 ms** |
+
+So it was never the constructor. The time was inside `HttpListener.Start()`.
+http.sys owns the port, not the process, and the previous server had been
+force-killed rather than closed — `netstat` showed 9090 `LISTENING` under pid 4
+with nothing answering it. The new listener simply waited for the old
+registration to drain. There is no retry loop in `HttpListenerBinder`; it is
+one blocking call.
+
+**Not a logon-path problem, and not reproducible on a clean stop and start** —
+the very next start was 47 ms end to end, bind included. The bind is now timed
+too, and says so above two seconds, because it is the one step that can stop
+dead in silence.
+
+### Verified live, after the owner stopped the elevated server
+
+| What | Evidence |
+|---|---|
+| Tray no longer opens a browser | `not opening the dashboard: this server is minimised to the tray`, and no `dashboard opened` line — where every earlier start had one directly after the tray line. |
+| Log out is really served | The running server returned `dashboard-core.js` at 26,968 bytes, byte-identical to the repository, with the revoke call present. |
+| Constructor timing | The table above, from the install's own log. |
+
+Earlier in the session this could not be checked at all: the running server was
+elevated, `Stop-Process` was denied, and it was serving a 26,036-byte copy of
+that file — an older build — while the install on disk was current.
+
+### Live-system actions
+
+Swept the leftover `j0kers-media-server.exe.inuse.778434309`. Stopped and
+started the server to measure; it is running and in the tray. Registry read
+only. Nothing under `G:\Archive` touched.
+
+### Still outstanding
+
+`Clean up Claude test keys.ps1` on the desktop has not been run — ten guest API
+keys from my own testing are still on the account.

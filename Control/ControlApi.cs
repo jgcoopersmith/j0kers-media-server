@@ -1137,10 +1137,22 @@ public sealed partial class ControlApi : IDisposable
 
     public void Start()
     {
+        // This is the one step that can stop dead without saying anything.
+        // http.sys owns the port, not this process, so when a previous server
+        // was killed rather than closed the registration is still draining and
+        // Start() simply waits for it — measured once at 46 seconds, with the
+        // log showing nothing between "streaming services started" and this
+        // line. Everything the dashboard prepares beforehand adds up to about
+        // 50ms, so any wait worth noticing is here.
+        var bindClock = System.Diagnostics.Stopwatch.StartNew();
         (var listener, var bound) = Hls.HttpListenerBinder.Start(_config.BindAddress, _config.Port, "control");
+        bindClock.Stop();
         _listener = listener;
         BoundHost = bound;
         Log.Info("control", $"listening on {Services.UrlScheme.Prefix}{bound}:{_config.Port}/api/");
+        if (bindClock.ElapsedMilliseconds >= 2000)
+            Log.Warn("control", $"claiming port {_config.Port} took {bindClock.ElapsedMilliseconds / 1000.0:0.0}s — "
+                                + "Windows was still releasing it from a server that did not shut down cleanly");
         _ = AcceptLoopAsync();
         StartDlnaListener();
     }
