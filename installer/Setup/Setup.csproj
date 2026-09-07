@@ -19,7 +19,13 @@
     <TrimMode>full</TrimMode>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <DebugType>none</DebugType>
+    <!-- What Explorer's Properties - Details tab shows. That tab is where the
+         version is read now that the package file name no longer carries one,
+         so it must not identify itself as "j0kers-setup-stub" on a machine
+         somebody has just copied it to. -->
     <AssemblyTitle>j0kers Media Server Setup</AssemblyTitle>
+    <Product>j0kers Media Server</Product>
+    <Description>Installs or upgrades j0kers Media Server</Description>
   </PropertyGroup>
 
 </Project>
