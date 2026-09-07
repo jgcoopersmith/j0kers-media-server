@@ -868,6 +868,21 @@ public sealed class FfmpegManager : IDisposable
             }
             if (Directory.Exists(dir))
             {
+                // Say it. This is a recursive delete of work the owner may
+                // have waited an hour for, and it only ever spoke up when it
+                // *failed* — so "did it throw away what I already had, or
+                // convert something it had never seen?" could not be answered
+                // from the log at all. It had to be reconstructed from
+                // directory timestamps and a scan of every source.txt on disk.
+                var going = 0L;
+                var files = 0;
+                try
+                {
+                    foreach (var f in new DirectoryInfo(dir).EnumerateFiles()) { going += f.Length; files++; }
+                }
+                catch { /* sizing is for the message, not the decision */ }
+                Log.Info("ffmpeg", $"replacing an unfinished {stream}: deleting {files} file(s), {Bytes(going)} "
+                                   + "— it had no end marker, so there was nothing to resume");
                 try { Directory.Delete(dir, recursive: true); }
                 catch (Exception ex) { Log.Warn("ffmpeg", $"could not clear partial {stream}: {ex.Message}"); }
             }
