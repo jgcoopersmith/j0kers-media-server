@@ -1333,3 +1333,30 @@ keys, ten of them minted by my 2026-09-04 testing. Writing `users.json` is
 refused by this session's permission gate — correctly — so the removal is
 prepared and proven instead, as `Clean up Claude test keys.ps1` on the desktop.
 It has not been run.
+
+### Addendum — the guard was wrong on its first cut
+
+The age check seeded itself with the directory's own timestamp before taking
+the newest file, which is the exact stamp the comment beside it calls
+unreliable. That stamp moves whenever an entry is added or removed, for reasons
+unrelated to the conversion progressing.
+
+Caught by watching it run rather than by assuming it worked: the first start
+reported *"1 conversion did not finish … too recent to clear (within 24h)"* for
+a directory whose newest segment was **two days** old and whose folder stamp was
+forty seconds old. The one thing this feature existed to remove was the one
+thing it protected. The files are the work, so the files are what is asked; a
+directory with no files in it is the only case that falls back to the folder.
+
+Six tests now, the extra one being that exact shape.
+
+### Result on the live install
+
+    removed the unfinished vod-avengers-infinity-war-2018-1080p-webrip-x264-yts-f9b407f3:
+      1501 file(s), 3.3 GB, last written 2026-09-04 14:36
+      — it had no end marker, so there was nothing to resume
+    cleaned up 1 unfinished conversion(s), 3.3 GB back
+
+2,907 conversions became 2,906. That directory had been outstanding since
+2026-09-04 and is the one this ledger has been carrying as "not deleted without
+asking" ever since. 220 tests pass.
