@@ -2014,8 +2014,15 @@ public sealed class FfmpegManager : IDisposable
         size = 0;
         files = 0;
         var info = new DirectoryInfo(dir);
-        newestWriteUtc = info.LastWriteTimeUtc;
-        if (IsComplete(dir)) return false;
+        // Deliberately NOT seeded with the directory's own timestamp. That
+        // stamp moves whenever an entry is added or removed, which happens for
+        // reasons that have nothing to do with the conversion progressing —
+        // measured on the stuck Infinity War directory, whose newest segment
+        // was two days old while the directory itself read as forty seconds
+        // old, so seeding with it protected a conversion that was long dead.
+        // The files are the work; they are what is asked.
+        newestWriteUtc = DateTime.MinValue;
+        if (IsComplete(dir)) { newestWriteUtc = info.LastWriteTimeUtc; return false; }
 
         foreach (var f in info.EnumerateFiles())
         {
@@ -2023,6 +2030,9 @@ public sealed class FfmpegManager : IDisposable
             size += f.Length;
             files++;
         }
+        // An empty directory has no work in it to date, so the only stamp
+        // there is is the directory's own.
+        if (files == 0) newestWriteUtc = info.LastWriteTimeUtc;
         // No cutoff means cleanup is switched off, not "everything qualifies".
         return cutoff is DateTime c && newestWriteUtc <= c;
     }

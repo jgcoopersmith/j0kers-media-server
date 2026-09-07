@@ -94,6 +94,26 @@ public class PartialConversionCleanupTests
     }
 
     [Fact]
+    public void A_fresh_directory_stamp_does_not_protect_stale_contents()
+    {
+        // The first cut of this seeded the age with the directory's own
+        // timestamp before taking the newest file. That stamp moves whenever
+        // an entry is added or removed, for reasons that have nothing to do
+        // with the conversion progressing - and it kept the real stuck
+        // conversion alive: every segment two days old, the directory itself
+        // forty seconds old, reported "too recent to clear".
+        using var root = new TempDir();
+        var dir = Conversion(root, "vod-dead-but-poked", finished: false,
+                             writtenUtc: DateTime.UtcNow.AddDays(-2));
+        Directory.SetLastWriteTimeUtc(dir, DateTime.UtcNow);   // something touched the folder
+
+        var stale = FfmpegManager.IsStalePartial(dir, DateTime.UtcNow.AddHours(-24), out _, out _, out var touched);
+
+        Assert.True(stale);
+        Assert.True(touched < DateTime.UtcNow.AddHours(-24));
+    }
+
+    [Fact]
     public void Age_comes_from_the_newest_file_not_the_directory_stamp()
     {
         // Windows does not move a directory's LastWriteTime when a file inside
