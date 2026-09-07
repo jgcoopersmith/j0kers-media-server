@@ -4838,14 +4838,28 @@ public sealed partial class ControlApi : IDisposable
             // A conversion is one way to be instant; already being playable is
             // the other, and it is the better one — nothing was encoded, no
             // picture was spent, and no disk was used twice.
+            //
+            // Read from the codec cache, never probed. This is called once per
+            // file in a listing, and once per file in every sub-folder for the
+            // summary pills: anything here that can start an ffprobe turns
+            // opening a folder into thousands of process launches, which is
+            // precisely what stopped Up and Refresh from answering.
             converted: state == Media.FfmpegManager.VodState.Done
-                       || _ffmpeg?.CanPlayDirectly(file) == true,
+                       || PlayableFromCache(file),
             fullResConversion: _vodIndex?.DirectoryFor(file) is not null,
             needsConversion: needsConversion,
             // No codec knowledge at all (no ffmpeg): DlnaShouldList offers
             // everything rather than hiding a library, so say the same here.
             codecsKnowable: _tvCodecs is not null,
             forceTranscodeForDlna: _serverConfig.Discovery.DlnaUseTranscode);
+
+    /// <summary>Playable as it stands, from codecs already known. Never probes.</summary>
+    private bool PlayableFromCache(string file)
+    {
+        var known = _tvCodecs?.CodecsCached(file);
+        return known is not null
+               && Media.FfmpegManager.PlayableAsIs(file, known.Value.video, known.Value.audio);
+    }
 
     /// <summary>
     /// The decision itself, with nothing to construct, so the four states the

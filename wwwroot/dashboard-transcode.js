@@ -147,6 +147,13 @@ function tcShowEmpty() {
 }
 
 let tcReloadGen = 0;
+/* The scan in flight, so a click can cut it off.
+   Discarding a stale answer on arrival is not the same as not waiting for it:
+   the browser still holds the connection, and a slow scan behind a click meant
+   Up and Refresh sat there doing nothing visible until it finished. A
+   deliberate act now abandons whatever was running and starts its own. */
+let tcAbort = null;
+
 async function tcReload(path, quiet) {
   /* Nothing to show and the root are different things, and treating them as
      one is why Up did not work.
@@ -198,16 +205,36 @@ async function tcReload(path, quiet) {
     msg.textContent = "";
     tcState.selected.clear();
     tcSyncGo();
+    /* Answer the press now, not when the server does. A folder of unread
+       files takes a moment to describe, and until this the panel gave no sign
+       at all in between — which is indistinguishable from a button that did
+       not work. */
+    $("tc-path").textContent = path ? path : "Drives";
+    list.style.opacity = "0.5";
   }
+
+  // A person navigating abandons whatever was already being fetched; a quiet
+  // background refresh never cuts one off.
+  if (!quiet) { try { tcAbort?.abort(); } catch { /* nothing in flight */ } }
+  const controller = new AbortController();
+  if (!quiet) tcAbort = controller;
+
   let data;
   try {
     const url = "/api/transcode/scan?path=" + encodeURIComponent(path)
       + (tcState.search ? "&q=" + encodeURIComponent(tcState.search) : "");
-    const r = await fetch(url, { headers: headers() });
+    const r = await fetch(url, { headers: headers(), signal: controller.signal });
     data = await r.json();
     if (!r.ok) throw new Error(data.error || r.status);
-  } catch (e) { if (gen === tcReloadGen) { list.innerHTML = ""; msg.textContent = "cannot open: " + e.message; } return; }
+  } catch (e) {
+    // Being cut off by a newer click is the system working, not a failure to
+    // report: the reload that replaced this one owns the panel now.
+    if (e && e.name === "AbortError") return;
+    if (gen === tcReloadGen) { list.innerHTML = ""; list.style.opacity = ""; msg.textContent = "cannot open: " + e.message; }
+    return;
+  }
   if (gen !== tcReloadGen) return;   // a newer search/navigation already ran
+  list.style.opacity = "";
 
   tcState.path = data.path || "";
   tcState.parent = data.parent ?? (data.path ? "" : null);

@@ -346,6 +346,39 @@ public sealed class TvCodecs
         return false;
     }
 
+    /// <summary>
+    /// The codecs already known for this file, or null when it has not been
+    /// probed. Never launches ffprobe.
+    ///
+    /// Exists because a listing must not probe. A directory listing asks about
+    /// every file in it, and every file in every sub-folder for the summary
+    /// pills; anything on that path that can start an ffprobe turns opening a
+    /// folder into thousands of process launches. That is exactly what a live
+    /// codec check did when it was put there — the Transcode window's Up and
+    /// Refresh stopped responding, because the request behind them had become
+    /// minutes of probing.
+    /// </summary>
+    public (string? video, string? audio)? CodecsCached(string file)
+    {
+        if (IsConversionOutput(file)) return null;
+        string key;
+        try
+        {
+            var info = new FileInfo(file);
+            if (!info.Exists) return null;
+            key = $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
+        }
+        catch { return null; }
+
+        lock (_lock)
+        {
+            if (!_cache.TryGetValue(key, out var hit)) return null;
+            var p = hit.Split('|');
+            return (string.IsNullOrEmpty(p.ElementAtOrDefault(0)) ? null : p[0],
+                    string.IsNullOrEmpty(p.ElementAtOrDefault(1)) ? null : p[1]);
+        }
+    }
+
     public void Save()
     {
         lock (_lock)

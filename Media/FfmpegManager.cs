@@ -606,11 +606,27 @@ public sealed class FfmpegManager : IDisposable
         {
             if (!DirectPlayExt.Contains(Path.GetExtension(file))) return false;
             var (video, audio) = ProbeCodecs(file);
-            if (video is null || audio is null) return false;   // unread: convert, as before
-            return DirectPlayVideo.Contains(CodecFamily(video))
-                && DirectPlayAudio.Contains(CodecFamily(audio));
+            return PlayableAsIs(file, video, audio);
         }
         catch { return false; }
+    }
+
+    /// <summary>
+    /// The same decision, from codecs somebody else already knows, so a
+    /// listing can answer it without launching anything.
+    ///
+    /// This exists because the live version was called once per file while
+    /// building a directory listing — and once per file in every sub-folder
+    /// for the summary pills. ProbeCodecs has no cache and starts an ffprobe
+    /// every time, so opening a folder became thousands of process launches
+    /// and the Transcode window's Up and Refresh stopped answering.
+    /// </summary>
+    public static bool PlayableAsIs(string file, string? video, string? audio)
+    {
+        if (!DirectPlayExt.Contains(Path.GetExtension(file))) return false;
+        if (video is null || audio is null) return false;   // unread: convert, as before
+        return DirectPlayVideo.Contains(CodecFamily(video))
+            && DirectPlayAudio.Contains(CodecFamily(audio));
     }
 
     /// <summary>First video and audio codec names of a media file, via ffprobe.</summary>

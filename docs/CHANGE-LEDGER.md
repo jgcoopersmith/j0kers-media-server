@@ -1470,3 +1470,43 @@ generation of picture spent, no wait. Only files a browser genuinely cannot open
 are queued, and those now keep their video exactly as it was.
 
 231 tests pass.
+
+---
+
+## 2026-09-06 — Up and Refresh again, and the reason they stopped (v2.0.279 → v2.0.280)
+
+**Reported:** Up and Refresh do not work in the Transcode window. "Again."
+
+### It was mine, from the previous round
+
+`CanPlayDirectly` was put on the listing path — once per file in the folder, and
+once per file in every sub-folder for the summary pills. It calls
+`FfmpegManager.ProbeCodecs`, which **has no cache and starts an ffprobe every
+single time**, with a 15-second ceiling each.
+
+The distinction that made this invisible: `TvCodecs.Codecs` *does* cache, which
+is why the per-file check that was already there had been fine for months. The
+one I added looked identical and was not. Opening a folder became thousands of
+process launches, so the request behind the button took minutes, and a button
+whose request has not come back is indistinguishable from a button that does
+nothing.
+
+`TvCodecs.CodecsCached` now answers from the cache and never launches anything,
+and the decision itself moved to `FfmpegManager.PlayableAsIs`, which takes the
+codecs rather than fetching them. The live probe stays on `/api/play` and
+`/api/file`, which are one file, on demand, where correctness is worth a probe.
+
+### And they now act on the press
+
+Discarding a stale answer on arrival — which the generation counter already did
+correctly — is not the same as not waiting for one. The browser still held the
+connection, so a slow scan behind a click meant nothing visible happened until
+it finished.
+
+A deliberate navigation now aborts whatever was in flight, and the panel
+acknowledges the press immediately: the path updates and the list dims before
+the request goes out, rather than after it returns. A background refresh never
+cuts off a person's click, and an abort is not reported as a failure — the
+reload that replaced it owns the panel.
+
+231 tests pass.
