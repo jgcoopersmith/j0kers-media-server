@@ -1510,3 +1510,66 @@ cuts off a person's click, and an abort is not reported as a failure — the
 reload that replaced it owns the panel.
 
 231 tests pass.
+
+---
+
+## 2026-09-06 — 133 redundant duplicates removed from the library (v2.0.281 → v2.0.282)
+
+**Asked for:** scan for `(H.264)` copies with AC-3 audio that duplicate an
+already-Ready original, then — after checking — delete them.
+
+This is the first time this session has deleted the owner's media. It was asked
+for explicitly, checked twice, and sent to the Recycle Bin rather than removed.
+
+### What the library actually holds
+
+1,875 `(H.264)` files, from the probe cache alone — **zero ffprobe launches**,
+which is the difference between reading 3,801 cached answers and starting 1,875
+processes.
+
+| audio | files | browser |
+|---|---|---|
+| mp3 | 1,337 | plays |
+| aac | 225 | plays |
+| **ac3** | **311** | refused |
+| unknown | 2 | — |
+
+Only the 311 are browser-blocked, and AC-3 is *not* a TV problem — it is in
+`TvCodecs.PlayableAudio`. So those `(H.264)` conversions changed the half that
+was never blocking anything and left the half that was.
+
+### The seven checks, per file
+
+Nothing was deleted on the strength of a name. For each candidate:
+
+1. its audio really is AC-3 (so it does nothing for a browser)
+2. a sibling original exists on disk
+3. that sibling is not itself an `(H.264)` file
+4. the sibling's conversion carries `EXT-X-ENDLIST`
+5. **every segment its playlist lists is present** — 93,793 of them across the set
+6. the conversion is full-resolution, so DLNA will accept it
+7. the conversion is not empty
+
+**133 passed all seven. 0 failed.** 133 distinct siblings, so no two candidates
+leaned on the same original, and none of the 133 had a conversion of its own to
+orphan.
+
+The other 178 AC-3 files have no sibling — they *are* the only copy — and were
+left alone.
+
+### Live-system actions
+
+`SHFileOperation` with `FOF_ALLOWUNDO`, every dialog suppressed so nothing could
+block on a click. Checked first that the Recycle Bin on that volume holds
+281 GB with `NukeOnDelete=0`, so 83 GB would genuinely recycle rather than be
+destroyed quietly.
+
+* 133 files, **83.0 GB**, moved to the Recycle Bin. Return code 0, nothing aborted.
+* After: 0 of the deleted paths remain, the bin holds 83.0 GB, and **133/133**
+  originals are still present with a finished, whole, full-resolution conversion.
+* `Redundant H264 duplicates.txt` on the desktop is the restore list, naming each
+  file removed and the original that covers it.
+
+Nothing else under `G:\Archive` was touched. Paths over 260 characters needed
+the long-path prefix to stat at all — without it they drop silently out of a
+walk, which is worth remembering for anything that counts files here.
