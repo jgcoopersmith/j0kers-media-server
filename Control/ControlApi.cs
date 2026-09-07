@@ -398,19 +398,40 @@ public sealed partial class ControlApi : IDisposable
         _ffmpeg = ffmpeg;
         _subtitles = ffmpeg is not null ? new Media.SubtitleManager(ffmpeg) : null;
         _requestShutdown = requestShutdown;
+
+        // Everything below runs before the dashboard can answer, and all of it
+        // reads the disk. That made startup a single silent gap: 46 seconds
+        // between "streaming services started" and "listening on", with not one
+        // line to say which part of it — and the three starts before that took
+        // 1.3 seconds each, so there was nothing to compare against either.
+        // Each step now says how long it took, and anything slow enough for a
+        // person to notice says so at a level they will actually see.
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var mark = 0L;
+        void Step(string what)
+        {
+            var ms = clock.ElapsedMilliseconds - mark;
+            mark = clock.ElapsedMilliseconds;
+            if (ms >= 1000) Log.Info("startup", $"{what} took {ms / 1000.0:0.0}s");
+            else Log.Debug("startup", $"{what} {ms}ms");
+        }
+
         StartIdleShutdownWatch();
         StartLinkSweep();
         _playlists = new Media.PlaylistStore(baseDirectory);
         _library = new Media.LibraryStore(baseDirectory);
         _links = new Media.StreamLinks(baseDirectory);
+        Step("stores");
         // Conversions made before unlinking existed are still listed; take them
         // out once so the list holds what was published rather than everything
         // that was ever converted.
         _links.HideExistingConversionsOnce(MediaRootPath());
+        Step("hiding pre-existing conversions");
         _favorites = new Media.FavoritesStore(baseDirectory);
         _history = new Media.WatchHistory(baseDirectory);
         _preferences = new Media.UserPreferences(baseDirectory);
         _dlnaShare = new Dlna.DlnaShare(baseDirectory);
+        Step("favorites, history, preferences, dlna shares");
 
         // What a television can and cannot decode — needs ffmpeg to probe
         // with, so it stays null without one and the DLNA path falls back
@@ -427,8 +448,10 @@ public sealed partial class ControlApi : IDisposable
             _tvCodecs.OnProblem = Problems.Record;
             ffmpeg.OnProblem = Problems.Record;
         }
+        Step("television codec cache");
 
         if (serverConfig.Discovery.Dlna) _dlna = NewDlna();
+        Step("dlna service");
 
         // Fill the codec cache in the background so the transcode panel stops
         // saying "checking...". The folder summary reads the cache only, on
@@ -439,6 +462,9 @@ public sealed partial class ControlApi : IDisposable
         // unknown until each one is visited by hand. So walk the library slowly
         // instead, well behind whatever else the machine is doing.
         StartCodecPrefetch();
+        // Meant to be a background walk, so this should read as nothing at all;
+        // if it ever does not, it is blocking the dashboard from starting.
+        Step("codec prefetch handover");
         // The moment somebody starts watching anything — dashboard, phone,
         // VLC, a shared link — it goes in the history. Preparing a file
         // through /api/play records it too, but most playback never touches
@@ -474,6 +500,7 @@ public sealed partial class ControlApi : IDisposable
         { Timeout = TimeSpan.FromSeconds(20) };
         _providers = Media.Providers.ProviderStore.Load(baseDirectory, _providerHttp);
         _relayProviders = Media.Providers.ProviderStore.RelaySet(baseDirectory);
+        Step("channel providers");
         // The proxy gets its own client because it must not follow redirects
         // by itself: it hands upstream bytes straight back to the caller, so
         // each hop has to face the private-address check rather than being
@@ -488,6 +515,10 @@ public sealed partial class ControlApi : IDisposable
         }))
         { Timeout = TimeSpan.FromSeconds(20) };
         _tvProxy = new Media.Providers.HlsProxy(_proxyHttp, mediaLinks);
+        Step("tv proxy");
+        if (clock.ElapsedMilliseconds >= 2000)
+            Log.Info("startup", $"the dashboard took {clock.ElapsedMilliseconds / 1000.0:0.0}s to prepare "
+                                + "— the breakdown above says where it went");
     }
 
     /// <summary>The host the listener actually bound (may differ from config after the Windows ACL fallback).</summary>
