@@ -1256,3 +1256,80 @@ Read-only on `G:\Archive`: `ffprobe` on one source, and every `source.txt` under
 `G:\Archive\Transcoded` read once to answer the "was it already converted"
 question. Two timed ffmpeg runs written to the session scratchpad and deleted;
 809 MB at its peak, nothing under the media root. 214 tests pass.
+
+---
+
+## 2026-09-06 — Unfinished conversions clear themselves (v2.0.274 → v2.0.275)
+
+**Asked for:** clean up partial conversions automatically.
+
+### Why this is not the sweep that was removed
+
+An earlier version deleted every `vod-*` directory whose playlist had no
+`EXT-X-ENDLIST`, at startup, silently. That was removed because it destroyed
+real work: this server is stopped mid-encode as a matter of routine — a
+restart, an upgrade, the machine sleeping — and every conversion running at
+that instant is "unfinished". An upgrade is the worst case in the set, because
+it stops a converting server and starts a sweeping one.
+
+The difference here is a grace period, not good intentions.
+`ffmpeg.partialConversionGraceHours` defaults to **24**, and the age used is the
+newest write **anywhere inside** the directory rather than the directory's own
+stamp — on Windows a directory's `LastWriteTime` does not move when a file
+inside it is appended to, so a conversion that has been writing segments for
+hours looks untouched, and reading the directory alone would sweep the one
+thing that must never be swept. Setting the value to 0 goes back to reporting
+and deleting nothing.
+
+Every removal names the stream, its file count, its size and when it was last
+written. The count that survives is reported with the reason it survived.
+
+### Tested on the case that matters
+
+`IsStalePartial` was separated out and given five tests, because the guard is
+the whole of the difference between this and the sweep that was deleted:
+
+| | expected |
+|---|---|
+| interrupted 20 seconds ago | left alone |
+| untouched for three days | cleared |
+| finished 400 days ago | never touched |
+| grace set to 0 | clears nothing |
+| old directory stamp, segment written 5s ago | left alone |
+
+A test that only proved "stale directories are removed" would be testing the
+half that was never the problem.
+
+### Also: the silent delete in StartVod
+
+Starting a conversion over a directory that exists deletes it recursively, and
+that only ever logged when the delete **failed**. So "did it throw away what I
+already had, or convert something it had never seen?" could not be answered
+from the log — it had to be reconstructed from directory timestamps and a scan
+of every `source.txt` on disk. It now says which stream, how many files and how
+much.
+
+For the record, that question was asked and the answer was **no**: zero
+evictions have ever been logged, zero failed clears, and the unfinished count
+was 1 both before (21:20:42) and after (21:35:05) the Alice conversion. Nothing
+was deleted; it was a first conversion.
+
+### Testing audit for this session
+
+| Leftover | State |
+|---|---|
+| Session scratchpads (both ids) | Empty. The 809 MB of timed ffmpeg output written while measuring the remux was deleted at the time. |
+| `j0kers-tests-*` temp directories | 2 found after the suite ran, swept. `TempDir.Dispose` swallows failures, so they accumulate quietly. |
+| `j0kers-pkg-*`, `j0kers-stub-*`, `j0kers-payload-*`, `j0kers-setup-*` | None. |
+| `HKCU\...\Run` and `...\StartupApproved\Run` | No `j0kers` entry in either. The throwaway registry probe left nothing. |
+| `ZzTempRegistryProbe.cs` | Deleted the moment it had answered. |
+| `j0kers-media-server.exe.inuse.*` | Swept. |
+| Repository | Only intended changes; no stray probe files. |
+| `publish/staging` (72 MB) | The post-commit hook's own build area, gitignored and rebuilt every publish. Left. |
+| `G:\Archive` | Read-only throughout: one `ffprobe`, and every `source.txt` read once. Nothing written or removed. |
+
+**Still outstanding, and not mine to close:** `guest` still carries **12** API
+keys, ten of them minted by my 2026-09-04 testing. Writing `users.json` is
+refused by this session's permission gate — correctly — so the removal is
+prepared and proven instead, as `Clean up Claude test keys.ps1` on the desktop.
+It has not been run.

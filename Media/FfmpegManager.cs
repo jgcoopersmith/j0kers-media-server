@@ -175,7 +175,9 @@ public sealed class FfmpegManager : IDisposable
         // no tray icon until the browser opens, so a server that was working
         // perfectly looked like one that had not started. It says the same
         // thing a moment later now, with the server already up.
-        _ = Task.Run(ReportIncompleteVodDirs);  // names them; deletes nothing - see the method
+        // Off the startup path: it reads every conversion directory, and
+        // nothing waits on the answer.
+        _ = Task.Run(CleanUpIncompleteVodDirs);
         MarkExistingConversionsKeptOnce(Path.Combine(baseDirectory, "vod-keep-migrated"));
         LoadChannels();
         LoadQueueSettings();
@@ -1914,7 +1916,7 @@ public sealed class FfmpegManager : IDisposable
         {
             if (!Directory.Exists(dir)) return;
             if (IsComplete(dir)) return;
-            // Not deleted. See ReportIncompleteVodDirs for why.
+            // Not deleted here. See CleanUpIncompleteVodDirs.
             Log.Info("ffmpeg", $"conversion did not finish: {stream} — kept on disk; "
                 + "converting it again replaces it");
         }
@@ -1973,29 +1975,111 @@ public sealed class FfmpegManager : IDisposable
     /// opened, repeatedly, and the only trace was a log line nobody had a
     /// reason to read.
     ///
-    /// Nothing needed it. A partial is already cleared by StartVod at the one
-    /// safe moment - when that same conversion is about to be redone and its
-    /// directory is being replaced anyway. This swept ahead of that for no
-    /// benefit, and it swept the whole media root, at the worst possible
-    /// moment, without asking.
+    /// That sweep was removed. This one is not it, and the difference is the
+    /// grace period rather than good intentions.
     ///
-    /// The rule now: this server does not delete a conversion by itself. It
-    /// says what it found and leaves it where it is.
+    /// A partial cannot be resumed - starting the conversion again deletes the
+    /// directory and encodes from the beginning - so the only thing on disk is
+    /// however far it happens to play. Left alone, they accumulate: gigabytes
+    /// behind a playlist listing one segment, which the owner has no reason to
+    /// go looking for.
+    ///
+    /// What makes clearing them safe is *when*. Anything written inside the
+    /// grace window is left where it is, so the conversion interrupted by the
+    /// restart that led to this start survives it - which is precisely the
+    /// case the old sweep destroyed, every upgrade, silently. Only work
+    /// nothing has touched for a day is removed, and every removal says which
+    /// stream, how big it was, and when it was last written.
+    ///
+    /// Set ffmpeg.partialConversionGraceHours to 0 to go back to reporting and
+    /// deleting nothing.
     /// </summary>
-    private void ReportIncompleteVodDirs()
+    /// <summary>
+    /// Is this conversion directory one that may be cleared: unfinished, and
+    /// untouched since <paramref name="cutoff"/>?
+    ///
+    /// Separated out and given tests because the version of this that had no
+    /// cutoff deleted the owner's work, repeatedly, and the guard is the whole
+    /// of the difference.
+    ///
+    /// The age is the newest write *anywhere inside*, not the directory's own
+    /// stamp: on Windows a directory's LastWriteTime does not move when a file
+    /// inside it is appended to, so a conversion writing segments right now
+    /// can look untouched for as long as it has been running — which is
+    /// exactly the directory that must never be swept.
+    /// </summary>
+    internal static bool IsStalePartial(string dir, DateTime? cutoff,
+                                        out long size, out int files, out DateTime newestWriteUtc)
+    {
+        size = 0;
+        files = 0;
+        var info = new DirectoryInfo(dir);
+        newestWriteUtc = info.LastWriteTimeUtc;
+        if (IsComplete(dir)) return false;
+
+        foreach (var f in info.EnumerateFiles())
+        {
+            if (f.LastWriteTimeUtc > newestWriteUtc) newestWriteUtc = f.LastWriteTimeUtc;
+            size += f.Length;
+            files++;
+        }
+        // No cutoff means cleanup is switched off, not "everything qualifies".
+        return cutoff is DateTime c && newestWriteUtc <= c;
+    }
+
+    private void CleanUpIncompleteVodDirs()
     {
         try
         {
             if (!Directory.Exists(_mediaRoot)) return;
-            var partial = 0;
+
+            var graceHours = _config.PartialConversionGraceHours;
+            // Nothing running can be swept, because nothing has started yet:
+            // this runs off the constructor, before the queue is restored and
+            // before any request can reach StartVod. The age check below is
+            // what protects the conversion that was running when this server
+            // was last stopped.
+            var cutoff = graceHours > 0
+                ? DateTime.UtcNow - TimeSpan.FromHours(graceHours)
+                : (DateTime?)null;
+
+            var kept = 0;
+            var removed = 0;
+            var reclaimed = 0L;
+
             foreach (var dir in Directory.EnumerateDirectories(_mediaRoot, "vod-*"))
             {
-                try { if (!IsComplete(dir)) partial++; }
-                catch { /* unreadable is not a reason to touch it */ }
+                try
+                {
+                    if (!IsStalePartial(dir, cutoff, out var size, out var files, out var touched))
+                    {
+                        if (!IsComplete(dir)) kept++;
+                        continue;
+                    }
+
+                    Directory.Delete(dir, recursive: true);
+                    removed++;
+                    reclaimed += size;
+                    Log.Info("ffmpeg", $"removed the unfinished {Path.GetFileName(dir)}: {files} file(s), {Bytes(size)}, "
+                                       + $"last written {touched.ToLocalTime():yyyy-MM-dd HH:mm} "
+                                       + "— it had no end marker, so there was nothing to resume");
+                }
+                catch (Exception ex)
+                {
+                    // Unreadable, or in use by something this server does not
+                    // own: leave it and say so rather than retrying blindly.
+                    Log.Warn("ffmpeg", $"could not clear {Path.GetFileName(dir)}: {ex.Message}");
+                }
             }
-            if (partial > 0)
-                Log.Info("ffmpeg", $"{partial} conversion(s) did not finish and are still on disk. "
-                    + "Nothing was deleted; converting one again replaces it.");
+
+            if (removed > 0)
+                Log.Info("ffmpeg", $"cleaned up {removed} unfinished conversion(s), {Bytes(reclaimed)} back");
+            if (kept > 0)
+                Log.Info("ffmpeg", cutoff is null
+                    ? $"{kept} conversion(s) did not finish and are still on disk. "
+                      + "Automatic cleanup is off (ffmpeg.partialConversionGraceHours = 0); converting one again replaces it."
+                    : $"{kept} conversion(s) did not finish and are still on disk, too recent to clear "
+                      + $"(within {graceHours:0.#}h). Converting one again replaces it.");
         }
         catch (Exception ex) { Log.Warn("ffmpeg", $"incomplete-conversion check failed: {ex.Message}"); }
     }

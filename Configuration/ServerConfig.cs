@@ -652,6 +652,26 @@ public sealed class FfmpegConfig
     [JsonPropertyName("vodCacheMaxGb")] public double VodCacheMaxGb { get; set; } = 0;
 
     /// <summary>
+    /// How long an unfinished conversion is left alone before the server
+    /// removes it at startup. Hours; 0 never removes anything.
+    ///
+    /// A conversion with no EXT-X-ENDLIST cannot be resumed — starting it
+    /// again deletes the directory and encodes from the beginning — so what is
+    /// on disk is only worth keeping for as far as it happens to play.
+    ///
+    /// The delay is the whole safety of this, and it is not arbitrary. This
+    /// server is stopped mid-encode as a matter of routine: a restart, an
+    /// upgrade, the machine sleeping. Every conversion running at that instant
+    /// becomes "unfinished", and an earlier version of this swept them on the
+    /// next start — destroying hours of encoding before the window had even
+    /// opened, most reliably during an upgrade, which stops a converting
+    /// server and starts a sweeping one. A day's grace means the conversion
+    /// interrupted by that upgrade is still there afterwards, and only work
+    /// nothing has touched since is cleared.
+    /// </summary>
+    [JsonPropertyName("partialConversionGraceHours")] public double PartialConversionGraceHours { get; set; } = 24;
+
+    /// <summary>
     /// Carry a channel's subtitles through the restream.
     ///
     /// On by default: dropping them was a workaround for a provider whose
