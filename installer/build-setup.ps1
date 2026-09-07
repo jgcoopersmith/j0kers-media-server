@@ -134,6 +134,34 @@ try {
     finally { $out.Dispose() }
     Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
 
+    # --- the desktop launcher ---------------------------------------------
+    # Publishing replaces the installed binary, and for the moment it is gone
+    # Windows treats the desktop shortcut as broken - three times in one
+    # afternoon it removed it outright, leaving no way to start the server from
+    # the desktop and no sign of why. Rebuilding it here costs nothing and
+    # makes the end of a round self-healing rather than something to remember.
+    $installedExe = Join-Path $installed 'j0kers-media-server.exe'
+    if (Test-Path -LiteralPath $installedExe) {
+        $lnk = Join-Path $OutputDir 'j0kers Media Server.lnk'
+        $shell = New-Object -ComObject WScript.Shell
+        $sc = $shell.CreateShortcut($lnk)
+        $sc.TargetPath       = $installedExe
+        $sc.WorkingDirectory = $installed
+        $sc.Arguments        = '"server.json"'
+        $sc.IconLocation     = "$installedExe,0"
+        $sc.Description      = 'j0kers Media Server'
+        $sc.Save()
+        # Read it back: a shortcut that saved but points nowhere is the exact
+        # failure this is here to stop, and it is invisible until it is needed.
+        $check = $shell.CreateShortcut($lnk)
+        if ($check.TargetPath -eq $installedExe) {
+            Write-Host ('  desktop shortcut -> ' + $installedExe)
+        }
+        else {
+            Write-Host '  WARNING: the desktop shortcut did not save correctly' -ForegroundColor Yellow
+        }
+    }
+
     $mb = [math]::Round((Get-Item -LiteralPath $target).Length / 1MB)
     Write-Host ''
     Write-Host "Built: $target  (${mb} MB)" -ForegroundColor Green
