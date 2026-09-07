@@ -4731,9 +4731,10 @@ public sealed partial class ControlApi : IDisposable
             percent = _ffmpeg?.VodProgressSnapshot
                 .FirstOrDefault(p => string.Equals(p.Stream, stream, StringComparison.OrdinalIgnoreCase))?.Percent;
         }
-        var needs = cacheOnly
-            ? (_tvCodecs?.NeedsConversionCached(f.FullName) == true)
-            : (_tvCodecs?.NeedsConversion(f.FullName) ?? false);
+        var needsRaw = cacheOnly
+            ? _tvCodecs?.NeedsConversionCached(f.FullName)
+            : (_tvCodecs is null ? null : (bool?)_tvCodecs.NeedsConversion(f.FullName));
+        var (pcReady, dlnaReady) = Readiness(f.FullName, state, needsRaw);
         return new
         {
             name = f.Name,
@@ -4741,10 +4742,65 @@ public sealed partial class ControlApi : IDisposable
             title = Media.StreamTitle.PrettifyFile(f.Name),
             type = "file",
             detail = f.Length >= 1024 * 1024 ? $"{f.Length / (1024.0 * 1024):0.#} MB" : $"{Math.Max(1, f.Length / 1024)} KB",
-            needs,
+            needs = needsRaw == true,
+            pcReady,
+            dlnaReady,
             state = state.ToString().ToLowerInvariant(),   // none | converting | done
             percent,
         };
+    }
+
+    /// <summary>
+    /// The two questions the Transcode window exists to answer, which are not
+    /// the same question and were being answered as if they were.
+    ///
+    /// <b>PC/VLC</b> plays through HLS, so "instant" means a finished
+    /// conversion exists — of any resolution. Without one, pressing play waits
+    /// for ffmpeg, which is the wait this server was built to avoid.
+    ///
+    /// <b>A television</b> plays the file itself when it can decode it, and is
+    /// otherwise handed a conversion — but only a <i>full-resolution</i> one,
+    /// because a 720p copy is not what a 4K set asked for (see VodIndex, which
+    /// excludes scaled names from its map).
+    ///
+    /// So the two genuinely disagree, in both directions. A 720p conversion of
+    /// an HEVC film makes the dashboard instant while leaving the television
+    /// with nothing it will accept; an h264 file with no conversion at all
+    /// plays on the television immediately and makes the dashboard wait.
+    ///
+    /// null means "not read yet" rather than "no": promising either way about
+    /// a file whose codecs have never been looked at is how a pill ends up
+    /// lying.
+    /// </summary>
+    private (bool pcReady, bool? dlnaReady) Readiness(
+        string file, Media.FfmpegManager.VodState state, bool? needsConversion)
+        => Readiness(
+            converted: state == Media.FfmpegManager.VodState.Done,
+            fullResConversion: _vodIndex?.DirectoryFor(file) is not null,
+            needsConversion: needsConversion,
+            // No codec knowledge at all (no ffmpeg): DlnaShouldList offers
+            // everything rather than hiding a library, so say the same here.
+            codecsKnowable: _tvCodecs is not null,
+            forceTranscodeForDlna: _serverConfig.Discovery.DlnaUseTranscode);
+
+    /// <summary>
+    /// The decision itself, with nothing to construct, so the four states the
+    /// window paints can be checked against a table rather than by eye.
+    /// </summary>
+    internal static (bool pcReady, bool? dlnaReady) Readiness(
+        bool converted, bool fullResConversion, bool? needsConversion,
+        bool codecsKnowable, bool forceTranscodeForDlna)
+    {
+        var pcReady = converted;
+        if (!codecsKnowable) return (pcReady, true);
+
+        // Forced substitution: the set is only ever given a conversion, so a
+        // conversion is the only thing that makes it playable.
+        if (forceTranscodeForDlna) return (pcReady, fullResConversion);
+
+        if (fullResConversion) return (pcReady, true);         // handed the conversion
+        if (needsConversion is null) return (pcReady, null);    // codecs not read yet
+        return (pcReady, needsConversion == false);             // plays the original, or does not
     }
 
     /// <summary>
@@ -4881,7 +4937,12 @@ public sealed partial class ControlApi : IDisposable
 
     private object FolderMediaSummary(string dir)
     {
+        // Counted the same way a file row is decided, so a folder pill can
+        // never disagree with the rows inside it. It used to count "done" and
+        // "needs" as if they were alternatives, which they are not: a file can
+        // be converted for the dashboard and still be unplayable on the set.
         int media = 0, needs = 0, done = 0, ready = 0, unknown = 0;
+        int pcOnly = 0, dlnaOnly = 0;
         const int cap = 4000;
         var capped = false;
         try
@@ -4891,16 +4952,18 @@ public sealed partial class ControlApi : IDisposable
                 if (!TranscodableExt.Contains(Path.GetExtension(f))) continue;
                 if (media >= cap) { capped = true; break; }
                 media++;
-                if ((_ffmpeg?.VodStatusFor(f) ?? Media.FfmpegManager.VodState.None) == Media.FfmpegManager.VodState.Done)
-                { done++; continue; }
-                var nc = _tvCodecs?.NeedsConversionCached(f);
-                if (nc == true) needs++;
-                else if (nc == false) ready++;
-                else unknown++;
+                var state = _ffmpeg?.VodStatusFor(f) ?? Media.FfmpegManager.VodState.None;
+                var (pc, dlna) = Readiness(f, state, _tvCodecs?.NeedsConversionCached(f));
+                if (dlna is null) { unknown++; continue; }
+                if (pc && dlna == true) ready++;          // green: nothing to do
+                else if (pc) dlnaOnly++;                  // yellow: the set still cannot play it
+                else if (dlna == true) pcOnly++;          // orange: the dashboard would wait
+                else needs++;                             // red: neither
+                if (state == Media.FfmpegManager.VodState.Done) done++;
             }
         }
         catch { /* report whatever was counted before the walk failed */ }
-        return new { media, needs, done, ready, unknown, capped };
+        return new { media, needs, done, ready, unknown, pcOnly, dlnaOnly, capped };
     }
 
 

@@ -639,7 +639,16 @@
   .tc-dot { display:inline-block; width:9px; height:9px; border-radius:50%; vertical-align:middle; margin-right:3px; }
   .tc-need, .b-need { background: color-mix(in srgb, var(--critical) 25%, transparent); color: var(--critical); }
   .tc-done, .b-done { background: color-mix(in srgb, var(--good) 25%, transparent); color: var(--good); }
-  .tc-conv, .b-conv { background: color-mix(in srgb, #e0a640 30%, transparent); color: #e0a640; }
+  /* The four states a file can be in, in the order they need attention.
+     Orange and yellow have to be told apart at a glance in a long list, so
+     they are pulled well away from each other rather than being two ambers -
+     and "converting" is moved off amber entirely for the same reason, since
+     an in-progress row sitting between them was the easiest thing to misread. */
+  .b-ready { background: color-mix(in srgb, var(--good) 25%, transparent); color: var(--good); }
+  .b-pc    { background: color-mix(in srgb, #e8762b 28%, transparent); color: #e8762b; }
+  .b-dlna  { background: color-mix(in srgb, #d9c02a 30%, transparent); color: #c9ae12; }
+  .tc-conv, .b-conv { background: color-mix(in srgb, var(--accent) 25%, transparent); color: var(--accent); }
+  .b-unknown { background: color-mix(in srgb, var(--muted) 20%, transparent); color: var(--muted); }
   .tc-ok,   .b-ok   { background: color-mix(in srgb, var(--muted) 30%, transparent); color: var(--muted); }
   span.tc-need, span.tc-done, span.tc-conv, span.tc-ok { color: transparent; }
   body:not(.can-edit) .edit-only,

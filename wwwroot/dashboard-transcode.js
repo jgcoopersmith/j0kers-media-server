@@ -255,15 +255,54 @@ try {
 function tcStatusRank(e) {
   if (e.type === "folder") {
     const s = e.summary || {};
-    if (!s.media) return 5;                 // nothing in it
-    if (s.needs > 0) return 0;              // work to do
-    if (s.unknown > 0) return 2;            // still being read
-    return 4;                               // TV-ready
+    if (!s.media) return 6;                 // nothing in it
+    if (s.needs > 0) return 0;              // neither way of playing works
+    if (s.pcOnly > 0) return 1;             // the dashboard would wait
+    if (s.dlnaOnly > 0) return 2;           // the television cannot play it
+    if (s.unknown > 0) return 4;            // still being read
+    return 5;                               // everything ready
   }
-  if (e.state === "converting") return 1;
-  if (e.needs) return 0;
-  if (e.state === "done") return 3;
-  return 4;                                 // plays as-is
+  if (e.state === "converting") return 3;
+  const ready = e.pcReady && e.dlnaReady === true;
+  if (ready) return 5;
+  if (e.dlnaReady === null || e.dlnaReady === undefined) return 4;   // not read yet
+  if (!e.pcReady && e.dlnaReady === false) return 0;                 // needs converting
+  if (!e.pcReady) return 1;                                          // convert PC/VLC
+  return 2;                                                          // convert DLNA
+}
+
+/* The pill a file row shows: class, label, and the sentence behind it.
+   Two independent questions, which this window used to answer as one -
+   see ControlApi.Readiness.
+     PC/VLC plays through HLS, so instant means a finished conversion exists.
+     A television plays the file itself if it can decode it, and is otherwise
+     handed a FULL-RESOLUTION conversion; it will not take a scaled one. */
+function tcFileState(e) {
+  if (e.state === "converting") {
+    return ["b-conv", "converting" + (e.percent != null ? " " + e.percent + "%" : "…"),
+            "Being converted now."];
+  }
+  const dlna = e.dlnaReady;
+  if (dlna === null || dlna === undefined) {
+    return ["b-unknown", "checking…",
+            "This file's codecs have not been read yet, so neither answer is known."];
+  }
+  if (e.pcReady && dlna) {
+    return ["b-ready", "Ready",
+            "Plays instantly on PC/VLC from its conversion, and on the TV over DLNA."];
+  }
+  if (e.pcReady && !dlna) {
+    return ["b-dlna", "Convert DLNA",
+            "Plays instantly on PC/VLC, but the TV cannot: the only conversion is a "
+            + "scaled copy, and DLNA is only handed full-resolution ones."];
+  }
+  if (!e.pcReady && dlna) {
+    return ["b-pc", "Convert PC/VLC",
+            "The TV can play this file as it stands, but there is no conversion yet, "
+            + "so playing it here would wait for one."];
+  }
+  return ["b-need", "Needs converting",
+          "No conversion exists and the TV cannot decode the original — neither way of playing it works yet."];
 }
 
 /* The number each row shows: for a folder, how many files inside still need
@@ -383,10 +422,11 @@ function tcRender(entries) {
 
       const badge = document.createElement("span");
       badge.className = "tc-badge ";
-      if (e.state === "done") { badge.className += "b-done"; badge.textContent = "converted"; }
-      else if (e.state === "converting") { badge.className += "b-conv"; badge.textContent = "converting" + (e.percent != null ? " " + e.percent + "%" : "…"); tcState.converting = true; }
-      else if (e.needs) { badge.className += "b-need"; badge.textContent = "needs converting"; }
-      else { badge.className += "b-ok"; badge.textContent = "plays as-is"; }
+      const [cls, text, why] = tcFileState(e);
+      badge.className += cls;
+      badge.textContent = text;
+      badge.title = why;
+      if (e.state === "converting") tcState.converting = true;
       row.appendChild(badge);
     }
     list.appendChild(row);
@@ -447,42 +487,52 @@ function tcSelectAll() {
    or downward, so the figure only ever falls — and it is an honest ceiling on
    what pressing Convert will actually queue, rather than a floor presented as
    a total. */
+/* How much of a folder is not finished. Anything short of ready both ways
+   counts, which is the change: this used to ask only whether a TV could play
+   the files, so a folder the dashboard would stall on every time counted as
+   nothing outstanding. */
 function tcOutstanding(s) {
-  return ((s && s.needs) || 0) + ((s && s.unknown) || 0);
+  if (!s) return 0;
+  return (s.needs || 0) + (s.pcOnly || 0) + (s.dlnaOnly || 0) + (s.unknown || 0);
 }
 
 function tcFolderPills(s) {
   if (!s || !s.media)
-    return '<span class="tc-badge b-ok" title="Nothing in here a TV could play or convert">no media</span>';
+    return '<span class="tc-badge b-unknown" title="Nothing in here a TV could play or convert">no media</span>';
+
+  /* The same four states as the rows inside, counted rather than named, and
+     in the order they need attention. This used to headline a single "to
+     convert" figure built from the TV question alone, so a folder full of
+     files the dashboard would stall on still read as "TV-ready" — the
+     opposite of what this window is for. */
   let out = "";
-  // The headline is whether there is anything TO convert. A file counts as
-  // "needs converting" only if a TV can't play it AND no converted copy exists
-  // yet — so a folder holding an original plus its H.264 copy reads as done,
-  // not as "1/3", because the copy already plays and nothing is outstanding.
-  //
-  // While anything here is unread the figure is a ceiling, and it says so in
-  // words — "up to 123" — rather than with the bare "+" this used to hang off
-  // the end of the label. That "+" landed after the word convert ("110 to
-  // convert+"), where it read as a stray character rather than as "at least",
-  // and the tooltip beside it flatly asserted the number was final. Between
-  // them there was nothing to warn anybody that the figure was still settling.
-  const outstanding = tcOutstanding(s);
-  if (outstanding > 0)
-    out += '<span class="tc-badge b-need" title="'
-         + (s.unknown
-             ? outstanding + ' file(s) here may need converting — ' + s.needs
-               + ' confirmed so far, ' + s.unknown + ' still being read. '
-               + 'The number only falls as they are read.'
-             : outstanding + ' file(s) here still need converting for a TV')
-         + '">' + (s.unknown ? 'up to ' : '') + outstanding + ' to convert</span>';
-  else
-    out += '<span class="tc-badge b-done" title="Everything here plays on a TV — either converted, or a format a TV already handles">TV-ready</span>';
-  // Neutral detail — facts, not work, so they never read as "incomplete".
-  if (s.done > 0)
-    out += '<span class="tc-badge b-ok" title="' + s.done + ' file(s) already have a converted copy">' + s.done + ' converted</span>';
-  if (s.ready > 0)
-    out += '<span class="tc-badge b-ok" title="' + s.ready + ' file(s) a TV plays as they are, no conversion needed">' + s.ready + ' play as-is</span>';
-  if (s.capped) out += '<span class="tc-badge b-ok" title="Stopped counting at 4000 files">4000+</span>';
+  const red = s.needs || 0, orange = s.pcOnly || 0, yellow = s.dlnaOnly || 0;
+  const green = s.ready || 0, unknown = s.unknown || 0;
+
+  if (red + orange + yellow === 0 && unknown === 0) {
+    out += '<span class="tc-badge b-ready" title="Every file here plays instantly on PC/VLC and on the TV">'
+         + 'Ready · ' + green + '</span>';
+  } else {
+    if (red)
+      out += '<span class="tc-badge b-need" title="' + red
+           + ' file(s) with no conversion that a TV also cannot decode — neither way of playing them works">'
+           + red + ' need converting</span>';
+    if (orange)
+      out += '<span class="tc-badge b-pc" title="' + orange
+           + ' file(s) a TV can play as they stand, but with no conversion — playing them here would wait">'
+           + orange + ' PC/VLC</span>';
+    if (yellow)
+      out += '<span class="tc-badge b-dlna" title="' + yellow
+           + ' file(s) that play instantly here, but only as a scaled copy, which DLNA will not hand to a TV">'
+           + yellow + ' DLNA</span>';
+    if (green)
+      out += '<span class="tc-badge b-ready" title="' + green + ' file(s) ready both ways">' + green + ' ready</span>';
+    if (unknown)
+      out += '<span class="tc-badge b-unknown" title="' + unknown
+           + ' file(s) whose codecs have not been read yet. The counts beside this are still settling.">'
+           + unknown + ' checking…</span>';
+  }
+  if (s.capped) out += '<span class="tc-badge b-unknown" title="Stopped counting at 4000 files">4000+</span>';
   return out;
 }
 

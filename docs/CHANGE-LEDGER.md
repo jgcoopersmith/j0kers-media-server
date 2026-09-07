@@ -1360,3 +1360,56 @@ Six tests now, the extra one being that exact shape.
 2,907 conversions became 2,906. That directory had been outstanding since
 2026-09-04 and is the one this ledger has been carrying as "not deleted without
 asking" ever since. 220 tests pass.
+
+---
+
+## 2026-09-06 — The Transcode window answers both questions (v2.0.277 → v2.0.278)
+
+**Said plainly by the owner:** the point of this server is high-quality media
+that is there almost instantly. The Transcode window existed for two reasons —
+make files a smart TV can play, *and* make sure there is already a conversion
+so nothing waits for an HLS stream. It only ever reported the first.
+
+That is why "the Transcode window shows NO MEDIA to transcode" and "adding
+media to an HLS stream starts transcoding it" were both true at once. They are
+different questions and the window answered one of them.
+
+### The two questions
+
+| | ready when |
+|---|---|
+| **PC/VLC** | a finished conversion exists, of **any** resolution — playback here is HLS, so without one, pressing play waits for ffmpeg |
+| **Television (DLNA)** | the set can decode the original, **or** a **full-resolution** conversion exists — `VodIndex` excludes scaled names, because a 720p copy is not what a 4K set asked for |
+
+They disagree in both directions, which is what makes four states rather than
+two. A 720p conversion of an HEVC film is instant here and unplayable there. An
+h264 file with no conversion is the exact reverse.
+
+### The pills
+
+| state | pill | meaning |
+|---|---|---|
+| conversion + set can play | **Ready** — green | nothing to do |
+| no conversion, set can play | **Convert PC/VLC** — orange | the dashboard would wait |
+| conversion, but scaled only | **Convert DLNA** — yellow | the set will not take a scaled copy |
+| neither | **Needs converting** — red | no way of playing it works |
+| codecs unread | *checking…* — grey | not a promise either way |
+
+Orange and yellow are pulled well apart rather than being two ambers, and
+"converting" moved off amber onto the accent colour — an in-progress row
+sitting between them was the easiest thing in the list to misread. Every pill
+carries the sentence behind it as a tooltip.
+
+Folder pills and the status sort were rebuilt from the same counts, so a folder
+can no longer contradict the rows inside it. The old folder headline counted
+only the TV question, so a folder the dashboard would stall on every single
+time read as "TV-ready".
+
+### Tested as a table
+
+`ControlApi.Readiness` was separated from everything it needs to construct, and
+has 11 tests covering each cell — including the two that used to be invisible
+(scaled-only, and no-conversion-but-decodable), unknown staying unknown, forced
+substitution, and no-ffmpeg matching what `DlnaShouldList` already does.
+
+231 tests pass.
