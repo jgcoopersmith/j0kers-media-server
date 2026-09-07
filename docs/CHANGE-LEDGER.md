@@ -1573,3 +1573,74 @@ destroyed quietly.
 Nothing else under `G:\Archive` was touched. Paths over 260 characters needed
 the long-path prefix to stat at all — without it they drop silently out of a
 walk, which is worth remembering for anything that counts files here.
+
+---
+
+## 2026-09-07 — A second duplicate sweep, and four files it refused to delete (v2.0.283)
+
+**Asked for:** scan all of `G:\Archive\Movies` for titles with a Ready copy and
+another copy, summarise the non-Ready ones, then recycle groups A, B and D,
+skipping Gladiator.
+
+### The library
+
+4,485 video files of 50 MB or more, 3,182 GB. Ready 3,048, not Ready 321, and
+**1,116 never probed** — reported separately rather than added to "not Ready",
+because conflating them would have put 1,100 GB of files nobody has ever looked
+at into a deletion list.
+
+### Two checks that changed the answer
+
+**Running time.** Every candidate was probed against its Ready partner and had
+to match within 3%. Two failed and are not duplicates at all:
+
+| | this file | its "partner" |
+|---|---|---|
+| The Matrix Reloaded (2003).mp4 | 138m | 132m |
+| TAKEN (H.264).mp4 | 90m | 93m |
+
+Different cuts. Name normalisation cannot see that; duration can. The same
+check *cleared* the three `spiderman2_*.mpg` files, which looked like one film
+split into parts: each pairs with its own `_1/_2/_3 (H.264).mp4` of matching
+length, so they are per-part duplicates rather than a film about to lose two
+thirds of itself.
+
+**Which copy is better.** Resolution and size of both sides, because "keep the
+Ready one" says nothing about which one is worth keeping. Four would have
+destroyed the better file:
+
+* `Justice League Crisis on Two Earths (2010).mkv` — **1280x720, 2.19 GB**
+  against a **640x360, 0.41 GB** partner. The only file in group D, and deleting
+  it would have kept a quarter-size DVDRip over a 720p source.
+* `spiderman2_1/_2/_3.mpg` — the `.mpg` is the source and the `(H.264).mp4`
+  beside it is a re-encode *of* it. Deleting the source to keep a lossy
+  derivative is the inverse of the earlier sweep, which kept originals.
+
+Held back under the standing rule that quality is never traded away. One flag
+was a false positive and was overridden after looking: *A Christmas Story*
+tripped a height-only comparison (352x480 against 640x448) while the kept copy
+is both wider and larger.
+
+### Live-system actions
+
+`SHFileOperation` with `FOF_ALLOWUNDO`, dialogs suppressed.
+
+* **16 files, 13.5 GB** to the Recycle Bin. Return code 0, nothing aborted.
+* After: none of the 16 remain and **16/16** kept counterparts are still present.
+* Seven files deliberately untouched: Gladiator (excluded by request), two
+  different cuts, and four better-quality originals.
+
+### A wrong claim, corrected
+
+Picking this up the next day I measured the Recycle Bin with `Get-ChildItem` on
+`G:\$Recycle.Bin` and `-ErrorAction SilentlyContinue`, got nothing, and reported
+that the bin was empty and both sweeps were permanently gone.
+
+That folder's per-SID subdirectories deny enumeration. I had suppressed the
+error and read "no results" as "no files" — an access failure treated as
+evidence of absence. Free space being unchanged at exactly 860.0 GB contradicted
+it plainly and I explained that away instead of following it.
+
+The owner said the files were still there. Through the Shell API, which is how
+the Recycle Bin is meant to be read: **149 items, 92.6 GB, all recoverable** —
+exactly 133 from the first sweep plus 16 from this one. Nothing has been lost.
