@@ -506,14 +506,34 @@ public sealed class FfmpegManager : IDisposable
     /// Scaling is the one thing that genuinely requires an encode, so a
     /// request for a specific height never takes this path.
     /// </summary>
-    private bool CanRemuxToHls(string file, int height)
+    /// <summary>
+    /// Which of the two streams the source already carries in the form being
+    /// asked for, and can therefore be packaged rather than encoded.
+    ///
+    /// Decided per stream, because the two questions are independent and
+    /// answering them together was throwing away work. A film that is already
+    /// h264 but carries mp3 audio failed the combined test and had *both*
+    /// streams re-encoded: a generation of picture destroyed to fix a
+    /// soundtrack, 2m51s of GPU for a file whose video needed nothing done to
+    /// it at all. Measured on Alice In Wonderland (H.264).mp4 — h264 video,
+    /// mp3 audio, 352p.
+    ///
+    /// Scaling is a video operation, so a requested height rules out copying
+    /// the picture and says nothing about the sound.
+    /// </summary>
+    private (bool video, bool audio) CopyableStreams(string file, int height)
     {
-        if (height > 0) return false;
-        if (VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase)) return false;  // already copying
+        // "copy" as the configured encoder is handled by its own branch.
+        if (VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase)) return (false, false);
         var (video, audio) = ProbeCodecs(file);
-        if (video is null || audio is null) return false;   // unreadable: encode, as before
-        return CodecFamily(video) == CodecFamily(VideoEncoder)
-            && CodecFamily(audio) == CodecFamily(AudioEncoder);
+        // Unreadable means encode, exactly as before — never guess in the
+        // direction that hands a player a stream it cannot decode.
+        var copyVideo = height <= 0
+                        && video is not null
+                        && CodecFamily(video) == CodecFamily(VideoEncoder);
+        var copyAudio = audio is not null
+                        && CodecFamily(audio) == CodecFamily(AudioEncoder);
+        return (copyVideo, copyAudio);
     }
 
     /// <summary>
@@ -529,11 +549,10 @@ public sealed class FfmpegManager : IDisposable
         return n switch { "x264" => "h264", "x265" or "h265" => "hevc", _ => n };
     }
 
-    private bool NeedsFmp4(string? sourceFile, bool copyingAnyway = false)
-
+    private bool NeedsFmp4(string? sourceFile, bool copyingVideo = false, bool copyingAudio = false)
     {
-        var copyVideo = copyingAnyway || VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase);
-        var copyAudio = copyingAnyway || AudioEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase);
+        var copyVideo = copyingVideo || VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase);
+        var copyAudio = copyingAudio || AudioEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase);
         if (!copyVideo && !copyAudio)
             return Fmp4Only.Contains(VideoEncoder) || Fmp4Only.Contains(AudioEncoder);
 
@@ -875,33 +894,34 @@ public sealed class FfmpegManager : IDisposable
             // repeat the same information over stderr
             // Decided once, before anything is built: the container choice
             // below has to agree with it.
-            var remux = CanRemuxToHls(info.FullName, height);
-            if (remux) Log.Info("ffmpeg", $"{info.Name} is already {VideoEncoder.Split('_')[0]}/{AudioEncoder} - packaging it without re-encoding");
+            var (copyVideo, copyAudio) = CopyableStreams(info.FullName, height);
+            if (copyVideo && copyAudio)
+                Log.Info("ffmpeg", $"{info.Name} is already {CodecFamily(VideoEncoder)}/{CodecFamily(AudioEncoder)} - packaging it without re-encoding");
+            else if (copyVideo)
+                Log.Info("ffmpeg", $"{info.Name} is already {CodecFamily(VideoEncoder)} - keeping the picture as it is, converting only the audio");
+            else if (copyAudio)
+                Log.Info("ffmpeg", $"{info.Name} already carries {CodecFamily(AudioEncoder)} audio - keeping the soundtrack as it is");
             var args = new List<string> { "-hide_banner", "-loglevel", "error", "-nostats",
                                           "-progress", "pipe:1", "-y" };
             // before -i, which is where input options belong: ffmpeg refuses
-            // -hwaccel after the file it applies to. A remux decodes
-            // nothing, so there is no decoder to accelerate.
-            if (!remux) args.AddRange(HardwareDecodeArgs(info.FullName));
+            // -hwaccel after the file it applies to. Copying the picture
+            // decodes nothing, so there is no decoder to accelerate.
+            if (!copyVideo) args.AddRange(HardwareDecodeArgs(info.FullName));
             args.AddRange(new[] { "-i", info.FullName });
-            if (remux)
+            if (copyVideo || VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase))
             {
-                // Nothing to encode: the file already carries the codecs being
-                // asked for, so the picture and the soundtrack are copied
-                // through untouched, surround channels and all.
+                // The picture already is what is being asked for, so it is
+                // packaged rather than decoded and made again. Re-encoding it
+                // would cost a generation of quality to arrive back where it
+                // started.
                 //
                 // The cost of copying is that keyframes cannot be placed - a
                 // segment can only end where the source already has one, so
                 // segments come out uneven and a seek lands on the nearest.
-                // That is a scrub bar that is a few seconds coarse against a
-                // generation of picture and the whole of the surround mix.
-                args.AddRange(new[] { "-c:v", "copy", "-c:a", "copy" });
-            }
-            else if (VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase))
-            {
+                // That is a scrub bar that is a few seconds coarse, against a
+                // generation of picture.
                 args.AddRange(new[] { "-c:v", "copy" });
             }
-
             else
             {
                 if (height > 0) args.AddRange(new[] { "-vf", $"scale=-2:{height}" });
@@ -922,9 +942,14 @@ public sealed class FfmpegManager : IDisposable
                 // What that costs differs by encoder — see KeyframeArgs.
                 args.AddRange(KeyframeArgs(VodSegmentSeconds));
             }
-            if (!remux) args.AddRange(AudioArgs());   // a copy carries the source's own audio
+            // Copied audio carries the source's own soundtrack through — its
+            // channel layout included, which AudioArgs would otherwise fold
+            // down. Decided separately from the picture: a film that needs its
+            // mp3 turned into aac does not need its h264 rebuilt as well.
+            if (copyAudio) args.AddRange(new[] { "-c:a", "copy" });
+            else args.AddRange(AudioArgs());
 
-            var fmp4 = NeedsFmp4(info.FullName, remux);
+            var fmp4 = NeedsFmp4(info.FullName, copyVideo, copyAudio);
             var segExt = fmp4 ? "m4s" : "ts";
             args.AddRange(new[] { "-f", "hls", "-hls_time", Inv(VodSegmentSeconds), "-hls_list_size", "0",
                                   "-hls_playlist_type", "event" });

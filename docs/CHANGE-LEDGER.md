@@ -1179,3 +1179,80 @@ only. Nothing under `G:\Archive` touched.
 
 `Clean up Claude test keys.ps1` on the desktop has not been run — ten guest API
 keys from my own testing are still on the account.
+
+---
+
+## 2026-09-06 — Why an already-h264 film was re-encoded (v2.0.272 → v2.0.273)
+
+**Reported:** the Transcode window shows nothing left to transcode, yet adding
+media to an HLS stream starts converting it again. And stopping a conversion
+early leaves parts of it behind — is that useful?
+
+### It was not re-doing work
+
+`Alice In Wonderland (H.264).mp4` converted at 21:21:04 and took 2m51s. All
+2,907 conversion directories were read and their `source.txt` compared: exactly
+one names that file, created at 21:23:55. There was no earlier conversion. The
+server was not repeating itself; it was doing the work for the first time.
+
+### The two windows answer different questions
+
+The Transcode window asks *does this file need its codecs changed* — for direct
+play and for DLNA. Alice's video is already h264, so the honest answer is no,
+and it correctly showed nothing.
+
+Putting a file into an **HLS stream** is a different operation: it has to be cut
+into segments with a playlist, whether or not a single codec changes. Nothing in
+that window tracks whether that has been done, so "converted" means two
+different things depending on which part of the dashboard is asked. That is a
+gap in what is shown, not a fault in what was done.
+
+### The real fault: an all-or-nothing remux test
+
+`CanRemuxToHls` required **both** streams to match before anything was copied:
+
+| Alice In Wonderland (H.264).mp4 | source | wanted |
+|---|---|---|
+| video | h264, 624×352 | h264 (`h264_nvenc`) — matches |
+| audio | **mp3**, 2ch | aac — does not match |
+
+One mismatched soundtrack therefore condemned the picture as well. A film whose
+video needed *nothing done to it* had it decoded and re-encoded h264 → h264 to
+fix an audio track.
+
+Measured on the first 120 seconds of that file:
+
+| | video | 120s of segments | full file (108 min) |
+|---|---|---|---|
+| re-encode both (before) | h264 → h264 | 8,944,664 B | 2m 51s |
+| copy video, convert audio (after) | **untouched** | **11,132,232 B** | **59s** |
+
+The old path was 20% smaller because it was throwing picture away — a silent
+quality reduction on a file the owner had asked only to make streamable.
+
+`CopyableStreams` now decides each stream on its own. A requested height rules
+out copying the picture and says nothing about the sound; `NeedsFmp4` takes both
+flags rather than one.
+
+### Still there, and named rather than fixed
+
+`AudioArgs` remains `-ac 2`. Any surround track that is not already aac is still
+folded to stereo when it is converted. Copied audio is untouched, so this only
+bites where the codec genuinely has to change — but it is a quality reduction
+nobody asked for, and it is not this change's to make silently.
+
+### Partial conversions, honestly
+
+Stopping early leaves the segments on disk. They cannot be resumed — the next
+conversion of that file deletes the directory and starts over — so they are
+dead weight until then. The server reports the count at startup and deletes
+nothing by itself, which is the right default for the owner's disk but means
+they accumulate. One is outstanding now: Infinity War, 1497 segments and 3.4 GB
+behind a playlist listing a single segment.
+
+### Live-system actions
+
+Read-only on `G:\Archive`: `ffprobe` on one source, and every `source.txt` under
+`G:\Archive\Transcoded` read once to answer the "was it already converted"
+question. Two timed ffmpeg runs written to the session scratchpad and deleted;
+809 MB at its peak, nothing under the media root. 214 tests pass.
