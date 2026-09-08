@@ -654,16 +654,15 @@ async function prepareMedia(path) {
     const r = await fetch("/api/play", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...headers() },
-      body: JSON.stringify({ file: path, height }),
+      // prepare: this is "add it to the HLS streams", not "play it". A file
+      // the browser could open directly still gets a stream made, because a
+      // stream is what was asked for — the direct shortcut belongs to
+      // playMedia, and taking it here meant the button did nothing at all for
+      // any mp4/h264/aac file, which is most of a library.
+      body: JSON.stringify({ file: path, height, prepare: true }),
     });
     const data = await r.json();
     if (!r.ok) { alert(data.error || "could not prepare stream"); return; }
-    /* Nothing was queued because nothing needed converting — say so instead of
-       adding a card to a list of conversions that will never contain it. */
-    if (data.direct) {
-      flashPlayerMsg(started + " needs no conversion — it plays as it is.");
-      return;
-    }
     // Show it as converting straight away. The status poll is two seconds
     // apart, and this card is where the scroll below is about to put them —
     // an empty card in the meantime is what reads as nothing happening.

@@ -3648,7 +3648,16 @@ public sealed partial class ControlApi : IDisposable
         }
     }
 
-    private sealed record PlayRequest(string? file, int? height);
+    /// <summary>
+    /// <paramref name="prepare"/> means "make me a stream", not "play this".
+    ///
+    /// The two are different requests and answering them the same way broke
+    /// the Add-to-HLS button: a file a browser can open is handed over
+    /// directly, which is right for playback and wrong here, because the
+    /// caller has explicitly asked for a stream to exist. Most of a modern
+    /// library is mp4/h264/aac, so almost nothing could be added at all.
+    /// </summary>
+    private sealed record PlayRequest(string? file, int? height, bool? prepare);
     private sealed record ChannelRequest(string? name, string? url);
     private sealed record ImportRequest(List<ChannelRequest>? channels);
 
@@ -3690,7 +3699,7 @@ public sealed partial class ControlApi : IDisposable
             //
             // A requested height is a genuine reason to encode: scaling is the
             // one thing sending the original cannot do.
-            if (height == 0 && _ffmpeg.CanPlayDirectly(file))
+            if (height == 0 && req.prepare != true && _ffmpeg.CanPlayDirectly(file))
             {
                 WriteJson(res, 200, new
                 {

@@ -2338,3 +2338,32 @@ myself — which is the check I should have run the first time.
 Hook test residue removed as part of the test: two planted `.inuse` files, two
 throwaway session scratchpads, one fake `j0kers-tests-*` directory. Scratchpad
 empty, no test directories, working tree clean.
+
+---
+
+## 2026-09-08 — Adding media to HLS streams from inside a folder did nothing (v2.0.295 → v2.0.296)
+
+**Reported:** media can no longer be selected to add to HLS streams from inside
+folders.
+
+Mine, from the direct-play work. Clicking a tile inside a folder is `lib-play`
+→ `prepareMedia`, which is "make a stream from this", not "play it". When
+`/api/play` learned to hand back a directly-playable file instead of converting
+it, `prepareMedia` was given the same answer and taught to say *"needs no
+conversion — it plays as it is"* and stop.
+
+That is right for playback and wrong here: the caller has explicitly asked for a
+stream to exist. And it applies to almost everything — most of a modern library
+is mp4/h264/aac — so the button did nothing for nearly every file in it.
+
+`/api/play` now takes a `prepare` flag. `playMedia` still gets the direct
+shortcut, which is the whole point of it; `prepareMedia` sets `prepare: true`
+and always gets a stream.
+
+**What this does not cover:** the fix is verified by reading and by the served
+JavaScript carrying `prepare: true`. Exercising the endpoint itself needs a
+signed-in session, which this session cannot create, so the round trip is
+unverified. Two of the three faults in this area have now come from changing
+what an endpoint answers without checking every caller of it.
+
+256 tests pass.
