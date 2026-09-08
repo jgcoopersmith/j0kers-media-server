@@ -195,6 +195,12 @@ public sealed partial class ControlApi : IDisposable
             Discovery?.Uuid ?? _serverConfig.Discovery.HostName);
         _vodIndex ??= new Media.VodIndex(MediaRootPath());
         _vodIndex.StartBuild();          // off the startup path; nothing waits
+        // Rebuild when the conversions change in a way the index's own
+        // directory-count check cannot see — the height backfill writes a file
+        // into every existing folder without adding or removing one, and the
+        // index would otherwise keep the answers it read moments earlier.
+        if (_ffmpeg is not null)
+            _ffmpeg.ConversionsChanged = () => _vodIndex?.StartBuild();
         dlna.FindTranscode = FullResTranscodeFor;
         dlna.ShouldList = DlnaShouldList;
         dlna.NoteBrowsed = RequestCodecProbe;

@@ -2250,3 +2250,39 @@ to solve it with a cleverer regex — a real 720p copy and Skyfall match the sam
 pattern, and always will.
 
 249 tests pass.
+
+---
+
+## 2026-09-07 — The height fix was on disk and not in the running server (v2.0.293 → v2.0.294)
+
+**Reported:** no difference, the DLNA pills are still there.
+
+Correct, and my verification was wrong: I measured the files on disk and
+reported the problem solved, when what decides a pill is what the running
+server's index believes.
+
+`VodIndex` rebuilds when the NUMBER of conversion folders changes — cheap, and
+enough to catch one finishing or being deleted. It cannot see a change to
+folders that were already there, and the height backfill is exactly that: 3,206
+markers written without the count moving by one. The log says it in five
+seconds:
+
+    21:37:37  conversion index: 3195 full-resolution conversion(s) across 3206 folder(s)
+    21:37:42  recorded the source height for 3206 conversion(s)
+
+The index had already read them, and nothing told it to look again.
+
+`ConversionsChanged` now says so, and the index rebuilds on it. The
+notification is **latched**, because the backfill runs from FfmpegManager's own
+constructor and ControlApi attaches the listener a moment later — raising it
+into an empty handler would have lost it exactly the same way.
+
+### The pattern in this, worth naming
+
+Both halves of this were verified against the wrong thing. The scaled-name bug
+was found by reading directory names rather than the conversions themselves,
+and this one was called fixed by reading files rather than asking the server.
+The check that would have caught both is the same: look at what the software
+answers, not at what is on disk.
+
+256 tests pass.

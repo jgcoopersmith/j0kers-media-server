@@ -2230,6 +2230,53 @@ public sealed class FfmpegManager : IDisposable
     /// Only touches directories that have no height.txt, so it does nothing on
     /// the second run.
     /// </summary>
+    /// <summary>
+    /// Raised when something outside the conversion COUNT has changed about
+    /// them — height.txt appearing, for instance.
+    ///
+    /// VodIndex rebuilds when the number of directories moves, which is cheap
+    /// and catches a conversion finishing or being deleted. It cannot catch a
+    /// change to the contents of directories that were already there, and the
+    /// height backfill is exactly that: it wrote 3,206 markers without moving
+    /// the count by one, so the index went on using the answers it had read
+    /// five seconds earlier and the pills did not change.
+    /// </summary>
+    private Action? _conversionsChanged;
+    private bool _conversionsChangedPending;
+    private readonly object _changedLock = new();
+
+    public Action? ConversionsChanged
+    {
+        get { lock (_changedLock) return _conversionsChanged; }
+        set
+        {
+            bool fireNow;
+            lock (_changedLock)
+            {
+                _conversionsChanged = value;
+                // Latched, because the backfill runs from this class's own
+                // constructor and the listener is attached by ControlApi a
+                // moment later — so the notification would otherwise be raised
+                // into an empty handler and lost, which is the same stale index
+                // by a different route.
+                fireNow = value is not null && _conversionsChangedPending;
+                if (fireNow) _conversionsChangedPending = false;
+            }
+            if (fireNow) { try { value!(); } catch { } }
+        }
+    }
+
+    private void RaiseConversionsChanged()
+    {
+        Action? handler;
+        lock (_changedLock)
+        {
+            handler = _conversionsChanged;
+            if (handler is null) { _conversionsChangedPending = true; return; }
+        }
+        try { handler(); } catch { }
+    }
+
     private void BackfillConversionHeights()
     {
         if (!Directory.Exists(_mediaRoot)) return;
@@ -2256,9 +2303,13 @@ public sealed class FfmpegManager : IDisposable
             catch { /* one directory failing is not a reason to stop */ }
         }
         if (written > 0)
+        {
             Log.Info("ffmpeg", $"recorded the source height for {written} conversion(s) made before it was "
                              + "written down — a title ending in a resolution can no longer be mistaken "
                              + "for a scaled copy");
+            // The count has not moved, so nothing else will notice. Say so.
+            RaiseConversionsChanged();
+        }
     }
 
     private void CleanUpIncompleteVodDirs()
