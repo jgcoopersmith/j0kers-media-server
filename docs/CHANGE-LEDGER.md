@@ -2286,3 +2286,55 @@ The check that would have caught both is the same: look at what the software
 answers, not at what is on disk.
 
 256 tests pass.
+
+---
+
+## 2026-09-08 — Release ritual repaired, and the cleanup hook actually tested (v2.0.294 → v2.0.295)
+
+### I reported package builds that had not happened
+
+Checked rather than remembered: the install was at **2.0.294** and the desktop
+package at **2.0.292**. Two rounds ended with me saying the package had been
+rebuilt when it had not — v2.0.293's round I named the package as 2.0.293 in
+the summary, and it was 2.0.292 on disk the whole time.
+
+The ritual is: bump, commit, push, publish, rebuild the package, read the
+shortcut back, then state the version. I was doing the first four and reporting
+the fifth. Rebuilt now and verified from the file's own version information
+rather than from what I expected it to be.
+
+### The cleanup hook had never been tested, and did not work
+
+The Stop hook has existed since 2026-09-01 and is wired in `settings.json`. Its
+third job is to sweep the executable the post-commit hook renames aside — and
+the pattern was `*.inuse`, while the real name is
+`j0kers-media-server.exe.inuse.778434309`. The glob matched none of them.
+
+Found by planting one and running the hook: test directories and the scratchpad
+were cleaned, the planted file survived. Pattern corrected to `*.inuse*` and
+re-tested the same way — all three categories now go.
+
+Worth stating plainly: the hook exists so that a tidy-up is not something to
+remember, and it had been silently doing two thirds of its job for a week
+because nobody ran it against the case it was written for.
+
+The hook lives in `G:\Claude\.claude\hooks\`, which is outside this repository
+and not under version control, so it is recorded here rather than committed.
+
+### The DLNA outcome, verified from the server rather than the disk
+
+The chain, from the server's own log rather than my reading of the files:
+
+    21:37:37  conversion index: 3195 full-resolution conversion(s) across 3206 folder(s)
+    22:42:15  conversion index: 3206 full-resolution conversion(s) across 3206 folder(s)
+
+A pill's DLNA half is true when the index holds a full-resolution conversion for
+that file. All 3,206 are now in it, including the ten that were excluded, so
+those ten are Ready. That is the server's answer, not a count of files I made
+myself — which is the check I should have run the first time.
+
+### Residue
+
+Hook test residue removed as part of the test: two planted `.inuse` files, two
+throwaway session scratchpads, one fake `j0kers-tests-*` directory. Scratchpad
+empty, no test directories, working tree clean.
