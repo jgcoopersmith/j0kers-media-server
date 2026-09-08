@@ -502,7 +502,14 @@ try
         // Started in the foreground and staying there: the same rule as turning
         // background mode off. The dashboard is the session, so closing it ends
         // the server rather than leaving one running that nobody can see.
-        else config.Control.ShutdownOnClose = true;
+        //
+        // Unless the config says otherwise. This used to assign true
+        // unconditionally, which made control.shutdownOnClose a documented
+        // setting that could not do anything in the only mode it applies to —
+        // setting it false in server.json changed nothing, and nothing said so.
+        // Its default is already true, so the rule above still holds for
+        // everyone who has not asked for something else.
+        else if (!config.Control.ShutdownOnCloseWasSet) config.Control.ShutdownOnClose = true;
 
         // Opened here, and not where this used to sit, because up there the
         // answer was not known yet.

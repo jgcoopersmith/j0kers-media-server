@@ -58,6 +58,22 @@ internal static class JsonSidecar
     /// destroy what was already there.
     /// </summary>
     public static void Save<T>(string file, T value, string label)
+        => WriteAtomic(file, JsonSerializer.Serialize(value, WriteOpts), label);
+
+    /// <summary>
+    /// The same atomic write, for a caller that has already serialised — a
+    /// compact cache that must not be indented into several megabytes, or a
+    /// type with its own options.
+    ///
+    /// Worth having as its own method because three of them were not doing
+    /// this at all: the probe cache, the transcode queue and the subtitle
+    /// sidecar each called File.WriteAllText straight at the real file. That
+    /// truncates first and writes after, so a kill in between — which for this
+    /// server is routine, since an upgrade stops it mid-flight — leaves an
+    /// empty or half-written file rather than the previous one. The transcode
+    /// queue is the sharpest case: it exists precisely to survive a restart.
+    /// </summary>
+    public static void WriteAtomic(string file, string json, string label)
     {
         // the writer's own temp name: every caller holds a lock around its
         // own file today, but a shared "x.json.tmp" is one refactor away from
@@ -65,7 +81,7 @@ internal static class JsonSidecar
         var tmp = $"{file}.{Environment.CurrentManagedThreadId}.tmp";
         try
         {
-            File.WriteAllText(tmp, JsonSerializer.Serialize(value, WriteOpts));
+            File.WriteAllText(tmp, json);
             File.Move(tmp, file, overwrite: true);
         }
         catch (Exception ex)

@@ -210,6 +210,12 @@ public sealed class ServerConfig
         if (s.ControlPort is not null) _persistedSettings.ControlPort = s.ControlPort;
         if (s.AuthToken is not null) _persistedSettings.AuthToken = s.AuthToken;
         if (s.MinimizeToTray is not null) _persistedSettings.MinimizeToTray = s.MinimizeToTray;
+        // Applied by ApplySettings above and, until now, never written down —
+        // the one field in this list that was missed. So the Config dialog's
+        // "open the dashboard when the server starts" switch worked for the
+        // rest of the session and was back where it started after a restart,
+        // with nothing to say why.
+        if (s.OpenDashboardOnStart is not null) _persistedSettings.OpenDashboardOnStart = s.OpenDashboardOnStart;
         if (s.StartWithWindows is not null) _persistedSettings.StartWithWindows = s.StartWithWindows;
         if (s.LinkLifetimeHours is not null) _persistedSettings.LinkLifetimeHours = s.LinkLifetimeHours;
         if (s.DiscoveryEnabled is not null) _persistedSettings.DiscoveryEnabled = s.DiscoveryEnabled;
@@ -548,7 +554,32 @@ public sealed class ControlConfig
     /// A short grace period ignores page refreshes and tab switches: if any
     /// dashboard reconnects within 5 seconds, the shutdown is cancelled.
     /// </summary>
-    [JsonPropertyName("shutdownOnClose")] public bool ShutdownOnClose { get; set; } = true;
+    private bool _shutdownOnClose = true;
+
+    [JsonPropertyName("shutdownOnClose")]
+    public bool ShutdownOnClose
+    {
+        get => _shutdownOnClose;
+        set { _shutdownOnClose = value; ShutdownOnCloseWasSet = true; }
+    }
+
+    /// <summary>
+    /// Did the config file actually say? Startup used to force this to true
+    /// whenever the server was not in tray mode, so setting it false in
+    /// server.json changed nothing and nothing said why — a documented option
+    /// that could not take effect in the only mode it applies to.
+    ///
+    /// The rule it was enforcing is still right by default: in the foreground
+    /// the dashboard is the session, and closing it should end the server
+    /// rather than leave one running that nobody can see. That is what the
+    /// default of true means. This only stops the default overwriting a
+    /// deliberate choice.
+    ///
+    /// Set by deserialising the config, and by the runtime assignments in
+    /// ApplyTrayMode — which is harmless, because the one place that reads it
+    /// runs on the branch where ApplyTrayMode has not been called.
+    /// </summary>
+    [JsonIgnore] public bool ShutdownOnCloseWasSet { get; private set; }
 }
 
 public sealed class FfmpegConfig

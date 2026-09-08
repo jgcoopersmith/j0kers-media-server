@@ -133,8 +133,9 @@ public sealed class SubtitleManager
             existing.Add(track);
             try
             {
-                File.WriteAllText(UserFile(subsDir),
-                    JsonSerializer.Serialize(existing, new JsonSerializerOptions { WriteIndented = true }));
+                JsonSidecar.WriteAtomic(UserFile(subsDir),
+                    JsonSerializer.Serialize(existing, new JsonSerializerOptions { WriteIndented = true }),
+                    "subs");
             }
             catch (Exception ex)
             {

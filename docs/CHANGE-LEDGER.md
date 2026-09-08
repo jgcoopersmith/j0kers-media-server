@@ -1963,3 +1963,41 @@ behaviour and the only answer that leaves a player anything at all in the first
 seconds.
 
 246 tests pass.
+
+---
+
+## 2026-09-07 — Writes that could not survive a kill, and settings that did nothing (v2.0.288 → v2.0.289)
+
+### Three files written the way that loses them
+
+`probe-cache.json`, `transcode-queue.json` and the subtitle sidecar each called
+`File.WriteAllText` straight at the real file. That truncates first and writes
+after, so a kill in between leaves an empty or half-written file rather than the
+previous one — and for this server a kill mid-write is routine, because an
+upgrade stops it in flight.
+
+The transcode queue is the sharpest case: it exists precisely so a batch
+survives a restart, and it was the write most likely to be caught by one.
+
+`JsonSidecar` already wrote atomically; the three simply were not using it.
+`Save<T>` now delegates to a new `WriteAtomic(file, json, label)` so a caller
+that has already serialised — a compact cache that must not be indented into
+megabytes, a type with its own options — gets the same temp-and-rename.
+
+### Two settings that could not take effect
+
+**`openDashboardOnStart` was never persisted.** `UpdateSettings` writes every
+field it is given into the sidecar; this was the one omission. So the Config
+dialog's switch worked for the rest of the session and was back where it started
+after a restart, with nothing to say why.
+
+**`control.shutdownOnClose` was overwritten at every start.** Startup assigned
+it `true` unconditionally whenever the server was not in tray mode, so setting
+it `false` in `server.json` did nothing at all, in the only mode it applies to.
+The rule behind it is still right as a default — in the foreground the dashboard
+is the session — so the default stays `true` and only the unconditional
+overwrite is gone. `ShutdownOnCloseWasSet` records whether the file actually
+said, which is safe here because the one place that reads it runs on the branch
+where the runtime assignments have not happened.
+
+246 tests pass.

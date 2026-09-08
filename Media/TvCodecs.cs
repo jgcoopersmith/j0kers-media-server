@@ -386,7 +386,11 @@ public sealed class TvCodecs
             if (!_dirty) return;
             try
             {
-                File.WriteAllText(_cacheFile, JsonSerializer.Serialize(_cache));
+                // Atomic: this is written every 200 probes, and truncating
+                // it on a kill costs the whole cache rather than the last few
+                // entries. Compact on purpose, so it goes through the text
+                // form rather than JsonSidecar.Save's indented one.
+                JsonSidecar.WriteAtomic(_cacheFile, JsonSerializer.Serialize(_cache), "probe");
                 _dirty = false;
             }
             catch { /* the cache is an optimisation; failing to keep it is not an error */ }

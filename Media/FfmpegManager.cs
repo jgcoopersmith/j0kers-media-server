@@ -1744,7 +1744,11 @@ public sealed class FfmpegManager : IDisposable
                 StaggerSeconds = VodStaggerSeconds,
                 Waiting = outstanding,
             });
-            lock (_queueFileLock) File.WriteAllText(_queueSettingsFile, json);
+            // Atomic. This file exists so a queue survives a restart, and it
+            // was the one write most likely to be interrupted by one: an
+            // upgrade stops the server mid-batch, and a truncating write
+            // caught there loses the very list it is for.
+            lock (_queueFileLock) JsonSidecar.WriteAtomic(_queueSettingsFile, json, "ffmpeg");
         }
         catch (Exception ex) { Log.Warn("ffmpeg", $"could not save the transcode queue: {ex.Message}"); }
     }
