@@ -2001,3 +2001,60 @@ said, which is safe here because the one place that reads it runs on the branch
 where the runtime assignments have not happened.
 
 246 tests pass.
+
+---
+
+## 2026-09-07 — Four concurrency faults in FfmpegManager (v2.0.289 → v2.0.290)
+
+### Two ffmpegs in one channel directory
+
+A television left sitting on a channel retries the moment the server is back, so
+`EnsureChannelRunning` could start a job for it before `RestoreRunningChannels`
+reached the same channel — and that started a **second** ffmpeg into the same
+directory, each overwriting the other's playlist and segments. `_liveJobs` named
+only the newer one, so the older was never stopped: an orphan writing into a
+live channel for as long as it lasted.
+
+The guard is now in `StartLiveJob` itself rather than in one caller, so it
+covers every path present and future. `StopJob` is a no-op when nothing is
+listed and removes the entry before killing, so the exit handler still reads
+that death as deliberate.
+
+### A finished conversion wiping its successor's progress
+
+The exit handler already matched the job table by reference — a rerun that has
+taken the slot must not be evicted by its predecessor's exit — and then removed
+the progress record unconditionally, which is keyed by stream. So a superseded
+job's exit deleted the record its *successor* had just written, and nothing
+rewrites it: that conversion showed 0% for as long as it ran, while converting
+perfectly normally. Guarded the same way the table above it is.
+
+### A queue that could drop what was put in it
+
+`RemoveFromVodQueue` drains the whole queue and refills it from a snapshot. Two
+enqueue paths — the GPU-session requeue and `QueueVod`'s background walk — did
+not take `_pumpLock`, so an enqueue landing inside that window was drained away
+and never put back, and `SaveQueueState` then wrote the loss down.
+`ConcurrentQueue` makes each operation safe on its own; it cannot make a
+snapshot-and-refill atomic. Both now take the lock, `QueueVod` across its
+duplicate check and its enqueue together.
+
+### Eviction ran under the global lock
+
+`StartVod`'s own comment says the cache sweep was moved off `_lock` because
+sizing stats every file and evicting deletes whole directories — seconds of work
+that would block `/api/status`, `/api/channels` and every playlist request. It
+was still being called inside `lock (_lock)`.
+
+It could not simply be removed: `StartVod` creates the conversion directory
+early and holds `_lock` for a long time afterwards — an ffprobe among it — so
+without the lock a sweep could size and delete a conversion that is mid-start,
+because nothing names it in `ActiveVodStreams` yet. `_startingVod` records those,
+and the sweep now takes `_lock` only to read the protected set.
+
+The mark is cleared where the job is published, which a start that throws never
+reaches — so entries expire after a minute rather than pinning a directory for
+the life of the process. Wrapping the whole 200-line span in try/finally was the
+alternative and was not worth the risk for a leak an expiry closes.
+
+246 tests pass.

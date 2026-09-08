@@ -70,6 +70,30 @@ public sealed class FfmpegManager : IDisposable
     /// Republishes the lock-free views of the job table. Call with _lock
     /// held, immediately after any change to <see cref="_vodJobs"/>.
     /// </summary>
+    /// <summary>
+    /// Conversions that have created their directory but not yet published a
+    /// job into the lock-free view.
+    ///
+    /// StartVod holds _lock across that whole span — a recursive delete, an
+    /// ffprobe, argument building — so for a few hundred milliseconds the
+    /// directory is on disk and ActiveVodStreams does not mention it. The
+    /// cache sweep used to be safe from that only because it took the same
+    /// _lock and therefore could not run at all; taking the lock off it
+    /// without this set would let it size and delete a directory that is
+    /// mid-start. Guarded by _lock, like _vodJobs.
+    /// </summary>
+    private readonly Dictionary<string, DateTime> _startingVod = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// How long a "starting" mark is honoured. A start is hundreds of
+    /// milliseconds; a minute is far beyond it. The bound is there because the
+    /// mark is cleared where the job is published, and a start that throws on
+    /// the way — Spawn failing — never reaches that line. Without an expiry
+    /// that directory would be protected from eviction for the life of the
+    /// process, with nothing writing to it.
+    /// </summary>
+    private static readonly TimeSpan StartingVodGrace = TimeSpan.FromMinutes(1);
+
     private void RefreshVodJobView()
     {
         _vodJobCount = _vodJobs.Count;
@@ -337,7 +361,12 @@ public sealed class FfmpegManager : IDisposable
                              + "\"how many at a time\" in the Transcodes panel.");
             return;
         }
-        _vodQueue.Enqueue(file);
+        // Under _pumpLock, because RemoveFromVodQueue drains the whole queue
+        // and refills it from a snapshot: an enqueue landing inside that window
+        // is drained away and never put back, and SaveQueueState then writes
+        // the loss down. ConcurrentQueue makes each operation safe on its own;
+        // it cannot make a snapshot-and-refill atomic.
+        lock (_pumpLock) _vodQueue.Enqueue(file);
         Log.Info("ffmpeg", $"{label}: no free GPU encoder session — put back in the queue "
                          + $"(attempt {tries}). Conversions already running will free one.");
         SaveQueueState();
@@ -956,6 +985,13 @@ public sealed class FfmpegManager : IDisposable
             // just as someone starts a film. It has nothing to do with
             // starting this conversion, so it runs after, off the lock.
             Directory.CreateDirectory(dir);
+            // From here the directory exists and no job names it yet. The
+            // cache sweep no longer takes _lock, so without this it could size
+            // and delete a conversion that is still being set up — the span
+            // below includes an ffprobe and can run for hundreds of
+            // milliseconds. Cleared where the job is published, and in the
+            // catch below if the start never gets that far.
+            _startingVod[stream] = DateTime.UtcNow;
             // Marked before a single segment is written, not after the job
             // finishes: the sweep that follows every other conversion's start
             // runs while this one is still encoding, and an unmarked directory
@@ -1060,7 +1096,14 @@ public sealed class FfmpegManager : IDisposable
                         else
                             superseded = true;   // a rerun already owns this stream+dir
                     }
-                    lock (_progressLock) _vodProgress.Remove(stream);
+                    // Guarded the same way the job table above is, and for the
+                    // same reason. The progress record is keyed by stream, not
+                    // by process, so a superseded job's exit handler was
+                    // deleting the record its *successor* had just written —
+                    // and nothing rewrites it, so that conversion showed 0%
+                    // for as long as it ran while the file itself converted
+                    // perfectly normally.
+                    if (!superseded) lock (_progressLock) _vodProgress.Remove(stream);
                     SweepSupersededSeekSegments(dir);
                     // Stopped, killed or crashed before ffmpeg wrote EXT-X-ENDLIST:
                     // the directory holds a partial copy that will never play.
@@ -1403,7 +1446,14 @@ public sealed class FfmpegManager : IDisposable
         {
             try
             {
-                lock (_lock) EvictVodCache(keep);
+                // No longer under _lock. Sizing the cache stats every file in
+                // it and evicting deletes whole directories of segments —
+                // seconds of work on a full cache, and every one of those
+                // seconds blocked /api/status, /api/channels and any playlist
+                // request, which is exactly what the comment in StartVod says
+                // this was moved off the lock to avoid. It takes _lock only to
+                // read the protected set now.
+                EvictVodCache(keep);
             }
             catch (Exception ex)
             {
@@ -1448,7 +1498,21 @@ public sealed class FfmpegManager : IDisposable
         // stale: it can throw, or walk a half-rebuilt bucket chain. It is the
         // same fault as the "Collection was modified" that ended an overnight
         // batch, seen again in this run's log.
-        var running = new HashSet<string>(ActiveVodStreams, StringComparer.OrdinalIgnoreCase);
+        // Plus the conversions that exist on disk but have not published a job
+        // yet: StartVod creates the directory early and holds _lock for a long
+        // time afterwards, and without this a sweep could delete a directory
+        // that is being started. Read together, once, under the lock.
+        HashSet<string> running;
+        lock (_lock)
+        {
+            running = new HashSet<string>(ActiveVodStreams, StringComparer.OrdinalIgnoreCase);
+            var cutoff = DateTime.UtcNow - StartingVodGrace;
+            foreach (var kv in _startingVod.ToArray())
+            {
+                if (kv.Value < cutoff) { _startingVod.Remove(kv.Key); continue; }
+                running.Add(kv.Key);
+            }
+        }
 
         var keptBytes = 0L;
         var evicted = 0;
@@ -1827,8 +1891,14 @@ public sealed class FfmpegManager : IDisposable
         foreach (var f in files)
         {
             if (VodStatusFor(f) is VodState.Done or VodState.Converting) continue;
-            if (_vodQueue.Contains(f, StringComparer.OrdinalIgnoreCase)) continue;
-            _vodQueue.Enqueue(f);
+            // Both the duplicate check and the enqueue under the same lock, so
+            // a concurrent RemoveFromVodQueue cannot drain this away between
+            // them — see the note there.
+            lock (_pumpLock)
+            {
+                if (_vodQueue.Contains(f, StringComparer.OrdinalIgnoreCase)) continue;
+                _vodQueue.Enqueue(f);
+            }
             n++;
         }
         // Persisted before anything starts: a batch is at its most valuable
@@ -2726,6 +2796,26 @@ public sealed class FfmpegManager : IDisposable
     private void StartLiveJob(string name, string url)
     {
         var stream = ChannelStream(name);
+
+        // One writer per channel directory, enforced here rather than by each
+        // caller remembering to.
+        //
+        // A television left sitting on a channel retries as soon as the server
+        // is back, so EnsureChannelRunning can start a job for it before
+        // RestoreRunningChannels reaches the same channel — and that then
+        // started a second ffmpeg into the same directory, overwriting the
+        // first one's playlist and segments while the first kept writing.
+        // Neither knew about the other, and the entry in _liveJobs named only
+        // the newer one, so the older was never stopped: an orphan writing into
+        // a live channel for as long as it lasted.
+        //
+        // StopJob is a no-op when nothing is listed, and it removes the entry
+        // before killing, so OnLiveJobExited's ReferenceEquals check still
+        // reads that death as deliberate. StartChannel and RestartChannel
+        // already call it; this makes them harmlessly redundant rather than
+        // load-bearing.
+        StopJob(_liveJobs, stream);
+
         var dir = Path.Combine(_mediaRoot, stream);
         Directory.CreateDirectory(dir);
 
