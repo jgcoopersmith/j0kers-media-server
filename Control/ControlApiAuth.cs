@@ -171,6 +171,7 @@ public sealed partial class ControlApi
             {
                 var target = store.FindById(ctx.Request.QueryString["id"]);
                 if (target is null) { WriteJson(res, 404, new { error = "unknown user" }); return true; }
+                if (DenyActingOnServerAdmin(ctx, auth, target)) return true;
                 var had = _auth.SessionCountFor(target.Id);
                 _auth.RevokeSessionsFor(target.Id);
                 Log.Info("auth", $"{auth.Name} signed {target.Username} out of {had} session(s)");
@@ -191,6 +192,7 @@ public sealed partial class ControlApi
                     WriteJson(res, 400, new { error = "you cannot delete the account you are signed in with" });
                     return true;
                 }
+                if (DenyActingOnServerAdmin(ctx, auth, user)) return true;
                 try { store.Delete(user); }
                 catch (InvalidOperationException ex) { WriteJson(res, 409, new { error = ex.Message }); return true; }
                 _auth.RevokeSessionsFor(user.Id);
@@ -202,6 +204,9 @@ public sealed partial class ControlApi
             {
                 var user = store.FindById(ctx.Request.QueryString["id"]);
                 if (user is null) { WriteJson(res, 404, new { error = "unknown user" }); return true; }
+                // The escalation: a key printed here is a working credential
+                // for that account, and keys carry its level.
+                if (DenyActingOnServerAdmin(ctx, auth, user)) return true;
                 IssueKey(ctx, user);
                 return true;
             }
@@ -210,6 +215,7 @@ public sealed partial class ControlApi
             {
                 var user = store.FindById(ctx.Request.QueryString["id"]);
                 if (user is null) { WriteJson(res, 404, new { error = "unknown user" }); return true; }
+                if (DenyActingOnServerAdmin(ctx, auth, user)) return true;
                 var keyId = ctx.Request.QueryString["keyId"] ?? "";
                 if (store.RevokeKey(user, keyId)) WriteJson(res, 200, new { revoked = keyId });
                 else WriteJson(res, 404, new { error = "unknown key" });
@@ -218,6 +224,37 @@ public sealed partial class ControlApi
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Refuses an ordinary administrator any action aimed at a Server Admin.
+    ///
+    /// EditUser has carried this rule since it was written — changing a Server
+    /// Admin's role is a server admin's alone — but the rule was applied to
+    /// that one route and nowhere else, while everything under /api/users is
+    /// gated only at AccessLevel.Admin. So the tier was enforced against being
+    /// *edited* and left open to every other way of getting at the same
+    /// account:
+    ///
+    ///   POST   /api/users/keys?id=&lt;server admin&gt;   mints a working key for
+    ///                                              that account and prints it
+    ///                                              — a promotion in one call
+    ///   DELETE /api/users?id=&lt;server admin&gt;        removes them; the last-one
+    ///                                              guard in Delete counts
+    ///                                              admins, not server admins,
+    ///                                              so they go one at a time
+    ///   DELETE /api/users/keys                     revokes their credentials
+    ///   POST   /api/users/signout                  ends their sessions
+    ///
+    /// The first is outright privilege escalation and the rest are denial of
+    /// service against the only tier that could undo it.
+    /// </summary>
+    private bool DenyActingOnServerAdmin(HttpListenerContext ctx, AuthResult auth, UserAccount target)
+    {
+        if (auth.IsServerAdmin || !target.IsServerAdmin) return false;
+        Log.Warn("auth", $"{auth.Name} is not a Server Admin and was refused an action on {target.Username}, who is");
+        WriteJson(ctx.Response, 403, new { error = "only a Server Admin can act on a Server Admin account" });
+        return true;
     }
 
     // ---- first run ----

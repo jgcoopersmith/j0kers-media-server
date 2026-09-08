@@ -1829,3 +1829,72 @@ to queue — 1559 already converted or in progress"*. Accurate about the count
 and useless about the cause, next to rows marked as needing conversion.
 
 231 tests pass.
+
+---
+
+## 2026-09-07 — Audit, and the four security findings fixed (v2.0.286 → v2.0.287)
+
+An audit of the whole codebase raised 48 findings across 8 dimensions; each was
+then put to two independent verifiers, one told to refute it and one to judge
+whether it is reachable in this program. 33 survived both, 6 split, 9 were
+refuted. The full report is on the desktop as `Code audit 2026-09-07.txt`.
+This entry covers the four security findings, fixed first.
+
+### An ordinary Admin could take the top tier
+
+Everything under `/api/users` is gated at `AccessLevel.Admin`. `EditUser` has
+carried the rule that only a Server Admin may change a Server Admin since it
+was written — and that rule was applied to that one route and nowhere else.
+Every other way of reaching the same account was open:
+
+| route | what an Admin could do to a Server Admin |
+|---|---|
+| `POST /api/users/keys?id=` | mint a working, non-expiring key for that account — **a promotion in one call** |
+| `DELETE /api/users?id=` | delete them; `Delete`'s last-one guard counts *admins*, so server admins go one at a time |
+| `DELETE /api/users/keys` | revoke their credentials |
+| `POST /api/users/signout` | end their sessions |
+
+The first is outright escalation; the rest are denial of service against the
+only tier that could undo it. `DenyActingOnServerAdmin` now guards all four,
+and says who was refused what.
+
+### The accounts file was not actually protected
+
+Two faults which only bite together, and together they meant `users.json` was
+usually readable by anyone with access to the directory:
+
+**`SecretFile.Protect` marked the path done before checking the file exists.**
+`UserStore` protects on construction — before a first run has written anything
+— so the path was recorded as handled, the call returned having done nothing,
+and the write a moment later found the job ticked off. Never restricted, for
+the life of that install. The memo is now written only after the restriction
+actually succeeds.
+
+**The rename undid it anyway.** These files are written temp-then-rename, and a
+rename leaves a *new* file at that name, inheriting the folder's permissions.
+So even a successful protect lasted until the next save. The header comment
+asserted the opposite — "the ACL survives rewrites" — which is true of a write
+in place and false of what the code does.
+
+`SecretFile.WriteAllText` now uses `File.Replace`, which swaps the contents and
+keeps the destination's own ACL, atomically and with no `icacls` to pay for.
+Only the create path needs restricting afterwards. `UserStore.Save` and the
+session save both go through it.
+
+### On the tests
+
+Four for `SecretFile`. The permission assertion only bites on Unix, where the
+mode is readable; on Windows the equivalent is the DACL and reading it needs an
+ACL API this project's platform-neutral target does not carry.
+
+The obvious Windows substitute — comparing creation time to catch a rename-over
+— was tried and **does not work**: NTFS tunneling preserves creation time
+across a rename as well, so the test passed whether or not the fix was in
+place. It was measured rather than assumed, and removed rather than left in
+looking like coverage.
+
+The four route guards are not unit-tested: reaching them needs a signed-in
+Admin against a live listener, which the suite has no harness for. They were
+verified by reading, and the shape is the one `EditUser` has used all along.
+
+235 tests pass.

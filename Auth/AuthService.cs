@@ -171,18 +171,18 @@ public sealed class AuthService
         // time, and a temp name that cannot be shared even so.
         lock (_saveLock)
         {
-            var tmp = $"{_sessionFile}.{Environment.ProcessId}.{Environment.CurrentManagedThreadId}.tmp";
             try
             {
-                File.WriteAllText(tmp, System.Text.Json.JsonSerializer.Serialize(
+                // Live session digests, written the same way as the accounts
+                // file: File.Replace keeps the restrictive ACL, where the
+                // rename it used to do handed the file back to whatever the
+                // folder allows on every single save.
+                Services.SecretFile.WriteAllText(_sessionFile, System.Text.Json.JsonSerializer.Serialize(
                     _sessions, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
-                File.Move(tmp, _sessionFile, overwrite: true);
-                Services.SecretFile.Protect(_sessionFile);
             }
             catch (Exception ex)
             {
                 Log.Warn("auth", $"could not save sessions.json: {ex.Message}");
-                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
             }
         }
     }

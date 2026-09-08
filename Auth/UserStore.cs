@@ -215,12 +215,13 @@ public sealed class UserStore
         try
         {
             var json = JsonSerializer.Serialize(new Document { Users = _users }, JsonOpts);
-            var tmp = $"{_file}.{Environment.CurrentManagedThreadId}.tmp";
-            File.WriteAllText(tmp, json);
-            File.Move(tmp, _file, overwrite: true);
+            // Password hashes and key digests: this account's business alone.
+            // Written through SecretFile so the restrictive ACL survives — the
+            // plain temp-file-and-rename this used to do left a new file at
+            // that name every save, inheriting the folder's permissions and
+            // quietly undoing the one Protect that had run at startup.
+            Services.SecretFile.WriteAllText(_file, json);
             _loadedFromDisk = true;   // this process owns the file from here on
-            // password hashes and key digests: this account's business alone
-            Services.SecretFile.Protect(_file);
         }
         catch (Exception ex)
         {
