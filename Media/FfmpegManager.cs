@@ -201,7 +201,7 @@ public sealed class FfmpegManager : IDisposable
         // thing a moment later now, with the server already up.
         // Off the startup path: it reads every conversion directory, and
         // nothing waits on the answer.
-        _ = Task.Run(CleanUpIncompleteVodDirs);
+        _ = Task.Run(() => { CleanUpIncompleteVodDirs(); BackfillConversionHeights(); });
         MarkExistingConversionsKeptOnce(Path.Combine(baseDirectory, "vod-keep-migrated"));
         LoadChannels();
         LoadQueueSettings();
@@ -999,6 +999,14 @@ public sealed class FfmpegManager : IDisposable
             if (keep) MarkKept(dir, stream);
             // remember the source so subtitles can be found for this stream
             try { File.WriteAllText(Path.Combine(dir, "source.txt"), info.FullName); } catch { }
+            // And the height it was asked for, because the NAME cannot be
+            // trusted to say. VodStreamName writes a scaled marker as
+            // "-720p-<hash>", and a film called "2012 Skyfall 720p.mkv"
+            // produces exactly that shape from its own title — so the index
+            // that decides what DLNA may use was rejecting full-resolution
+            // conversions of any file whose name happens to end that way.
+            // Zero means source height.
+            try { File.WriteAllText(Path.Combine(dir, "height.txt"), Inv(height)); } catch { }
             // built as a list: a file name containing a quote must never be
             // able to become extra ffmpeg arguments
             // -progress writes machine-readable key=value lines to stdout;
@@ -2208,6 +2216,49 @@ public sealed class FfmpegManager : IDisposable
         if (files == 0) newestWriteUtc = info.LastWriteTimeUtc;
         // No cutoff means cleanup is switched off, not "everything qualifies".
         return cutoff is DateTime c && newestWriteUtc <= c;
+    }
+
+    /// <summary>
+    /// Writes height.txt for conversions made before it existed, so the DLNA
+    /// index can stop guessing from the directory name.
+    ///
+    /// Exact, and cheap: the name for a source-height conversion is computable
+    /// from the source path alone, and this class is the thing that computes
+    /// it. If VodStreamName(source, 0) is this directory, the conversion is
+    /// full resolution — whatever the "720p" in its title suggests.
+    ///
+    /// Only touches directories that have no height.txt, so it does nothing on
+    /// the second run.
+    /// </summary>
+    private void BackfillConversionHeights()
+    {
+        if (!Directory.Exists(_mediaRoot)) return;
+        var written = 0;
+        foreach (var dir in Directory.EnumerateDirectories(_mediaRoot, "vod-*"))
+        {
+            try
+            {
+                var marker = Path.Combine(dir, "height.txt");
+                if (File.Exists(marker)) continue;
+                var sourceFile = Path.Combine(dir, "source.txt");
+                if (!File.Exists(sourceFile)) continue;
+                var source = File.ReadAllText(sourceFile).Trim();
+                if (source.Length == 0 || !File.Exists(source)) continue;
+                // Only the unambiguous case is written. A directory that is not
+                // the height-0 name may be a scaled copy or may have been made
+                // under settings this build cannot reconstruct; the name
+                // fallback still covers it, exactly as before.
+                if (!string.Equals(VodStreamName(source, 0), Path.GetFileName(dir),
+                                   StringComparison.OrdinalIgnoreCase)) continue;
+                File.WriteAllText(marker, "0");
+                written++;
+            }
+            catch { /* one directory failing is not a reason to stop */ }
+        }
+        if (written > 0)
+            Log.Info("ffmpeg", $"recorded the source height for {written} conversion(s) made before it was "
+                             + "written down — a title ending in a resolution can no longer be mistaken "
+                             + "for a scaled copy");
     }
 
     private void CleanUpIncompleteVodDirs()

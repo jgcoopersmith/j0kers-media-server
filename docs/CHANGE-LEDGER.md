@@ -2193,3 +2193,60 @@ nothing reads. No longer written; the startup delete clears what older builds
 left.
 
 246 tests pass.
+
+---
+
+## 2026-09-07 — "Convert DLNA" that no amount of transcoding could clear (v2.0.292 → v2.0.293)
+
+**Reported:** the whole movie root was selected and transcoded, and afterwards a
+number of files still asked for a DLNA conversion.
+
+### The batch had worked
+
+| | |
+|---|---|
+| files found | 5,095 |
+| queued | 231 |
+| conversions started / finished | 300 / 299 |
+| failed | 1 — a corrupt AVI, `Invalid data found when processing input` |
+
+Measured across the library afterwards: **4,351 of 4,361 Ready, 10 not.** All
+ten `.mkv`. All ten with a conversion the index had classified as *scaled*.
+
+### The names lied, and re-converting could never fix it
+
+A conversion directory is `vod-{slug}{-720p}-{8 hex}`, with the middle part
+present only when a height was asked for. `VodIndex` decided what DLNA may be
+given by matching `-\d+p-[0-9a-f]{8}$` — and the slug is the file's own name.
+
+    G:\Archive\Movies\Action\2012 Skyfall 720p.mkv
+      -> vod-2012-skyfall-720p-41199ce1
+
+That is a **source-height** conversion whose title happens to end in "720p", and
+it is textually identical to a real 720p copy. Verified with ffprobe: source
+1280x534, conversion **1280x534**.
+
+So the film was excluded from DLNA as a scaled copy, showed *Convert DLNA*, and
+converting it again produced the same name and was rejected again — permanently
+stuck, and nothing in the log said why. All ten were this: titles ending in a
+resolution.
+
+### The height is written down now
+
+`StartVod` writes `height.txt` beside `source.txt` — 0 for source height — and
+`VodIndex.IsScaled` believes it when present, falling back to the name only for
+conversions made before it existed. A value it cannot parse is *not* read as
+scaled: guessing that way hides a good conversion from the television, which is
+the failure being fixed.
+
+For the ones already on disk, `BackfillConversionHeights` writes the marker
+where it can prove the answer: the height-0 name is computable from the source
+path, and this class is what computes it, so a directory equal to
+`VodStreamName(source, 0)` is full resolution whatever its title says. Anything
+it cannot prove is left to the old fallback.
+
+Three tests pin the ambiguity itself rather than the workaround, so nobody tries
+to solve it with a cleverer regex — a real 720p copy and Skyfall match the same
+pattern, and always will.
+
+249 tests pass.

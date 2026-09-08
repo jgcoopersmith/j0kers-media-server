@@ -116,6 +116,37 @@ public sealed class VodIndex
         catch { /* the media root came and went; the next check will find it */ }
     }
 
+    /// <summary>
+    /// Is this conversion a scaled copy, which DLNA must not be given?
+    ///
+    /// The name alone cannot answer it. VodStreamName writes the marker as
+    /// "-720p-&lt;8 hex&gt;", and a file called "2012 Skyfall 720p.mkv" produces a
+    /// directory ending in exactly that shape from its own title. The two are
+    /// textually identical, so the regex rejected full-resolution conversions
+    /// of any film whose name ends in a resolution — and re-converting could
+    /// never fix it, because the new conversion got the same name and was
+    /// rejected again. Measured: Skyfall's source is 1280x534 and its
+    /// conversion is 1280x534, and it sat on "Convert DLNA" for good.
+    ///
+    /// So the height is written down when the conversion is made, and that is
+    /// believed when it is there. The name is only consulted for conversions
+    /// made before this existed.
+    /// </summary>
+    private static bool IsScaled(string dir)
+    {
+        try
+        {
+            var file = Path.Combine(dir, "height.txt");
+            if (File.Exists(file))
+            {
+                var text = File.ReadAllText(file).Trim();
+                return int.TryParse(text, out var h) && h > 0;
+            }
+        }
+        catch { /* fall through to the name */ }
+        return Scaled.IsMatch(Path.GetFileName(dir));
+    }
+
     private void Build()
     {
         var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -125,7 +156,7 @@ public sealed class VodIndex
             foreach (var dir in Directory.EnumerateDirectories(_root, "vod-*"))
             {
                 seen++;
-                if (Scaled.IsMatch(Path.GetFileName(dir))) continue;
+                if (IsScaled(dir)) continue;
                 string source;
                 try { source = File.ReadAllText(Path.Combine(dir, "source.txt")).Trim(); }
                 catch { continue; }          // no source.txt: not one of ours to match
