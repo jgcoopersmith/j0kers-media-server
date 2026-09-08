@@ -153,6 +153,10 @@ let tcReloadGen = 0;
    Up and Refresh sat there doing nothing visible until it finished. A
    deliberate act now abandons whatever was running and starts its own. */
 let tcAbort = null;
+/* How many deliberate reloads are in flight. A background refresh drops its
+   result while any is, because it cannot tell from the generation alone
+   whether a click got in first. */
+let tcUserBusy = 0;
 
 async function tcReload(path, quiet) {
   /* Nothing to show and the root are different things, and treating them as
@@ -183,7 +187,18 @@ async function tcReload(path, quiet) {
      A background refresh must never cancel a deliberate act. It still stands
      aside for one: it reads the generation without claiming it, and drops its
      own result if a person has navigated since. */
+  /* A quiet refresh reading the current generation is not enough on its own.
+
+     If a click has ALREADY claimed a generation and its request is still in
+     flight, the quiet one reads that same number, passes the check below when
+     it returns, and repaints over the newer answer — the very thing the
+     counter exists to stop. The counter only catches a navigation that starts
+     after the quiet one did.
+
+     So a quiet refresh also stands aside for any deliberate reload still in
+     flight, which is what tcUserBusy counts. */
   const gen = quiet ? tcReloadGen : ++tcReloadGen;
+  if (!quiet) tcUserBusy++;
   // Moving to a different folder ends any search; refreshing the same folder
   // keeps it (that's how the search stays put while you tick and convert).
   if (path !== tcState.path) {
@@ -229,11 +244,14 @@ async function tcReload(path, quiet) {
   } catch (e) {
     // Being cut off by a newer click is the system working, not a failure to
     // report: the reload that replaced this one owns the panel now.
+    if (!quiet) tcUserBusy--;
     if (e && e.name === "AbortError") return;
     if (gen === tcReloadGen) { list.innerHTML = ""; list.style.opacity = ""; msg.textContent = "cannot open: " + e.message; }
     return;
   }
-  if (gen !== tcReloadGen) return;   // a newer search/navigation already ran
+  if (!quiet) tcUserBusy--;
+  if (gen !== tcReloadGen) return;              // a newer navigation already ran
+  if (quiet && tcUserBusy > 0) return;          // a click is in flight; it owns the panel
   list.style.opacity = "";
 
   tcState.path = data.path || "";

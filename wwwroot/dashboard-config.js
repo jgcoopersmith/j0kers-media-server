@@ -15,6 +15,7 @@ async function togglePower() {
 
 /* ---- config dialog: hostname (bind address) and ports ---- */
 let cfgLoaded = null; // values as loaded, so Save only sends what changed
+let cfgDlnaKnown = false; // did /api/dlna actually answer? see saveDlnaShare
 let streamRemoveAction = "ask";   // keep|delete once settled; "ask" prompts each time
 
 let cfgInterfaces = [];
@@ -61,10 +62,17 @@ async function openConfig() {
     cfgDlnaFolders = s.dlnaFolders || 0;
     try {
       const d = await api("/api/dlna");
+      cfgDlnaKnown = true;
       cfgDlnaShare = d.folders || [];
       cfgDlnaPort = d.port || 0;
       cfgDlnaPlain = !!d.plainPort;
-    } catch { cfgDlnaShare = []; cfgDlnaPort = 0; cfgDlnaPlain = false; }
+    } catch {
+      /* The read failed, so this browser does not know what is shared. Leaving
+         the list empty and letting Save write it would unshare every folder on
+         the server — a failure to READ turning into a destructive WRITE. The
+         flag makes saveDlnaShare leave it alone instead. */
+      cfgDlnaShare = []; cfgDlnaPort = 0; cfgDlnaPlain = false; cfgDlnaKnown = false;
+    }
     renderDlnaNote();
 
     $("cfg-loglevel").value = (s.logLevel || "info").toLowerCase();
@@ -303,6 +311,9 @@ $("cfg-dlna-folders").addEventListener("click", e => {
 });
 
 async function saveDlnaShare() {
+  // Nothing was read, so there is nothing to write back. Saving here would
+  // post an empty list and unshare everything.
+  if (!cfgDlnaKnown) return;
   await fetch("/api/dlna", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...headers() },
@@ -455,11 +466,24 @@ async function saveConfig() {
     mediaRoot: $("cfg-mediaroot").value.trim() || "media",
     streamRemoveAction: removeActionFromBoxes(),
   };
+  /* Never save a dialog that never loaded.
+
+     cfgLoaded is the values as they arrived; the loop below treats "no
+     loaded values" as "everything changed", so a Save after a failed
+     /api/settings read sent every field — read out of empty inputs, which
+     means blank strings, zeros and false — straight over the real server
+     settings. The ports would have gone to 0 and the media root to "media".
+     There is nothing to compare against and nothing safe to send. */
+  if (!cfgLoaded) {
+    msg.textContent = "settings never loaded — close this and reopen it before saving";
+    return;
+  }
+
   // only send fields the user actually changed, so untouched settings
   // keep following server.json instead of being frozen in settings.json
   const body = {};
   for (const k in current)
-    if (!cfgLoaded || current[k] !== cfgLoaded[k]) body[k] = current[k];
+    if (current[k] !== cfgLoaded[k]) body[k] = current[k];
 
   // the folder ticks live in their own endpoint, and are saved whether or
   // not anything else on the dialog changed
@@ -484,6 +508,14 @@ async function saveConfig() {
     if (data.httpsChanged) await offerRestart(data.httpsEnabled);
     else if (data.mediaRootChanged)
       alert("Transcodes directory saved. New transcodes and live-channel streams write there after the server restarts.");
+    /* What was just saved is now what is loaded. Without this cfgLoaded kept
+       the values from when the dialog opened, so a second Save in the same
+       session re-sent fields that had already been stored — and, worse,
+       anything reading cfgLoaded afterwards saw the old answer. That is how
+       "always delete files" carried on deleting after it had been switched
+       off: removeHlsStream reads cfgLoaded.streamRemoveAction. */
+    Object.assign(cfgLoaded, body);
+    if (body.streamRemoveAction !== undefined) streamRemoveAction = body.streamRemoveAction;
     mountsLoaded = 0; channelsLoaded = 0;
     // a new lifetime only reaches URLs via a freshly minted token
     if (body.linkLifetimeHours !== undefined) await refreshMediaToken();

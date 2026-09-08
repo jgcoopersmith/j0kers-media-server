@@ -355,9 +355,18 @@ function resumePointFor(stream) {
 window.addEventListener("message", async ev => {
   const d = ev.data;
   if (!d || d.j0kers !== "position" || !d.stream) return;
-  const mediaOrigins = (hlsAddresses || []).map(a => a.replace(/\/$/, ""));
-  const ok = mediaOrigins.some(o => { try { return new URL(o).origin === ev.origin; } catch { return false; } })
-          || ev.origin === location.origin;
+  /* hlsAddresses holds objects — {address, primary, ...} — not strings, so
+     this called .replace on an object and threw a TypeError on the first line
+     of every message. The whole feature was dead: the watch tab reports its
+     position every ten seconds, on pause and on pagehide, and not one of those
+     was ever recorded, so nothing ever resumed where it was left.
+
+     Built the same way mediaUrlOn builds a media link, because that is what
+     the watch tab's origin actually is: scheme, address, media port. */
+  const ok = (hlsAddresses || []).some(a => {
+    try { return new URL(mediaScheme() + a.address + ":" + hlsPort).origin === ev.origin; }
+    catch { return false; }
+  }) || ev.origin === location.origin;
   if (!ok) return;
   try {
     await send("POST", "/api/history/position",

@@ -160,6 +160,13 @@ const PREF_KEYS = [
   "j0kers-tc-sort",       // dashboard-transcode.js  TC_SORT_KEY
   "j0kers-tc-conv-order", // dashboard-transcode.js  TC_ORDER_KEY
   "j0kers-hls-order",     // dashboard-streams.js    REORDER.hls.key
+  // The other two families REORDER defines. Only the HLS one was listed, so
+  // dragging the live channels or the RTSP mounts into an order was kept in
+  // this browser and never followed the account: the same person on a second
+  // machine, or after clearing storage, got the default order back with
+  // nothing to say the setting had not been saved.
+  "j0kers-channel-order", // dashboard-streams.js    REORDER.channels.key
+  "j0kers-mount-order",   // dashboard-streams.js    REORDER.mounts.key
   "tunerHost",            // dashboard-channels.js
 ];
 

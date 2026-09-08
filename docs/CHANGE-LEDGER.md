@@ -2058,3 +2058,58 @@ the life of the process. Wrapping the whole 200-line span in try/finally was the
 alternative and was not worth the risk for a leak an expiry closes.
 
 246 tests pass.
+
+---
+
+## 2026-09-07 — Nine dashboard faults (v2.0.290 → v2.0.291)
+
+### Resume never worked
+
+`hlsAddresses` holds objects — `{address, primary}` — and the position listener
+called `.replace` on one. That throws a TypeError on the **first line of every
+message**, so the whole feature was dead: the watch tab reports its position
+every ten seconds, on pause and on pagehide, and not one was ever recorded.
+Nothing has ever resumed where it was left. The origin is now built the way
+`mediaUrlOn` builds a media link, which is what the watch tab's origin actually
+is.
+
+### The Config dialog could write over the real settings
+
+Two faults in one variable. `cfgLoaded` is the values as they arrived, and the
+save loop treats "nothing loaded" as "everything changed" — so a Save after a
+failed `/api/settings` read sent every field, read out of empty inputs: blank
+strings, zeros, `false`. Ports to 0, media root to "media". It now refuses to
+save a dialog that never loaded.
+
+And `cfgLoaded` was never refreshed after a successful save, so a second Save
+re-sent what had already been stored — and anything reading it afterwards saw
+the old answer. That is how **"always delete files" carried on deleting after it
+was switched off**: `removeHlsStream` reads `cfgLoaded.streamRemoveAction`.
+
+### A failed read that became a destructive write
+
+If `/api/dlna` failed while the dialog opened, the share list was set to empty —
+and Save posted that empty list, **unsharing every DLNA folder on the server**.
+A failure to read turning into a write. `cfgDlnaKnown` now records whether the
+read answered, and the save leaves it alone if not.
+
+### The rest
+
+* **Two of three reorder keys were missing from `PREF_KEYS`.** Dragging live
+  channels or RTSP mounts into an order stayed in that browser and never
+  followed the account; only the HLS list was listed.
+* **`loadLibrary` had no generation guard.** Two quick folder clicks left the
+  path label, the listing and `currentLibPath` disagreeing, because the slower
+  request repainted after the faster.
+* **The quiet transcode re-scan could still repaint over a click.** Reading the
+  generation without claiming it only catches a navigation that starts *after*
+  it; a click already in flight shares the same number. A background refresh
+  now stands aside while any deliberate reload is running. My first attempt
+  captured the count at start, which misses exactly that case — corrected to
+  "defer while any is in flight".
+* **`playMedia` leaked the player tab** on its error paths, leaving a window
+  saying "preparing…" for ever.
+* **Changing TV provider mid-load was dropped**, leaving the select naming one
+  provider and the list showing another. It is now remembered and run after.
+
+246 tests pass.

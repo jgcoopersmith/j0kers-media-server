@@ -341,6 +341,10 @@ async function removeAllChannels(at) {
 let lineup = [];            // the current provider's channels, unfiltered
 let lineupProvider = "";
 let lineupLoading = false;
+/* A provider picked while another lineup is still loading. The request used to
+   be dropped outright, which left the select naming one provider and the list
+   showing another, with nothing to say the change had not happened. */
+let lineupWanted = null;
 
 async function loadProviders() {
   let data;
@@ -358,7 +362,7 @@ async function loadProviders() {
 async function loadLineup(force) {
   const id = $("tv-provider").value || "pluto";
   if (!force && id === lineupProvider) return;
-  if (lineupLoading) return;
+  if (lineupLoading) { lineupWanted = id; return; }
   lineupLoading = true;
   $("tv-lineup").innerHTML = '<div class="empty">Loading the lineup…</div>';
   try {
@@ -377,6 +381,13 @@ async function loadLineup(force) {
     $("tv-lineup").innerHTML = '<div class="empty">Could not load the lineup: ' + esc(e.message) + '</div>';
   } finally {
     lineupLoading = false;
+    // Whatever was asked for while this was in flight now gets its turn, so
+    // the list ends up agreeing with the select.
+    if (lineupWanted !== null) {
+      const next = lineupWanted;
+      lineupWanted = null;
+      if (next !== lineupProvider) loadLineup(true);
+    }
   }
 }
 

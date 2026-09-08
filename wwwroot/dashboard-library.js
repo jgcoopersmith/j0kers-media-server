@@ -342,7 +342,14 @@ function clearLibrarySearch() {
   else $("library").innerHTML = '<div class="empty">Add a library folder — movies, music, and pictures inside it become playable here.</div>';
 }
 
+/* Which library listing is the current one. Two quick folder clicks used to
+   leave the path label, the listing and currentLibPath disagreeing: the slower
+   request repainted after the faster, so the page showed one folder's contents
+   under another folder's name, and the next Up went somewhere unrelated. */
+let libLoadGen = 0;
+
 async function loadLibrary(path) {
+  const gen = ++libLoadGen;
   // opening a folder from a result is the end of that search
   if (libBrowsePath !== null && $("lib-search").value.trim() === "") libBrowsePath = null;
   const box = $("library");
@@ -359,9 +366,13 @@ async function loadLibrary(path) {
     data = await r.json();
     if (!r.ok) throw new Error(data.error || r.status);
   } catch (e) {
+    if (gen !== libLoadGen) return;      // a newer folder is already being opened
     box.innerHTML = '<div class="empty">cannot open: ' + esc(e.message) + '</div>';
     return;
   }
+  // Everything below repaints the panel and moves currentLibPath, so a slower
+  // request must stop here rather than overwrite a newer one.
+  if (gen !== libLoadGen) return;
 
   currentLibPath = data.path;
   scopeChoice = null;      // opening a folder is a fresh answer to "where?"
@@ -698,7 +709,10 @@ async function playMedia(path, startAt) {
       body: JSON.stringify({ file: path, height }),
     });
     const data = await r.json();
-    if (!r.ok) { alert(data.error || "playback failed"); return; }
+    // Close the tab that was claimed for this play before returning, or it
+    // sits there saying "preparing…" for ever with nothing coming. Every
+    // early exit below already does this; the error paths did not.
+    if (!r.ok) { if (tab && !tab.closed) tab.close(); alert(data.error || "playback failed"); return; }
     // the server has just recorded this play — don't leave a stale list
     noteWatched();
 
@@ -728,6 +742,7 @@ async function playMedia(path, startAt) {
     }
     playHls(url, startAt, tab);
   } catch (e) {
+    if (tab && !tab.closed) tab.close();
     alert("playback failed: " + e.message);
   }
 }
