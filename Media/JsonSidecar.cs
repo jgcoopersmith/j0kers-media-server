@@ -103,7 +103,21 @@ internal static class JsonSidecar
         var aside = file + ".corrupt";
         try
         {
-            File.Move(file, aside, overwrite: true);
+            // Do not overwrite an existing .corrupt. The summary above says
+            // the first one is the one that matters — it holds the last good
+            // content — and `overwrite: true` did exactly the opposite,
+            // replacing it with whatever the newest damaged version happens to
+            // be. A second failure after the file has already been rewritten
+            // empty would have destroyed the only copy worth having.
+            if (File.Exists(aside))
+            {
+                Log.Warn(label, $"{Path.GetFileName(file)} is damaged again — leaving the earlier " +
+                                $"{Path.GetFileName(aside)} in place, since that is the copy with " +
+                                "the last good content, and starting empty");
+                try { File.Delete(file); } catch { /* it will be rewritten anyway */ }
+                return;
+            }
+            File.Move(file, aside);
             Log.Warn(label, $"moved it to {Path.GetFileName(aside)} and started empty — " +
                             "its contents are recoverable from there");
         }

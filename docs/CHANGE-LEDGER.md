@@ -2113,3 +2113,83 @@ read answered, and the save leaves it alone if not.
   provider and the list showing another. It is now remembered and run after.
 
 246 tests pass.
+
+---
+
+## 2026-09-07 — The last seven audit findings (v2.0.291 → v2.0.292)
+
+All 33 confirmed findings are now closed.
+
+### Closing a passwordless account did not close it
+
+While an account is open, anyone who can reach the server can sign into it and
+then **mint themselves a key** (`POST /api/auth/keys`) or **set a password**
+(`ChangeOwnPassword` asks for no current password when the hash is empty).
+Turning passwordless off cleared the flag and left both in place, so the door
+stayed open to whoever had taken one and the administrator had no way to know.
+Closing it now revokes the account's keys and clears its password, and says how
+many it revoked.
+
+### A passwordless login reset the source lockout
+
+The passwordless branch cleared the throttle for the **address** as well as the
+name. A passwordless sign-in proves nothing about who is at that address — the
+account is open to anyone by definition — so this was an unlimited reset: spray
+passwords at a real account until the address locks, sign in once as the open
+one from the same address, and both the lockout and the PBKDF2 work it was
+rationing start over. The address throttle is now left alone.
+
+### A correct password could return 500
+
+`VerifyPassword` records the sign-in time through `Save()`, which rethrows. A
+full disk, a file held open by a backup, a permission change — and every correct
+password became a 500, locking everyone out of a server whose accounts were
+perfectly fine. The stamp is bookkeeping about something that already happened,
+so it now fails quietly and loudly in the log. `Save` still rethrows for the
+callers where silence would be worse: creating an account, changing a password.
+
+### A bad read that deleted subtitles
+
+An unreadable subtitle `user.json` returned an empty list, and attaching then
+wrote a one-entry list over it — every subtitle previously attached to that
+stream gone, from one failed read. Listing still degrades to empty, which is
+right; the write path now refuses.
+
+### Shutdown-on-close: dead code, and a lost notification
+
+`DashboardWentAway` had no callers — this sweep took over deciding when the last
+page goes. The shutdown path is fine. What went with it was the only call to
+`OnDashboardClosed`, the "still running in the background" balloon, which is
+precisely the moment somebody mistakes a closed window for a stopped server.
+The dead method is gone and the notice is raised from the sweep instead,
+latched so a per-second timer does not become a per-second balloon.
+
+### Two comments that were wrong, in opposite directions
+
+**`UserStore.Load`** said refusing to start would lock the operator out and that
+"with no users loaded, nothing validates". The second half is false: an empty
+account list is what a fresh install has, and the server treats that as *open to
+anyone on this network*. Carrying on past a corrupt `users.json` would turn a
+stray comma into an open server. The throw is right; the comment was corrected.
+
+**`JsonSidecar.Quarantine`** said the first `.corrupt` is the one that matters
+because it holds the last good content — and then overwrote it. Here the comment
+had the better reasoning: after the first corruption the file is rewritten
+near-empty, so a second `.corrupt` holds almost nothing. The code now keeps the
+first and removes the newer damaged file, so the bound the old behaviour was
+protecting still holds.
+
+**This changed a tested decision.** `A_second_corruption_replaces_the_quarantined_copy`
+asserted the overwrite. Its bound — one file, no unbounded growth — is kept; its
+choice of generation is reversed, and the test now says why. Easy to put back if
+the original preference was deliberate.
+
+### sessions.json was written and never read
+
+Sessions are deliberately cleared at every start, and the file was still being
+rewritten on every session change and at shutdown. Not merely wasted work: the
+rows are session digests, so it was writing credentials to disk for a file
+nothing reads. No longer written; the startup delete clears what older builds
+left.
+
+246 tests pass.

@@ -71,15 +71,34 @@ public sealed class SubtitleManager
 
     private static string UserFile(string subsDir) => Path.Combine(subsDir, "user.json");
 
-    private static List<UserTrack> LoadUserTracks(string subsDir)
+    private static List<UserTrack> LoadUserTracks(string subsDir) =>
+        TryLoadUserTracks(subsDir, out var tracks) ? tracks : new List<UserTrack>();
+
+    /// <summary>
+    /// The attached tracks, and whether the file could be believed.
+    ///
+    /// The distinction matters only on the write path, and it matters a lot
+    /// there: "no file" and "a file I could not parse" both read as an empty
+    /// list, and attaching a subtitle then wrote a ONE-ENTRY list over the
+    /// top — permanently unlisting every subtitle previously attached to that
+    /// stream, from a single unreadable read. For listing, an empty answer is
+    /// the right degradation; for replacing the file, it is not.
+    /// </summary>
+    private static bool TryLoadUserTracks(string subsDir, out List<UserTrack> tracks)
     {
+        tracks = new List<UserTrack>();
+        var f = UserFile(subsDir);
         try
         {
-            var f = UserFile(subsDir);
-            if (!File.Exists(f)) return new List<UserTrack>();
-            return JsonSerializer.Deserialize<List<UserTrack>>(File.ReadAllText(f)) ?? new List<UserTrack>();
+            if (!File.Exists(f)) return true;          // nothing attached yet: believable
+            tracks = JsonSerializer.Deserialize<List<UserTrack>>(File.ReadAllText(f)) ?? new List<UserTrack>();
+            return true;
         }
-        catch { return new List<UserTrack>(); }
+        catch (Exception ex)
+        {
+            Log.Warn("subs", $"could not read {f}: {ex.Message}");
+            return false;
+        }
     }
 
     /// <summary>Subtitle files the user attached by hand to this stream.</summary>
@@ -103,7 +122,15 @@ public sealed class SubtitleManager
         // attaches used to pick the same id and clobber each other
         lock (AttachLock)
         {
-            var existing = LoadUserTracks(subsDir);
+            // Refuse rather than overwrite what could not be read: the write
+            // below replaces the whole file, so a bad read here would throw
+            // away every subtitle already attached to this stream.
+            if (!TryLoadUserTracks(subsDir, out var existing))
+            {
+                Log.Warn("subs", $"not attaching to {subsDir}: its list of attached subtitles "
+                                 + "could not be read, and writing would replace it");
+                return null;
+            }
             // never reuse an id whose file is already on disk, even if
             // user.json was unreadable a moment ago
             var n = existing.Count;

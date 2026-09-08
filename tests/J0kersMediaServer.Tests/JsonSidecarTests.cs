@@ -93,8 +93,20 @@ public class JsonSidecarTests
     }
 
     [Fact]
-    public void A_second_corruption_replaces_the_quarantined_copy_rather_than_piling_up()
+    public void A_second_corruption_keeps_the_first_quarantined_copy()
     {
+        // This used to assert the opposite — that the second damaged copy
+        // replaced the first — and Quarantine's own summary said the first is
+        // the one that matters, "it holds the last good content". Both could
+        // not be true, and the summary is the one with the reasoning behind it.
+        //
+        // After the first corruption Load returns null, the caller carries on
+        // with nothing, and the next Save writes a fresh near-empty file. So a
+        // second .corrupt holds that near-empty file, and overwriting with it
+        // destroyed the only copy anybody would want back.
+        //
+        // The bound the old test was protecting still holds: one .corrupt, and
+        // the newer damaged file is removed rather than accumulating.
         using var dir = new TempDir();
         var file = dir.File("pins.json");
 
@@ -104,9 +116,7 @@ public class JsonSidecarTests
         File.WriteAllText(file, "second damaged copy {");
         Assert.Null(JsonSidecar.Load<List<Pin>>(file, "test"));
 
-        // one generation is kept, so the quarantine cannot grow without bound
-        // and the move never fails because the destination already exists
         Assert.Equal(new[] { file + ".corrupt" }, Directory.GetFiles(dir.Path));
-        Assert.Equal("second damaged copy {", File.ReadAllText(file + ".corrupt"));
+        Assert.Equal("first damaged copy {", File.ReadAllText(file + ".corrupt"));
     }
 }

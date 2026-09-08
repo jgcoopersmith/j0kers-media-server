@@ -160,32 +160,24 @@ public sealed class AuthService
     /// </summary>
     private readonly object _saveLock = new();
 
-    private void SaveSessions()
-    {
-        if (_sessionFile.Length == 0) return;
-        // Signing in, signing out and revoking all reach this from different
-        // request threads. Two of them writing at once used to interleave
-        // into one temp file and move the mess over the real one — and an
-        // unreadable sessions.json signs everybody out on the next start,
-        // which is the thing the file exists to prevent. One writer at a
-        // time, and a temp name that cannot be shared even so.
-        lock (_saveLock)
-        {
-            try
-            {
-                // Live session digests, written the same way as the accounts
-                // file: File.Replace keeps the restrictive ACL, where the
-                // rename it used to do handed the file back to whatever the
-                // folder allows on every single save.
-                Services.SecretFile.WriteAllText(_sessionFile, System.Text.Json.JsonSerializer.Serialize(
-                    _sessions, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
-            }
-            catch (Exception ex)
-            {
-                Log.Warn("auth", $"could not save sessions.json: {ex.Message}");
-            }
-        }
-    }
+    /// <summary>
+    /// Does nothing, deliberately.
+    ///
+    /// sessions.json was how a restart avoided costing everyone their login:
+    /// the table was written out and read back. That was removed — the file is
+    /// now DELETED at every start, so sessions do not survive a restart — and
+    /// the writes were left behind. The file was rewritten on every session
+    /// change and on shutdown, and read by nothing at all.
+    ///
+    /// That is not merely wasted work. The rows are session digests, and
+    /// writing credentials to disk for a file nobody reads is cost with no
+    /// benefit at all. So it is no longer written, and the delete at startup
+    /// clears anything an older build left.
+    ///
+    /// Kept as a method because the shutdown state-saver registers it by name;
+    /// there is simply nothing for it to do.
+    /// </summary>
+    private void SaveSessions() { }
 
     /// <summary>
     /// Persists the sliding idle timestamps, so a browser left open for days
@@ -455,8 +447,19 @@ public sealed class AuthService
         // dialog. A password sent along with it is simply ignored.
         if (_users.FindPasswordless(username) is UserAccount open)
         {
+            // The name, but deliberately NOT the address.
+            //
+            // A passwordless sign-in proves nothing about who is at that
+            // address — the account is open to anyone by definition — so
+            // clearing the source lockout here handed out an unlimited reset:
+            // spray passwords at a real account until the address locks, sign
+            // in once as the open one from the same address, and both the
+            // lockout and the PBKDF2 work it was rationing start over. Repeat
+            // for as long as you like.
+            //
+            // The name key is still cleared, because a passwordless account has
+            // no password to have failed against in the first place.
             _throttles.TryRemove(nameKey, out _);
-            _throttles.TryRemove(addrKey, out _);
             if (ReadSessionCookie(ctx) is string prior0) _sessions.TryRemove(Digest(prior0), out _);
             _users.TouchLogin(open);
             Log.Info("auth", $"passwordless login: {open.Username} ({open.Role}) from {client}");

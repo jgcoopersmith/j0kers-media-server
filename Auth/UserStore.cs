@@ -169,9 +169,21 @@ public sealed class UserStore
         }
         catch (Exception ex)
         {
-            // Refusing to start would lock the operator out of their own
-            // server over a stray comma; refusing to *authenticate* is the
-            // safe failure — with no users loaded, nothing validates.
+            // Refusing to start IS the safe failure here, and the throw is
+            // deliberate — the comment that used to sit here said the
+            // opposite, and following it would have been dangerous.
+            //
+            // "With no users loaded, nothing validates" is not how this server
+            // behaves. An empty account list is the state a fresh install is
+            // in, and Program.cs treats it as "no administrator account — the
+            // dashboard and its configuration are open to anyone on this
+            // network". So carrying on with a users.json that failed to parse
+            // would turn a stray comma into an OPEN server, which is the one
+            // outcome worse than not starting.
+            //
+            // Not starting is loud, is recoverable by fixing the file, and
+            // leaves the accounts exactly where they are — Save also refuses
+            // to write over a file this process never read.
             throw new InvalidOperationException($"users.json is invalid: {ex.Message}");
         }
     }
@@ -336,7 +348,15 @@ public sealed class UserStore
         var ok = VerifyHash(stored, password ?? "");
         if (user is null || !user.Enabled || !user.HasPassword || !ok) return null;
 
-        lock (_lock) { user.LastLoginUtc = DateTime.UtcNow; Save(); }
+        // The password was right; the login has happened. Recording WHEN is a
+        // nicety, and Save rethrows — so a full disk, a file held open by a
+        // backup, or a permission change turned every correct password into a
+        // 500 and locked everyone out of a server whose accounts were fine.
+        lock (_lock)
+        {
+            user.LastLoginUtc = DateTime.UtcNow;
+            TrySaveQuietly("last sign-in time");
+        }
         return user;
     }
 
@@ -379,22 +399,42 @@ public sealed class UserStore
     }
 
     /// <summary>
-    /// Turns the deliberately-open, username-only sign-in on or off. Turning it
-    /// on drops any password and pins the account to Read; turning it off leaves
-    /// it key-only until an administrator sets a password.
+    /// Turns the deliberately-open, username-only sign-in on or off.
+    ///
+    /// Turning it on drops any password and pins the account to Read. Turning
+    /// it off closes it, which means more than clearing the flag: while the
+    /// account was open, ANYONE who could reach the server could sign into it
+    /// and then mint themselves a key (POST /api/auth/keys) or set a password
+    /// (ChangeOwnPassword takes no current password when the hash is empty).
+    ///
+    /// Leaving those in place meant the door stayed open to whoever had taken
+    /// one, and the administrator had no way of knowing. So the credentials the
+    /// account granted itself go with the flag, and the account is left with
+    /// none until an administrator sets one.
     /// </summary>
     public void SetPasswordless(UserAccount user, bool value)
     {
         lock (_lock)
         {
             user.Passwordless = value;
+            var revoked = 0;
             if (value)
             {
                 user.PasswordHash = "";
                 user.Role = RoleRead;
             }
+            else
+            {
+                // Anything the account handed itself while it was open.
+                revoked = user.Keys.Count;
+                user.Keys.Clear();
+                user.PasswordHash = "";
+            }
             Save();
-            Log.Info("auth", $"passwordless {(value ? "enabled" : "disabled")} for {user.Username}");
+            Log.Info("auth", value
+                ? $"passwordless enabled for {user.Username}"
+                : $"passwordless disabled for {user.Username} — cleared its password and revoked "
+                  + $"{revoked} key(s) it had been given while open; set a password to let it back in");
         }
     }
 
@@ -408,7 +448,32 @@ public sealed class UserStore
     /// <summary>Records a successful sign-in time (used by the passwordless path).</summary>
     public void TouchLogin(UserAccount user)
     {
-        lock (_lock) { user.LastLoginUtc = DateTime.UtcNow; Save(); }
+        lock (_lock)
+        {
+            user.LastLoginUtc = DateTime.UtcNow;
+            TrySaveQuietly("last sign-in time");
+        }
+    }
+
+    /// <summary>
+    /// Saves, and treats failure as a lost nicety rather than a failed
+    /// operation.
+    ///
+    /// For the things that are recorded ABOUT a successful action rather than
+    /// being the action — a last-sign-in stamp, a key's last-used time. Save
+    /// itself rethrows, which is right when the caller is creating an account
+    /// or changing a password: silently not storing those is worse than
+    /// failing. It is wrong for a timestamp, where the only effect of throwing
+    /// is to undo something that already happened.
+    /// </summary>
+    private void TrySaveQuietly(string what)
+    {
+        try { Save(); }
+        catch (Exception ex)
+        {
+            Log.Warn("auth", $"could not record the {what}: {ex.Message} — "
+                             + "the sign-in itself is unaffected");
+        }
     }
 
     /// <summary>

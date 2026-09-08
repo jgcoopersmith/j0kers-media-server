@@ -40,6 +40,8 @@ public sealed partial class ControlApi : IDisposable
     private readonly Media.SubtitleManager? _subtitles;
     private readonly Action? _requestShutdown;
     private Timer? _closeShutdownTimer;
+    /// <summary>Has the "still running in the background" notice been shown since the last page closed?</summary>
+    private bool _notifiedClosed;
     private readonly object _shutdownLock = new();
 
     /// <summary>
@@ -688,7 +690,25 @@ public sealed partial class ControlApi : IDisposable
         {
             try
             {
-                if (!_config.ShutdownOnClose || !_sawDashboard) return;
+                if (!_sawDashboard) return;
+
+                // Background mode: the server stays up, and that is exactly the
+                // moment somebody can mistake for it having quit — the window
+                // is gone and nothing on screen says otherwise. Saying so was
+                // the whole point of OnDashboardClosed, and it had become
+                // unreachable: the only call to it sat in DashboardWentAway,
+                // which nothing calls since this sweep took over deciding.
+                //
+                // Latched, because this timer runs every second and a balloon
+                // per second is not a notification.
+                if (!_config.ShutdownOnClose)
+                {
+                    if (PagesHolding() > 0) { _notifiedClosed = false; return; }
+                    if (_notifiedClosed) return;
+                    _notifiedClosed = true;
+                    OnDashboardClosed?.Invoke();
+                    return;
+                }
 
                 // The mark is maintained here rather than only where links
                 // begin and end. PagesHolding can change without either
@@ -1004,44 +1024,6 @@ public sealed partial class ControlApi : IDisposable
         }
     }
 
-    /// <summary>
-    /// The last dashboard has gone. One path for both ways of learning it —
-    /// the live link dropping and the pagehide beacon, when it arrives —
-    /// so the two can never disagree about what closing the page means.
-    ///
-    /// Not in the background: closing the page is how this server is
-    /// stopped, so it stops. The grace is only long enough for a refresh or
-    /// a navigation to bring the link back, which takes well under a second.
-    /// </summary>
-    private void DashboardWentAway()
-    {
-        if (_config.ShutdownOnClose && _requestShutdown is not null)
-        {
-            lock (_shutdownLock)
-            {
-                _closeShutdownTimer?.Dispose();
-                _closeShutdownTimer = new Timer(_ => CloseShutdownTick(), null,
-                                                CloseGraceMs, Timeout.Infinite);
-            }
-            return;
-        }
-
-        if (OnDashboardClosed is null) return;
-        // Background mode: closing the page leaves the server running, which
-        // is worth saying — it is the opposite of what closing a window
-        // usually means. Held for a moment first, because a refresh looks
-        // exactly like this for the first half second, and a balloon for
-        // every refresh would be noise.
-        lock (_shutdownLock)
-        {
-            _closedNoticeTimer?.Dispose();
-            _closedNoticeTimer = new Timer(_ =>
-            {
-                Log.Info("control", "dashboard closed — still running in the background");
-                OnDashboardClosed?.Invoke();
-            }, null, 2000, Timeout.Infinite);
-        }
-    }
 
     /// <summary>
     /// How long after the last dashboard goes before the server acts. Long
