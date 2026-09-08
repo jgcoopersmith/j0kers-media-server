@@ -1159,6 +1159,24 @@ public sealed class FfmpegManager : IDisposable
         return i;
     }
 
+    /// <summary>
+    /// The height a conversion was made at, read back out of its stream name.
+    ///
+    /// VodStreamName writes it in as "-720p" before the eight-hex key (see
+    /// Named), and it is the only place the figure survives — nothing stores
+    /// the request beside the segments. A seek job filling in for that
+    /// conversion has to scale to the same height or its stand-in segments are
+    /// a different size from their neighbours.
+    ///
+    /// 0 for a source-height conversion, which is the common case.
+    /// </summary>
+    internal static int HeightFromStreamName(string stream)
+    {
+        // vod-<slug>[-<height>p]-<8 hex>
+        var m = System.Text.RegularExpressions.Regex.Match(stream, @"-(\d+)p-[0-9a-f]{8}$");
+        return m.Success && int.TryParse(m.Groups[1].Value, out var h) ? h : 0;
+    }
+
     private static string SegmentPath(string dir, int index) =>
         File.Exists(Path.Combine(dir, "init.mp4"))
             ? Path.Combine(dir, $"seg_{index:D5}.m4s")
@@ -1308,18 +1326,32 @@ public sealed class FfmpegManager : IDisposable
             var args = new List<string> { "-hide_banner", "-loglevel", "error", "-nostats",
                                           "-ss", Inv(at), "-y", "-i", source,
                                           "-output_ts_offset", Inv(at) };
-            if (VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase))
+            // The same decisions the conversion itself made, not a fresh set.
+            //
+            // This asked VideoEncoder == "copy" and called AudioArgs()
+            // unconditionally, so a seek job could differ from the conversion
+            // it is filling in for in three ways at once: re-encoding a
+            // picture StartVod had copied, re-encoding and downmixing a
+            // soundtrack it had copied, and — because it never looked at the
+            // height — writing full-resolution stand-ins into a 720p
+            // conversion. All three produce segments that do not match their
+            // neighbours, and with fMP4 they do not match the init either.
+            var seekHeight = HeightFromStreamName(stream);
+            var (seekCopyV, seekCopyA) = CopyableStreams(source, seekHeight);
+            if (seekCopyV || VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase))
             {
                 args.AddRange(new[] { "-c:v", "copy" });
             }
             else
             {
+                if (seekHeight > 0) args.AddRange(new[] { "-vf", $"scale=-2:{seekHeight}" });
                 args.AddRange(new[] { "-c:v", VideoEncoder });
                 args.AddRange(VideoQualityArgs());
                 args.AddRange(new[] { "-pix_fmt", "yuv420p" });
                 args.AddRange(KeyframeArgs(VodSegmentSeconds));
             }
-            args.AddRange(AudioArgs());
+            if (seekCopyA) args.AddRange(new[] { "-c:a", "copy" });
+            else args.AddRange(AudioArgs());
 
             // A playlist of its own, never index.m3u8: the HLS server builds
             // the playlist this stream is served from, and letting a second
@@ -1328,7 +1360,15 @@ public sealed class FfmpegManager : IDisposable
             args.AddRange(new[] { "-f", "hls", "-hls_time", Inv(VodSegmentSeconds), "-hls_list_size", "0",
                                   "-hls_playlist_type", "event",
                                   "-start_number", Inv(index) });
-            if (fmp4) args.AddRange(new[] { "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4" });
+            // Its own init, never the shared one. ffmpeg rewrites whatever it is
+            // pointed at, so naming init.mp4 here meant every seek job
+            // overwrote the file the whole stream's EXT-X-MAP refers to — and
+            // it stayed overwritten after the conversion finished, because
+            // nothing rewrites it afterwards. The canonical init.mp4 the
+            // in-order job writes is the one that describes these segments,
+            // now that the decisions above match it.
+            if (fmp4) args.AddRange(new[] { "-hls_segment_type", "fmp4",
+                                            "-hls_fmp4_init_filename", $"init.seek{index:D5}.mp4" });
             // Tagged with this job's own start, not the canonical name the
             // in-order job uses — see SeekSegmentPath. %05d is still
             // ffmpeg's own per-segment counter; -start_number above makes

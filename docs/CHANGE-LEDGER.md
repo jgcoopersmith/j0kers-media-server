@@ -1898,3 +1898,68 @@ Admin against a live listener, which the suite has no harness for. They were
 verified by reading, and the shape is the one `EditUser` has used all along.
 
 235 tests pass.
+
+---
+
+## 2026-09-07 — The seek-ahead encoder, and a playlist built on an assumption that stopped holding (v2.0.287 → v2.0.288)
+
+Four HIGH findings from the audit, all from one idea: that a conversion's
+segments sit on a fixed grid, every one exactly six seconds long, each starting
+at a forced keyframe.
+
+That is true while the video is being **encoded** — `KeyframeArgs` forces the
+interval. It stopped being true the day the per-stream copy went in, because a
+copy cannot place keyframes at all: ffmpeg cuts where the source already has
+one. A film with a 250-frame GOP comes out in ~10-second segments, unevenly,
+and there are fewer of them than `duration / 6` says.
+
+Two things were built on the assumption and neither checked it.
+
+### The seek-ahead job made its own decisions
+
+`EnsureVodSegment` asked `VideoEncoder == "copy"` and called `AudioArgs()`
+unconditionally, so a stand-in segment could differ from the conversion it was
+filling in for in three ways at once:
+
+* **re-encoding a picture the conversion had copied** — h264 → h264 for nothing,
+  and with an HEVC 10-bit source against `videoCodec=h265` it wrote an 8-bit
+  `hvcC` over 10-bit fragments
+* **re-encoding and downmixing audio the conversion had copied** — the surround
+  loss again, by a route the per-stream fix did not cover
+* **ignoring the height** — full-resolution stand-ins written into a 720p
+  conversion, because it never looked at what was asked for
+
+It now calls `CopyableStreams` with the conversion's own height, read back out
+of the stream name by `HeightFromStreamName` — which is the only place that
+figure survives, since nothing records the request beside the segments.
+
+**And it was overwriting the shared `init.mp4`.** ffmpeg rewrites whatever
+`-hls_fmp4_init_filename` points at, and every seek job pointed at the file the
+whole stream's `EXT-X-MAP` refers to. The damage outlived the session, because
+nothing rewrites that file afterwards. Each job now writes its own.
+
+I got this wrong on the first attempt: the edit landed on `StartVod`'s init
+rather than the seek job's, which would have broken every stream rather than
+fixing one. Caught by reading the build error and the surrounding lines.
+
+### The whole-film playlist claimed a grid it could not have
+
+`WholeVodPlaylist` synthesises `duration / 6` segments of exactly six seconds so
+a viewer can seek past what has been converted. On a copied conversion every
+`EXTINF` is wrong and the last segments do not exist — and because the playlist
+carries `EXT-X-ENDLIST` and `PLAYLIST-TYPE:VOD`, a player caches that mapping
+for the whole viewing instead of correcting it when the conversion finishes.
+
+It now asks the file rather than assuming: `SegmentsFollowTheGrid` reads the
+encoder's own playlist and gives up on the grid after three segments materially
+longer than the interval. Three rather than one, because the last segment of a
+film is routinely short and a single long one can be a scene ending where a GOP
+does. Falling back costs nothing real — the caller then serves the encoder's own
+playlist, which has exact durations for everything written so far.
+
+Stated limit, in the code and here: before the encoder has written anything
+there is nothing to judge, so the grid is assumed. That is the existing
+behaviour and the only answer that leaves a player anything at all in the first
+seconds.
+
+246 tests pass.

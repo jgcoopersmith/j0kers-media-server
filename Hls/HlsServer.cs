@@ -561,6 +561,48 @@ public sealed class HlsServer : IDisposable
     /// channel, a conversion that has finished, or one whose length was never
     /// recorded. Those keep the playlist they had.
     /// </remarks>
+    /// <summary>
+    /// Are this conversion's segments on the fixed grid the whole-film playlist
+    /// assumes, judged from what the encoder has actually written?
+    ///
+    /// Asked of the file rather than of the conversion's settings because
+    /// nothing records those beside the segments — and the file answers it
+    /// directly. An encoded conversion writes segments of the interval it was
+    /// given; a copied one writes whatever the source's keyframes allow, which
+    /// is longer and uneven.
+    ///
+    /// Three over-long segments rather than one: the last segment of a film is
+    /// routinely short, and a single long one can be a scene that happens to
+    /// end where a GOP does. Three is a pattern.
+    ///
+    /// The honest limit: before the encoder has written anything there is
+    /// nothing to judge, so this says yes and the grid is assumed. That is the
+    /// existing behaviour and the only answer that leaves a player anything to
+    /// play at all in the first seconds; it corrects itself as soon as a few
+    /// segments exist.
+    /// </summary>
+    private static bool SegmentsFollowTheGrid(string streamDir, double seconds)
+    {
+        if (seconds <= 0) return false;
+        try
+        {
+            var overlong = 0;
+            foreach (var line in File.ReadLines(Path.Combine(streamDir, "index.m3u8")))
+            {
+                if (!line.StartsWith("#EXTINF:", StringComparison.Ordinal)) continue;
+                var value = line["#EXTINF:".Length..].Split(',')[0];
+                if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var d)) continue;
+                if (d > seconds * 1.25 && ++overlong >= 3) return false;
+            }
+            return true;
+        }
+        catch
+        {
+            // No playlist yet, or unreadable. Nothing to contradict the grid.
+            return true;
+        }
+    }
+
     private string? WholeVodPlaylist(string streamDir, string stream)
     {
         if (!stream.StartsWith("vod-", StringComparison.OrdinalIgnoreCase)) return null;
@@ -579,6 +621,23 @@ public sealed class HlsServer : IDisposable
         if (duration <= 0) return null;
 
         var seconds = Media.FfmpegManager.SegmentSeconds;
+
+        // The fixed grid this playlist is built on only holds when the video is
+        // being ENCODED, because that is when KeyframeArgs forces a keyframe
+        // every interval. A conversion that COPIES the video cannot place
+        // keyframes at all: ffmpeg cuts where the source already has one, so a
+        // film with a 250-frame GOP comes out in ~10s segments and there are
+        // fewer of them than duration/6 says.
+        //
+        // Claiming the grid anyway gets both halves wrong — every EXTINF is a
+        // lie and the last few segments do not exist — and because this
+        // playlist carries EXT-X-ENDLIST and PLAYLIST-TYPE:VOD, a player caches
+        // that mapping for the whole viewing rather than correcting it when the
+        // conversion finishes. Falling back is not a loss: the caller then
+        // serves the encoder's own playlist, which has exact durations for
+        // everything written so far.
+        if (!SegmentsFollowTheGrid(streamDir, seconds)) return null;
+
         var count = (int)Math.Ceiling(duration / seconds);
         if (count <= 0) return null;
         var fmp4 = File.Exists(Path.Combine(streamDir, "init.mp4"));
