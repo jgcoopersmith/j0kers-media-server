@@ -34,7 +34,7 @@ public class WindowsAutostartTests
         // nothing to show for it.
         Assert.Equal(
             "\"C:\\Users\\someone\\AppData\\Local\\Programs\\j0kers Media Server\\j0kers-media-server.exe\" "
-            + "\"C:\\Users\\someone\\AppData\\Local\\Programs\\j0kers Media Server\\server.json\"",
+            + "\"C:\\Users\\someone\\AppData\\Local\\Programs\\j0kers Media Server\\server.json\" --autostart",
             command);
     }
 
@@ -50,7 +50,7 @@ public class WindowsAutostartTests
         // the enable path away from it.
         var command = WindowsAutostart.ComposeCommand(@"C:\srv\j0kers-media-server.exe", configPath);
 
-        Assert.Equal("\"C:\\srv\\j0kers-media-server.exe\"", command);
+        Assert.Equal("\"C:\\srv\\j0kers-media-server.exe\" --autostart", command);
     }
 
     [Fact]

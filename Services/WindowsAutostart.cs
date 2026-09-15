@@ -83,9 +83,12 @@ public static class WindowsAutostart
     /// Pure, so the quoting can be tested without touching the registry.
     /// </summary>
     public static string ComposeCommand(string exePath, string? configPath)
+        // --autostart says "Windows started this, not a person". Tray mode then
+        // stays silent; a person double-clicking the desktop icon gets the
+        // dashboard, because they have just asked to see it.
         => string.IsNullOrWhiteSpace(configPath)
-            ? $"\"{exePath}\""
-            : $"\"{exePath}\" \"{configPath}\"";
+            ? $"\"{exePath}\" --autostart"
+            : $"\"{exePath}\" \"{configPath}\" --autostart";
 
     /// <summary>
     /// Where this server was started from, or null if the runtime will not say

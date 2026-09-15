@@ -17,6 +17,11 @@ namespace J0kersMediaServer.Tests;
 /// </summary>
 public class ProbeCacheTests
 {
+    // Pruning runs behind the server coming up - it stats every cached file,
+    // and on a real library that measured 59 seconds, which the dashboard was
+    // waiting on. These tests wait for it explicitly rather than pretending it
+    // is synchronous.
+
     private static string CacheOf(TempDir dir) =>
         System.IO.Path.Combine(dir.Path, "probe-cache.json");
 
@@ -51,7 +56,7 @@ public class ProbeCacheTests
             [$"{System.IO.Path.Combine(dir.Path, "gone.mkv")}|5|7"] = "h264|aac",  // file deleted
         });
 
-        _ = new TvCodecs(dir.Path, "ffprobe.exe");
+        new TvCodecs(dir.Path, "ffprobe.exe").Pruning?.Wait();
 
         var left = ReadCache(dir);
         Assert.Single(left);
@@ -71,7 +76,7 @@ public class ProbeCacheTests
         WriteCache(dir, entries);
         var before = File.ReadAllText(CacheOf(dir));
 
-        _ = new TvCodecs(dir.Path, "ffprobe.exe");
+        new TvCodecs(dir.Path, "ffprobe.exe").Pruning?.Wait();
 
         Assert.Equal(before, File.ReadAllText(CacheOf(dir)));
     }
@@ -92,7 +97,7 @@ public class ProbeCacheTests
             ["path|notanumber|123"] = "h264|aac",
         });
 
-        _ = new TvCodecs(dir.Path, "ffprobe.exe");
+        new TvCodecs(dir.Path, "ffprobe.exe").Pruning?.Wait();
 
         Assert.Equal(new[] { Key(film) }, ReadCache(dir).Keys);
     }
@@ -108,7 +113,7 @@ public class ProbeCacheTests
         File.WriteAllText(film, "bytes");
         WriteCache(dir, new Dictionary<string, string> { [Key(film)] = "|" });
 
-        _ = new TvCodecs(dir.Path, "ffprobe.exe");
+        new TvCodecs(dir.Path, "ffprobe.exe").Pruning?.Wait();
 
         Assert.Empty(ReadCache(dir));
     }
@@ -126,7 +131,7 @@ public class ProbeCacheTests
         for (var i = 0; i < 50; i++) entries[$"{film}|{i}|{i}"] = "hevc|dts";
         WriteCache(dir, entries);
 
-        _ = new TvCodecs(dir.Path, "ffprobe.exe");
+        new TvCodecs(dir.Path, "ffprobe.exe").Pruning?.Wait();
 
         Assert.Single(ReadCache(dir));
     }
@@ -154,7 +159,7 @@ public class ProbeCacheTests
             entries[$"{System.IO.Path.Combine(conversions, $"vod-x-abc12345", $"seg_{i:00000}.ts")}|1000|1"] = "h264|aac";
         WriteCache(dir, entries);
 
-        _ = new TvCodecs(dir.Path, "ffprobe.exe", conversions);
+        new TvCodecs(dir.Path, "ffprobe.exe", conversions).Pruning?.Wait();
 
         Assert.Equal(new[] { Key(film) }, ReadCache(dir).Keys);
     }
@@ -172,7 +177,7 @@ public class ProbeCacheTests
         File.WriteAllText(recording, "bytes");
         WriteCache(dir, new Dictionary<string, string> { [Key(recording)] = "mpeg2video|ac3" });
 
-        _ = new TvCodecs(dir.Path, "ffprobe.exe", conversions);
+        new TvCodecs(dir.Path, "ffprobe.exe", conversions).Pruning?.Wait();
 
         Assert.Equal(new[] { Key(recording) }, ReadCache(dir).Keys);
     }
@@ -191,7 +196,7 @@ public class ProbeCacheTests
             [$"{dir.File("vanished.mkv")}|1|1"] = "h264|aac",
         });
 
-        _ = new TvCodecs(dir.Path, "ffprobe.exe");
+        new TvCodecs(dir.Path, "ffprobe.exe").Pruning?.Wait();
 
         Assert.Equal(new[] { Key(film) }, ReadCache(dir).Keys);
     }

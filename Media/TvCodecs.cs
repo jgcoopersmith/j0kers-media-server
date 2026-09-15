@@ -95,6 +95,17 @@ public sealed class TvCodecs
     /// </summary>
     private readonly string _conversionsRoot;
 
+    /// <summary>
+    /// The background prune, so a test can wait for it.
+    ///
+    /// Production never does: the whole point is that the server comes up
+    /// without it. But "it happens eventually" is not something a test can
+    /// assert, and the alternative — pruning synchronously so the tests stay
+    /// simple — is the 59 seconds this moved off the startup path. Exposing
+    /// the task keeps both honest.
+    /// </summary>
+    internal Task? Pruning { get; private set; }
+
     /// <summary>True for a path inside this server's own conversions folder.</summary>
     private bool IsConversionOutput(string file)
     {
@@ -136,11 +147,36 @@ public sealed class TvCodecs
                         _dirty = true;
                         Log.Info("probe", $"forgetting {failed.Count} failed probe(s) recorded as playable — they will be read again");
                     }
-                    PruneStale();
-                    // Written back now rather than whenever the next probe
-                    // happens to flush, so the repair is done once instead
-                    // of on every start for the life of the file.
-                    if (_dirty) Save();
+                    // Pruning is housekeeping, and it was holding up the
+                    // dashboard.
+                    //
+                    // It stats every cached library file to see whether it is
+                    // still there at that size and date. On this install that
+                    // is thousands of stats against a large archive drive, and
+                    // the startup instrumentation caught it costing **59.2
+                    // seconds** — during which nothing had bound the control
+                    // port, so the dashboard simply did not answer and the
+                    // desktop icon looked dead.
+                    //
+                    // Nothing needs it done first. A stale entry cannot give a
+                    // wrong answer: the key carries the file's size and
+                    // modification time, so a changed or missing file misses
+                    // the cache and is re-probed. The only cost of a stale
+                    // entry is the bytes it occupies. So it runs behind the
+                    // server coming up.
+                    Pruning = Task.Run(() =>
+                    {
+                        try
+                        {
+                            PruneStale();
+                            // Written back rather than waiting for the next
+                            // probe to flush, so the repair is done once
+                            // instead of on every start for the life of the
+                            // file.
+                            if (_dirty) Save();
+                        }
+                        catch (Exception ex) { Log.Warn("probe", $"pruning the probe cache failed: {ex.Message}"); }
+                    });
                 }
             }
         }

@@ -2367,3 +2367,65 @@ unverified. Two of the three faults in this area have now come from changing
 what an endpoint answers without checking every caller of it.
 
 256 tests pass.
+
+---
+
+## 2026-09-15 — The desktop icon looked dead, and the minute behind it (v2.0.296 → v2.0.297)
+
+**Reported:** the media server will not start from the desktop icon.
+
+It was starting. It was already running when this was looked at — pid 10988,
+serving 200 on both loopback and the LAN address, started 10:47 that morning.
+
+### Nothing to see
+
+Two of my own changes met:
+
+* tray mode hides the console, and
+* tray mode now suppresses the startup dashboard — asked for, and correct for a
+  logon start.
+
+Together they leave a deliberate launch with **no feedback whatsoever**: no
+console, no browser, and a tray icon tucked into the hidden overflow area.
+Double-clicking the icon is then indistinguishable from a server that failed to
+start, which is exactly how it was reported.
+
+"Do not pop a browser at every boot" is not the same instruction as "show the
+person who just double-clicked the icon nothing". I applied the first to both.
+
+The registry command now carries `--autostart`, and the dashboard is suppressed
+only when that flag is present. Windows starting it stays silent; a person
+launching it gets the dashboard.
+
+Same shape as the `/api/play` fault a week ago: one code path serving two
+callers who want opposite things, and only one of them considered.
+
+### And the instrumentation earned its place
+
+    10:47:05  streaming services started
+    10:48:04  television codec cache took 59.2s
+    10:48:04  the dashboard took 59.3s to prepare
+    10:48:04  listening on http://0.0.0.0:9090/api/
+
+**Fifty-nine seconds**, every start, before anything answered on the control
+port — so even when the icon did open a browser, it landed on a server that was
+not listening yet.
+
+`TvCodecs`'s constructor prunes the probe cache, which stats every cached
+library file against a large archive drive. Nothing needs it done first: the key
+carries each file's size and modification time, so a stale entry cannot give a
+wrong answer — it simply misses and the file is re-probed. The only cost of
+leaving one is the bytes it occupies.
+
+It now runs behind the server coming up. The six pruning tests asserted
+constructor-time behaviour and failed honestly when it moved, so `Pruning` is
+exposed for them to wait on rather than the prune being dragged back onto the
+startup path to keep the tests simple.
+
+### Repositories
+
+Fetched and compared: local `eb680bc` equals `origin/master`
+(github.com/jgcoopersmith/j0kers-media-server), 0 ahead, 0 behind, one branch,
+one working copy on this machine. Nothing to pull.
+
+256 tests pass.

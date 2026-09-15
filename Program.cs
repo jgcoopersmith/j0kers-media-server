@@ -21,6 +21,12 @@ J0kersMediaServer.Services.ProcessJob.Init();
 string? cfgArg = null, hostArg = null;
 int? rtspPortArg = null, hlsPortArg = null, controlPortArg = null;
 bool? trayArg = null;
+/* Started by Windows at logon rather than by a person. The two want opposite
+   things from tray mode: a logon start should be silent, and somebody
+   double-clicking the desktop icon should be shown something. Telling them
+   apart is the only way to give both what they want - see the dashboard
+   decision further down. */
+var autostart = false;
 
 static void PrintUsage()
 {
@@ -32,6 +38,7 @@ static void PrintUsage()
     Console.WriteLine("  -c, --control-port <port> control/dashboard port (default 9090)");
     Console.WriteLine("  -t, --tray               run in the background with a tray icon (Windows)");
     Console.WriteLine("      --no-tray            keep the console even if the config asks for tray mode");
+    Console.WriteLine("      --autostart          started by Windows at logon: stay silent in tray mode");
     Console.WriteLine("      --help               this help");
     Console.WriteLine("Config path defaults to $J0KERS_CONFIG, ./server.json, or ./config/server.json;");
     Console.WriteLine("missing file = built-in defaults. See config/server.json for all options.");
@@ -81,6 +88,9 @@ for (var i = 0; i < args.Length; i++)
             break;
         case "--no-tray":
             trayArg = false;
+            break;
+        case "--autostart":
+            autostart = true;
             break;
         default:
             if (cfgArg is null && !args[i].StartsWith('-'))
@@ -554,14 +564,20 @@ try
         var openUrl = dashboardUrl
                       + (dashboardUrl.Contains('?') ? "&" : "?") + "j=" + selfToken;
 
-        // Minimised means minimised. Tray mode hides the console, but opening a
-        // browser at startup put a window on screen anyway — so a server told to
-        // start out of the way started with the dashboard in front of you, and
-        // the one setting that says "no window" appeared not to work. The tray
-        // icon is the way in: double-click it for the dashboard.
-        if (config.MinimizeToTray && config.Control.OpenDashboardOnStart)
+        // Minimised means minimised — when Windows started it.
+        //
+        // Tray mode hides the console, so suppressing the browser as well left a
+        // deliberate launch with nothing at all to show for it: no console, no
+        // window, and a tray icon tucked into the hidden overflow area. Double
+        // -clicking the desktop icon then looks exactly like a server that
+        // failed to start, which is what it was reported as.
+        //
+        // A logon start genuinely should be silent, and that is what
+        // --autostart marks. Somebody who has just double-clicked the icon has
+        // asked to see it.
+        if (config.MinimizeToTray && config.Control.OpenDashboardOnStart && autostart)
         {
-            Log.Info("main", $"not opening the dashboard: this server is minimised to the tray — "
+            Log.Info("main", $"not opening the dashboard: started by Windows and minimised to the tray — "
                              + $"double-click the joker icon for {dashboardUrl}");
         }
         else if (config.Control.OpenDashboardOnStart)
