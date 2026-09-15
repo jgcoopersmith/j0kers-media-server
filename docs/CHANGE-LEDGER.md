@@ -2533,3 +2533,20 @@ Two stray Windows firewall prompt rules for
 `G:\claude\src-mediaserver\bin\debug\net10.0\j0kers-media-server.exe` also
 remain; they are inbound allows for the debug build and will be re-created the
 next time it is run outside the sandbox.
+
+### The residue hook now looks for what it cannot remove
+
+`clean-test-residue.sh` deletes files. Neither of the leftovers above is a
+file, and both need elevation, so it now *reports* them instead:
+
+- URL ACL reservations in the 18000–19999 band a scratch instance is given.
+  The first pattern was `:1[0-9]{4}/`, which also matched 10243 and
+  10245–10247 — Windows' own WinRM and Device Association reservations. A
+  warning that fires on every Stop is one nobody reads, so it is narrowed to
+  the band actually in use.
+- `j0kers Media Server (TCP)` holding anything other than `8554,8080,9090`.
+
+Both branches were run against the live machine rather than assumed: the first
+prints `18080,18081` and nothing else, and the second parses the restored rule
+as exactly `8554,8080,9090` and stays quiet — so its silence is a pass, not a
+broken `sed`.
