@@ -712,6 +712,11 @@ public sealed partial class ControlApi : IDisposable
                     if (PagesHolding() > 0) { _notifiedClosed = false; return; }
                     if (_notifiedClosed) return;
                     _notifiedClosed = true;
+                    // Said in the log as well as on screen. Moving the call
+                    // here lost the line that used to accompany it, and with
+                    // it the only way to answer "did it fire?" without
+                    // reading Windows' notification database.
+                    Log.Info("control", "dashboard closed — still running in the background");
                     OnDashboardClosed?.Invoke();
                     return;
                 }

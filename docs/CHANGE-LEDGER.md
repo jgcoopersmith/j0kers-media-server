@@ -2436,3 +2436,100 @@ With `--autostart` in place, the post-commit hook's restart counted as a
 deliberate launch, so a tray-mode server opened a browser window on **every
 commit**. It is automation putting the server back, not a person asking for it,
 so the hook now passes the flag as well.
+
+---
+
+## v2.0.299 — the background-mode balloon nobody ever saw
+
+The report: the server used to say something when the dashboard was closed
+while it was set to minimise to the tray, and no longer does.
+
+### It was firing the whole time
+
+The obvious reading was dead code — `DashboardWentAway` holds the only call in
+the old shape and nothing calls it any more. But the call had been *moved* into
+the link sweep, not lost, and reading alone could not say whether the new one
+ran: the relocation dropped the `Log.Info` line that used to accompany it, so
+the path was silent either way.
+
+Two facts settled it without guessing.
+
+`grep "still running in the background"` across every log on disk back to
+3 September: **zero hits**. The old notice never fired in any of them.
+
+Then Windows' own record. `%LOCALAPPDATA%\Microsoft\Windows\Notifications\`
+`wpndatabase.db`, scanned as UTF‑8:
+
+```
+<toast bannerOnly="true"><visual><binding template="ToastText02">
+<text id="1">j0kers Media Server</text>
+<text id="2">Still running in the background — the joker icon ...</text>
+```
+
+So the relocated call *does* fire, Windows *does* accept it, and the balloon is
+real. What it is not is *catchable*.
+
+### Why it was not catchable
+
+`autoHideMs: 3000`. The call site asked for the banner to be taken back down
+after three seconds — shorter than the five Windows would have given it on its
+own. A notice that exists because somebody might think the app has quit was
+being pulled off the screen faster than the default it replaced. That argument
+was never made; three seconds was picked when the balloon was assumed to be
+long-lived.
+
+It is gone. Windows times the banner now, as it does for everything else.
+
+Two things made it easy to miss even in the three seconds it had:
+`dwInfoFlags = 0` is `NIIF_NONE`, a banner with a blank square where the
+program's identity belongs. It now passes `NIIF_USER | NIIF_LARGE_ICON` with
+`hBalloonIcon` set to the joker icon already extracted for the tray.
+
+### It says so out loud now
+
+The relocation's real cost was the missing log line, and answering "did it
+fire?" cost a database read. Restored on the sweep path, and `Notify` reads the
+`Shell_NotifyIcon` result rather than discarding it — `SetLastError = true` on
+the import so the failure branch reports a real code:
+
+```
+[control] dashboard closed — still running in the background
+[tray] balloon: Still running in the background — the joker icon ...
+```
+
+Verified end to end against a scratch instance on spare ports: tray mode on,
+`GET /api/status` to mark a dashboard seen, no page holding, and both lines
+appeared one millisecond apart. A new `NotifyIconGeneratedAumid_*` key appeared
+under `Notifications\Settings` with no `Enabled`/`ShowBanner` override, which
+also rules out the user having muted it.
+
+`bannerOnly="true"` is Windows' own translation of a legacy tray balloon and
+stays: it means the banner shows but is not kept in the notification centre.
+Changing that needs a registered AUMID and a Start Menu shortcut, which is a
+different job than the one asked for.
+
+### Testing residue — and one piece of real damage
+
+The scratch server was given its own directory, its own `server.json` and
+spare ports so it could not touch the real install. It still did damage, in a
+way the residue hook does not look for.
+
+`WindowsUrlAcl` names its firewall rule `j0kers Media Server (TCP)` — a fixed
+name, not one per instance. Starting a second server therefore **deletes the
+first one's rule and replaces it with its own ports**. The live server's
+inbound rule read `18555,18081,19091` instead of `8554,8080,9090` until the
+restart below re-applied it.
+
+That is not only a testing problem: any portable copy run beside the installed
+one does the same thing to it. Recorded, not fixed — it is outside what was
+asked for.
+
+Cleaned up: test process stopped, scratch directory removed, and the
+`NotifyIconGeneratedAumid_*` key the test exe created deleted. Left behind and
+needing one elevated command: URL ACL reservations on `http://+:18080/` and
+`http://+:18081/`, which the app does not remove on its own.
+
+Two stray Windows firewall prompt rules for
+`G:\claude\src-mediaserver\bin\debug\net10.0\j0kers-media-server.exe` also
+remain; they are inbound allows for the debug build and will be re-created the
+next time it is run outside the sandbox.

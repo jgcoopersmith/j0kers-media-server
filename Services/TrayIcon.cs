@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using J0kersMediaServer.Logging;
 
 namespace J0kersMediaServer.Services;
@@ -22,6 +22,13 @@ public sealed class TrayIcon : IDisposable
 
     private const int NIM_ADD = 0, NIM_MODIFY = 1, NIM_DELETE = 2;
     private const int NIF_MESSAGE = 0x01, NIF_ICON = 0x02, NIF_TIP = 0x04, NIF_INFO = 0x10;
+
+    // What the balloon shows beside its text. NIIF_NONE is a banner with a
+    // blank square where an identity should be, which is most of why this
+    // notice went unrecognised: nothing on it said which program was
+    // talking. NIIF_USER means "use hBalloonIcon", and LARGE_ICON asks for
+    // the 32px form rather than a 16px one stretched.
+    private const int NIIF_USER = 0x04, NIIF_LARGE_ICON = 0x20;
 
     private const int SW_HIDE = 0, SW_SHOW = 5;
 
@@ -106,7 +113,8 @@ public sealed class TrayIcon : IDisposable
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int cmdShow);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
 
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    // SetLastError, because Notify reports why a balloon did not appear.
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool Shell_NotifyIcon(int message, ref NOTIFYICONDATA data);
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr ExtractIcon(IntPtr hInst, string exeFileName, int iconIndex);
@@ -327,13 +335,26 @@ public sealed class TrayIcon : IDisposable
     /// </summary>
     public void Notify(string title, string message, int autoHideMs = 0)
     {
-        if (!OperatingSystem.IsWindows() || _hwnd == IntPtr.Zero) return;
+        if (!OperatingSystem.IsWindows() || _hwnd == IntPtr.Zero)
+        {
+            Log.Debug("tray", $"no tray icon to show a balloon from: \"{title}\"");
+            return;
+        }
         var data = NewData();
         data.uFlags = NIF_INFO;
         data.szInfoTitle = title.Length > 60 ? title[..60] : title;
         data.szInfo = message.Length > 250 ? message[..250] : message;
-        data.dwInfoFlags = 0;
-        Shell_NotifyIcon(NIM_MODIFY, ref data);
+        // The joker icon, so the banner says who is speaking.
+        data.dwInfoFlags = _icon != IntPtr.Zero ? NIIF_USER | NIIF_LARGE_ICON : 0;
+        data.hBalloonIcon = _icon;
+
+        // The result is read rather than discarded. A balloon nobody saw and
+        // a balloon Windows refused look identical from in here, and telling
+        // them apart afterwards meant reading the notification database by
+        // hand. Once was enough.
+        var shown = Shell_NotifyIcon(NIM_MODIFY, ref data);
+        if (shown) Log.Info("tray", $"balloon: {message}");
+        else Log.Warn("tray", $"Windows refused the balloon (error {Marshal.GetLastWin32Error()}): {message}");
 
         _balloonTimer?.Dispose();
         _balloonTimer = null;

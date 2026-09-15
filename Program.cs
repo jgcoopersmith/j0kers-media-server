@@ -488,11 +488,16 @@ try
 
         // Closing the dashboard in background mode leaves the server running,
         // which is the opposite of what closing a window normally means — so
-        // the tray icon says so, briefly.
+        // the tray icon says so.
+        //
+        // No autoHideMs. It used to be 3000, which took the banner down before
+        // Windows' own default would have — a notice that is only worth
+        // showing because somebody might think the app has quit is not
+        // improved by being harder to catch. Windows decides how long it
+        // lingers now, which is what it does for everything else on screen.
         control.OnDashboardClosed = () => tray?.Notify(
             "j0kers Media Server",
-            "Still running in the background — the joker icon on the taskbar reopens the dashboard.",
-            autoHideMs: 3000);
+            "Still running in the background — the joker icon on the taskbar reopens the dashboard.");
 
         control.SetTrayMode = ApplyTrayMode;
 
