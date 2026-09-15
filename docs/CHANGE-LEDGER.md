@@ -2550,3 +2550,87 @@ Both branches were run against the live machine rather than assumed: the first
 prints `18080,18081` and nothing else, and the second parses the restored rule
 as exactly `8554,8080,9090` and stays quiet — so its silence is a pass, not a
 broken `sed`.
+
+---
+
+## v2.0.301 — the balloon does not work, so stop depending on it
+
+v2.0.300 was reported as still broken, and it was. What I had proved was that
+the call succeeded — not that anything appeared. Those are different claims and
+I shipped the first one as if it were the second.
+
+### What the machine actually says
+
+At 14:46:37 on the live server, in real use:
+
+```
+[control] dashboard closed — still running in the background
+[tray] balloon: Still running in the background — the joker icon ...
+```
+
+The path ran. `Shell_NotifyIcon` returned TRUE. Windows filed the toast in
+`wpndatabase.db` and created `NotifyIconGeneratedAumid_17827472382960308143`
+under `Notifications\Settings` for it. Nothing was muted: no `ToastEnabled`
+override, no quiet-hours value, no `Enabled`/`ShowBanner` on any notifier key.
+
+And the screen stayed empty.
+
+One real gap was found and fixed on the way: `NIM_SETVERSION` was never called,
+so the icon ran in the original Win95 mode where the shell may drop a balloon
+and still report success. It now asks for version 3 — 3 and not 4, because 4
+moves the mouse message from `lParam` into `wParam`, and `WndProc` reads
+`lParam`; 4 would have traded a missing balloon for a dead double-click.
+
+It made no difference. A loopback-only test instance fired the balloon with the
+version set and no notification window appeared within 9.6 seconds.
+
+That test is worth little on its own — the same detector saw nothing when a
+known-good WinRT toast was fired under the PowerShell AUMID either, so it
+cannot tell "no banner" from "banner I cannot see". Recorded as inconclusive
+rather than quoted as proof.
+
+### The part that is not inconclusive
+
+`ConsoleWindow.Fatal` already had the answer, written down years before this:
+*"double-clicking an icon that silently does nothing is the worst possible
+answer"*. A message box is the one channel on Windows that is either on the
+screen or an error.
+
+`ConsoleWindow.Notice` shows one. On its own STA thread, because the caller is
+the one-second link sweep and a modal box on that thread would stop the sweep —
+which is what decides whether the server keeps running — until somebody clicked
+OK. `MB_SETFOREGROUND | MB_TOPMOST`, because it fires exactly as a browser
+window is closing and handing the foreground to whatever is behind it.
+
+The balloon stays alongside it. It costs nothing and is the nicer of the two on
+a machine whose shell draws one.
+
+### Verified, this time, as appearing
+
+Enumerating top-level windows owned by the server process, before and after:
+
+```
+before : (none - tray mode)
+trigger: GET /api/status, then no page holding
+after  : APPEARED after 0.8s
+         HWND=0x705E0 class=#32770 title=j0kers Media Server
+```
+
+`#32770` is the Windows dialog class. That is a window on the screen, owned by
+this process, and it is the first thing in this whole task that was ever shown
+to reach the display. The server was still running afterwards, so the modal
+does not block the sweep.
+
+It fires on every close in background mode, matching the balloon. One line in
+`Program.cs` makes it once per run if that turns out to be too much.
+
+### Testing residue
+
+The previous round's test took the live server's firewall rule with it. This
+one bound to `127.0.0.1` instead, which skips the whole
+`anyWide` branch in `WindowsUrlAcl` — no admin prompt, no URL ACLs, no
+firewall rule touched, confirmed before and after at `8554,8080,9090`.
+
+The two stray reservations the previous round left, `http://+:18080/` and
+`http://+:18081/`, are deleted. The test dialog raised on the desktop was
+closed with `WM_CLOSE` and confirmed gone rather than left sitting there.

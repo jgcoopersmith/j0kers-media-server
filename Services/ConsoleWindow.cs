@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using System.Text;
 
 namespace J0kersMediaServer.Services;
@@ -64,6 +64,38 @@ public static class ConsoleWindow
     /// <summary>True when a console window exists and belongs to this process.</summary>
     public static bool HasWindow() =>
         OperatingSystem.IsWindows() && GetConsoleWindow() != IntPtr.Zero;
+
+    /// <summary>
+    /// Says something the user has to be able to see, when there is no console
+    /// to say it in.
+    ///
+    /// This exists because the tray balloon does not work and cannot be made
+    /// to report that it did not. Shell_NotifyIcon returns TRUE, Windows files
+    /// the toast in its notification database, registers a notifier for it —
+    /// and draws nothing. Every layer says it succeeded. A message box is the
+    /// one channel on Windows that is either on the screen or an error.
+    ///
+    /// On its own thread, because the caller is a one-second timer: a modal
+    /// box on that thread would stop the link sweep until somebody clicked OK,
+    /// and the sweep is what decides whether the server keeps running.
+    ///
+    /// TOPMOST and SETFOREGROUND together, because the moment this fires is
+    /// the moment a browser window is closing and taking the foreground with
+    /// it — without them the box opens behind whatever lands there next.
+    /// </summary>
+    public static void Notice(string title, string message)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        const uint MbIconInformation = 0x00000040, MbSetForeground = 0x00010000, MbTopMost = 0x00040000;
+        var t = new Thread(() =>
+        {
+            try { MessageBoxW(IntPtr.Zero, message, title, MbIconInformation | MbSetForeground | MbTopMost); }
+            catch (Exception ex) { Logging.Log.Warn("main", "could not show the notice: " + ex.Message); }
+        })
+        { IsBackground = true };
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
+    }
 
     /// <summary>
     /// Reports a fatal startup problem. Without a console there is nowhere

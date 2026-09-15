@@ -495,9 +495,32 @@ try
         // showing because somebody might think the app has quit is not
         // improved by being harder to catch. Windows decides how long it
         // lingers now, which is what it does for everything else on screen.
-        control.OnDashboardClosed = () => tray?.Notify(
-            "j0kers Media Server",
-            "Still running in the background — the joker icon on the taskbar reopens the dashboard.");
+        control.OnDashboardClosed = () =>
+        {
+            // The balloon stays. It costs nothing, it is the right shape for
+            // this, and on a machine where the shell actually draws one it is
+            // the nicer of the two.
+            tray?.Notify(
+                "j0kers Media Server",
+                "Still running in the background — the joker icon on the taskbar reopens the dashboard.");
+
+            // And this, because on the machine this was reported from the
+            // balloon does not appear. Not "was not noticed" — does not
+            // appear: the call succeeds, Windows records the toast and
+            // registers a notifier for it, and the screen stays empty. There
+            // is no return value, log line or registry setting that says so,
+            // which is why it survived two rounds of being called fixed.
+            //
+            // A notice nobody receives is the same as no notice.
+            J0kersMediaServer.Services.ConsoleWindow.Notice(
+                "j0kers Media Server",
+                "The dashboard is closed, but the server is still running in the background.\n\n"
+                + "Closing the window does not stop it — double-click the joker icon in the "
+                + "taskbar to open the dashboard again, or right-click it and choose Exit to "
+                + "stop the server.\n\n"
+                + "To make closing the window stop the server instead, untick "
+                + "'Minimize to the system tray' in \u2699 Config.");
+        };
 
         control.SetTrayMode = ApplyTrayMode;
 

@@ -20,7 +20,22 @@ public sealed class TrayIcon : IDisposable
     private const int WM_LBUTTONDBLCLK = 0x0203;
     private const int WM_RBUTTONUP = 0x0205;
 
-    private const int NIM_ADD = 0, NIM_MODIFY = 1, NIM_DELETE = 2;
+    private const int NIM_ADD = 0, NIM_MODIFY = 1, NIM_DELETE = 2, NIM_SETVERSION = 4;
+
+    // Version 3, and specifically not 4.
+    //
+    // Without a NIM_SETVERSION at all the icon runs in the original Win95
+    // mode, where the shell is free to drop a balloon and still hand back
+    // TRUE from Shell_NotifyIcon — which is exactly what was happening: the
+    // call succeeded, Windows registered a notifier for it, and nothing
+    // appeared. Nothing in the return value could have said so.
+    //
+    // 4 is the current version and the wrong one to reach for here: it moves
+    // the mouse message out of lParam (which becomes the cursor position) and
+    // into the low word of wParam. WndProc reads lParam, so 4 would trade a
+    // missing balloon for a dead double-click. 3 asks for modern balloon
+    // handling and leaves the callback convention alone.
+    private const int NOTIFYICON_VERSION_3 = 3;
     private const int NIF_MESSAGE = 0x01, NIF_ICON = 0x02, NIF_TIP = 0x04, NIF_INFO = 0x10;
 
     // What the balloon shows beside its text. NIIF_NONE is a banner with a
@@ -28,7 +43,7 @@ public sealed class TrayIcon : IDisposable
     // notice went unrecognised: nothing on it said which program was
     // talking. NIIF_USER means "use hBalloonIcon", and LARGE_ICON asks for
     // the 32px form rather than a 16px one stretched.
-    private const int NIIF_USER = 0x04, NIIF_LARGE_ICON = 0x20;
+    private const int NIIF_INFO = 0x01, NIIF_USER = 0x04, NIIF_LARGE_ICON = 0x20;
 
     private const int SW_HIDE = 0, SW_SHOW = 5;
 
@@ -223,7 +238,18 @@ public sealed class TrayIcon : IDisposable
         data.uCallbackMessage = WM_TRAYICON;
         data.hIcon = _icon;
         data.szTip = _tip;
-        return Shell_NotifyIcon(NIM_ADD, ref data);
+        if (!Shell_NotifyIcon(NIM_ADD, ref data)) return false;
+
+        // Balloons depend on this; clicks do not. A failure here is worth
+        // saying and not worth refusing to start over.
+        var vdata = NewData();
+        vdata.uVersion = NOTIFYICON_VERSION_3;
+        if (!Shell_NotifyIcon(NIM_SETVERSION, ref vdata))
+            Log.Warn("tray", $"could not set notify-icon version {NOTIFYICON_VERSION_3} " +
+                             $"(error {Marshal.GetLastWin32Error()}) — balloons may not appear");
+        else
+            Log.Debug("tray", $"notify-icon version {NOTIFYICON_VERSION_3} set; icon handle 0x{_icon:X}");
+        return true;
     }
 
     private NOTIFYICONDATA NewData() => new()
@@ -345,7 +371,10 @@ public sealed class TrayIcon : IDisposable
         data.szInfoTitle = title.Length > 60 ? title[..60] : title;
         data.szInfo = message.Length > 250 ? message[..250] : message;
         // The joker icon, so the banner says who is speaking.
-        data.dwInfoFlags = _icon != IntPtr.Zero ? NIIF_USER | NIIF_LARGE_ICON : 0;
+        // NIIF_NONE draws a blank square where the program's identity goes, so
+        // there is always an icon: the joker where one was extracted, and the
+        // system information icon where it was not.
+        data.dwInfoFlags = _icon != IntPtr.Zero ? NIIF_USER | NIIF_LARGE_ICON : NIIF_INFO;
         data.hBalloonIcon = _icon;
 
         // The result is read rather than discarded. A balloon nobody saw and
