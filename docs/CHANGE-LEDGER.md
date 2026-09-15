@@ -2429,3 +2429,10 @@ Fetched and compared: local `eb680bc` equals `origin/master`
 one working copy on this machine. Nothing to pull.
 
 256 tests pass.
+
+### Addendum — the publish hook was opening a browser too
+
+With `--autostart` in place, the post-commit hook's restart counted as a
+deliberate launch, so a tray-mode server opened a browser window on **every
+commit**. It is automation putting the server back, not a person asking for it,
+so the hook now passes the flag as well.
