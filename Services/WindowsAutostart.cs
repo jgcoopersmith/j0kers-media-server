@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using System.Text;
 using J0kersMediaServer.Logging;
 
@@ -178,18 +178,84 @@ public static class WindowsAutostart
         // working directory and find none of its own state. Leave it.
         if (string.IsNullOrWhiteSpace(configPath)) return;
 
-        var current = Registered();
-        if (current is null) return;                    // off, or removed by hand — leave it alone
-
         var exe = CurrentExecutable();
         if (string.IsNullOrWhiteSpace(exe)) return;
         var want = ComposeCommand(exe, configPath);
+        var current = Registered();
+
+        // Present, but switched off in Task Manager or Settings. That is a
+        // decision somebody made in the place Windows offers for making it,
+        // and rewriting the value would clear the approval record and quietly
+        // overrule them — so it is reported and left alone. Once, not every
+        // time the watch below comes round.
+        if (current is not null && DisabledByWindows())
+        {
+            if (!_saidDisabled)
+            {
+                _saidDisabled = true;
+                Log.Warn("startup", "start with Windows is on here, but the entry is switched off in "
+                                  + "Windows' own startup list — turn it back on in Task Manager's "
+                                  + "Startup tab, or untick and re-tick the box in ⚙ Config");
+            }
+            return;
+        }
+        _saidDisabled = false;
+
         if (string.Equals(current, want, StringComparison.OrdinalIgnoreCase)) return;
 
+        // current is null here means the entry is GONE while the setting says
+        // it should be on, and that used to be the one case this refused to
+        // act on — "removed by hand, leave it alone". It is not usually a hand.
+        // On the machine this was reported from, Bitdefender removes the value:
+        // an autorun pointing at an unsigned executable is exactly what an
+        // antivirus prunes. The setting stayed ticked in settings.json, the
+        // dashboard read the empty registry and showed it unticked, and
+        // nothing reconciled the two — so the feature was off for good and
+        // said nothing about it.
+        //
+        // The registry is not the record of intent. settings.json is. This
+        // makes the registry match it.
         if (Write(want, out var error))
-            Log.Info("startup", $"start-with-Windows entry updated: {want}");
+            Log.Info("startup", current is null
+                ? $"start-with-Windows entry was missing and has been restored: {want}"
+                : $"start-with-Windows entry updated: {want}");
         else
-            Log.Warn("startup", $"start-with-Windows entry is stale and could not be updated: {error}");
+            Log.Warn("startup", current is null
+                ? $"start with Windows is on, but the logon entry is missing and could not be written: {error}"
+                : $"start-with-Windows entry is stale and could not be updated: {error}");
+    }
+
+    private static bool _saidDisabled;
+    private static Timer? _watch;
+
+    /// <summary>How often the logon entry is re-checked while the server runs.</summary>
+    private const int WatchIntervalMs = 5 * 60 * 1000;
+
+    /// <summary>
+    /// Keeps the logon entry in place for as long as this server is running.
+    ///
+    /// Checking once at startup is not enough, and the reason is specific.
+    /// Whatever removes the entry — an antivirus pruning autoruns is the case
+    /// actually observed here — does it while the machine is up. If the only
+    /// repair happens when the server starts, then the entry is gone by
+    /// bedtime, nothing starts at the next boot, and the thing that would have
+    /// put it back is the thing that never ran. The feature breaks itself
+    /// permanently the first time it is touched.
+    ///
+    /// So a running server keeps an eye on it. <see cref="Refresh"/> is silent
+    /// when there is nothing to do, so this costs one registry read every five
+    /// minutes and says nothing until something has actually changed.
+    /// </summary>
+    public static void StartWatch(bool enabled, string? configPath)
+    {
+        if (!OperatingSystem.IsWindows() || !enabled) return;
+        if (string.IsNullOrWhiteSpace(configPath)) return;
+        _watch?.Dispose();
+        _watch = new Timer(_ =>
+        {
+            try { Refresh(enabled, configPath); }
+            catch (Exception ex) { Log.Warn("startup", "start-with-Windows check failed: " + ex.Message); }
+        }, null, WatchIntervalMs, WatchIntervalMs);
     }
 
     private static bool Write(string command, out string? error)

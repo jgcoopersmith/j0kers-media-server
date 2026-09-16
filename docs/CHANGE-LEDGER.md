@@ -2634,3 +2634,72 @@ firewall rule touched, confirmed before and after at `8554,8080,9090`.
 The two stray reservations the previous round left, `http://+:18080/` and
 `http://+:18081/`, are deleted. The test dialog raised on the desktop was
 closed with `WM_CLOSE` and confirmed gone rather than left sitting there.
+
+---
+
+## v2.0.302 — Start with Windows: the entry is gone, and nothing ever looked
+
+Reported as still not working. It was not working, and the reason was not in
+the write path.
+
+### What the machine said
+
+- `settings.json` holds `"startWithWindows": true`.
+- `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` holds **no j0kers value
+  at all** — checked with the PowerShell registry provider, with `reg.exe`, and
+  across every loaded hive under `HKEY_USERS`. Absent, not disabled.
+- `StartupApproved\Run` holds no j0kers value either, so nobody switched it off
+  in Task Manager — that path writes an `03` byte and leaves the value in place.
+- Exactly one autostart line exists in any log, ever:
+  `14:19:51 [config] start with Windows: on ("…\j0kers-media-server.exe" "…\server.json" --autostart)`
+  That line prints `Registered()`, a read-back, so the value was in the hive at
+  14:19:51. There is no "off" line anywhere.
+- A probe value written to the same key persisted fine, so the hive is healthy.
+
+Written correctly, read back, then removed by something that is not this code.
+
+### What removed it
+
+Bitdefender. It is the active antivirus here (Defender's real-time protection
+is off behind it), and an autorun pointing at an unsigned executable is exactly
+what an antivirus prunes. Its own settings store already whitelists
+`…\Programs\j0kers Media Server\` — the folder — which does not stop its
+autorun handling from taking the Run value.
+
+The same thing was stopping the test instances mid-run, which is worth
+recording separately: those ran from `G:\Claude\src-mediaserver\bin\Debug\`,
+which is not whitelisted.
+
+### The actual defect
+
+`Refresh` ran at every startup and returned early on exactly the state that had
+occurred:
+
+```csharp
+var current = Registered();
+if (current is null) return;   // off, or removed by hand — leave it alone
+```
+
+"Removed by hand" was the assumption. It is not usually a hand. So the entry
+was gone, the setting stayed ticked in `settings.json`, the dashboard read the
+empty registry and showed the box **unticked**, the two disagreed, and nothing
+reconciled them or said a word. The feature was off for good.
+
+`settings.json` is the record of intent. The registry is not. `Refresh` now
+makes the registry match it: missing entries are restored, stale ones updated.
+
+One case is deliberately left alone — an entry that is present but switched off
+in Windows' own startup list. That is a decision made in the place Windows
+offers for making it, and rewriting the value would clear the approval record
+and silently overrule it. Reported once instead.
+
+### Checking once was not enough either
+
+The removal happens while the machine is up. Repairing only at startup means
+the entry is gone by bedtime, nothing starts at the next boot, and the thing
+that would have put it back is the thing that never ran — the feature breaks
+itself permanently the first time it is touched.
+
+`StartWatch` re-checks every five minutes for as long as the server runs.
+`Refresh` is silent when there is nothing to do, so the cost is one registry
+read per interval and no log line until something has actually changed.
