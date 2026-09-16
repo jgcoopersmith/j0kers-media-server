@@ -2745,3 +2745,76 @@ each tick. `Program.cs` passes `() => config.StartWithWindows` and
 The `!enabled` early return moved out of `StartWatch` and into the tick, so
 turning the setting ON at runtime is now picked up as well — previously no
 watch existed at all for a server that started with the box unticked.
+
+---
+
+## v2.0.305 — 297 notices for a window nobody closed
+
+Reported: "I left the media server open all night and there are thousands of
+'close' notices when I did not close the media server. It is posting up the
+warning that it will be minimized on a timer?! wtf is that?!"
+
+Both halves of that are right, and the second one is the actual answer.
+
+### What happened
+
+297 of them, one every forty-one seconds, at a dashboard that was open the
+whole time:
+
+```
+03:11:49.540 [control] dashboard closed — still running in the background
+03:11:49.711 [control] page opened from 192.168.8.196 (1 now open, 1 holding)
+03:12:30.545 [control] dashboard closed — still running in the background
+03:12:30.762 [control] page opened from 192.168.8.196 (1 now open, 1 holding)
+```
+
+The page comes back 170ms after each "close". Links are closed and remade on
+purpose — `StartLinkSweep` says so in its own comment: *"the count dips to zero
+routinely and only staying at zero means anything."* The notice fired on the
+first tick that saw zero. The latch was no defence: the link reconnected a
+fraction of a second later and reset it, ready to do it again.
+
+### Why it was on a timer at all — it should not have been
+
+That sweep answers *"is anything holding this server open"*. That is the
+shutdown question. It is not *"did somebody just close a window"*, and treating
+them as the same question is what produced a notice for a window nobody had
+touched.
+
+The browser already says when it is going: `POST /api/server/closing`, the
+pagehide beacon, which fires because a person closed a window or navigated
+away. That is the event. It now raises the notice, from `MarkPageClosing`, and
+the sweep is back to deciding shutdown and nothing else.
+
+A refresh and a navigation send the same beacon, so the notice still waits out
+`CloseGraceMs` once — and whichever page comes back cancels it in
+`NoteActivity` before it fires. That cancellation was already written and
+already correct; it had simply been left with nothing to cancel.
+
+`_notifiedClosed` is gone. The one-shot timer is the latch now, and an unused
+field was the honest signal that the old one was papering over the wrong
+trigger.
+
+### And it must not be able to happen again
+
+The caller got this wrong once and a modal that stacks turns that into an
+unusable desktop. `ConsoleWindow.Notice` is now single-instance: while one is
+on screen the rest are dropped and counted, and it says so in the log —
+*"something is asking for these far too often"* — which is the line that would
+have caught this in one night instead of after a report.
+
+### The test suite caught a regression in the same change
+
+Taking the notice out of the sweep took an early return with it, and that
+return was load-bearing for a second reason: everything below it decides
+whether to **stop** the server. In background mode that decision is already
+made, so falling through shut the server down three seconds after the last
+page closed.
+
+`Background_mode_survives_the_last_page_closing` failed on the pre-commit run
+and the commit was refused. It is also what I had already seen and misread:
+two scratch instances had logged *"no page has been open for 3s — shutting
+down"* while in tray mode, and I put that down to the test environment rather
+than to the change in front of me. It was the bug, reported twice, ignored
+twice.
+

@@ -40,8 +40,6 @@ public sealed partial class ControlApi : IDisposable
     private readonly Media.SubtitleManager? _subtitles;
     private readonly Action? _requestShutdown;
     private Timer? _closeShutdownTimer;
-    /// <summary>Has the "still running in the background" notice been shown since the last page closed?</summary>
-    private bool _notifiedClosed;
     private readonly object _shutdownLock = new();
 
     /// <summary>
@@ -666,15 +664,42 @@ public sealed partial class ControlApi : IDisposable
     }
 
     /// <summary>
-    /// A page said it is going. Recorded rather than acted on: the sweep
-    /// decides, and it decides on whether anything is still open a moment
-    /// later, which is the only question that matters and the only one a
-    /// beacon cannot answer on its own.
+    /// A page said it is going — the pagehide beacon, which fires because
+    /// somebody closed a window or navigated away. A real action by a real
+    /// person, which is what the background-mode notice is about, and the
+    /// reason that notice is raised from here rather than from a timer.
+    ///
+    /// The mark for the shutdown decision is recorded as before; the sweep
+    /// still owns that, because "should this server stop" genuinely does
+    /// depend on what is true a moment later rather than on this beacon.
+    ///
+    /// The notice waits out the same grace, once, because a refresh and a
+    /// navigation send exactly this beacon too and neither is somebody
+    /// leaving. Whichever page comes back cancels it in
+    /// <see cref="NoteActivity"/> before it ever fires.
     /// </summary>
     private void MarkPageClosing()
     {
         if (PagesHolding() > 0) return;
-        lock (_shutdownLock) _zeroSinceUtc ??= DateTime.UtcNow;
+        lock (_shutdownLock)
+        {
+            _zeroSinceUtc ??= DateTime.UtcNow;
+
+            if (_config.ShutdownOnClose || !_sawDashboard) return;
+            _closedNoticeTimer?.Dispose();
+            _closedNoticeTimer = new Timer(_ =>
+            {
+                lock (_shutdownLock)
+                {
+                    if (_closedNoticeTimer is null) return;   // a page came back
+                    _closedNoticeTimer.Dispose();
+                    _closedNoticeTimer = null;
+                }
+                if (PagesHolding() > 0 || _cts.IsCancellationRequested) return;
+                Log.Info("control", "dashboard closed — still running in the background");
+                OnDashboardClosed?.Invoke();
+            }, null, CloseGraceMs, Timeout.Infinite);
+        }
     }
 
     private Timer? _linkSweepTimer;
@@ -698,28 +723,29 @@ public sealed partial class ControlApi : IDisposable
             {
                 if (!_sawDashboard) return;
 
-                // Background mode: the server stays up, and that is exactly the
-                // moment somebody can mistake for it having quit — the window
-                // is gone and nothing on screen says otherwise. Saying so was
-                // the whole point of OnDashboardClosed, and it had become
-                // unreachable: the only call to it sat in DashboardWentAway,
-                // which nothing calls since this sweep took over deciding.
+                // Nothing about the background-mode notice lives here any
+                // more. It did, and the reason it was wrong is worth keeping:
+                // this timer answers "is anything holding the server open",
+                // which is the shutdown question. It is not the question
+                // "did somebody just close a window", and the two are not the
+                // same. Links are closed and remade on purpose, so the count
+                // reaches zero constantly with a dashboard open in front of
+                // somebody — and a notice driven off that told a user who had
+                // closed nothing, 297 times in one night, that they had.
                 //
-                // Latched, because this timer runs every second and a balloon
-                // per second is not a notification.
-                if (!_config.ShutdownOnClose)
-                {
-                    if (PagesHolding() > 0) { _notifiedClosed = false; return; }
-                    if (_notifiedClosed) return;
-                    _notifiedClosed = true;
-                    // Said in the log as well as on screen. Moving the call
-                    // here lost the line that used to accompany it, and with
-                    // it the only way to answer "did it fire?" without
-                    // reading Windows' notification database.
-                    Log.Info("control", "dashboard closed — still running in the background");
-                    OnDashboardClosed?.Invoke();
-                    return;
-                }
+                // The browser says when it is going, on /api/server/closing.
+                // That is the actual event, so that is what raises the notice
+                // now. See MarkPageClosing.
+                //
+                // The early return stays, and it is load-bearing for a second
+                // reason that has nothing to do with notices: everything below
+                // decides whether to STOP this server. In background mode that
+                // decision is already made — closing the dashboard does not
+                // stop it — so this must not fall through. Taking the notice
+                // out took the return with it for a moment, and
+                // Background_mode_survives_the_last_page_closing failed
+                // immediately, which is exactly what that test is for.
+                if (!_config.ShutdownOnClose) return;
 
                 // The mark is maintained here rather than only where links
                 // begin and end. PagesHolding can change without either

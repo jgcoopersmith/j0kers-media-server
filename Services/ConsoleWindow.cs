@@ -86,16 +86,36 @@ public static class ConsoleWindow
     public static void Notice(string title, string message)
     {
         if (!OperatingSystem.IsWindows()) return;
+
+        // At most one on screen, ever. The caller is supposed to decide when
+        // this is worth saying and it got that wrong once already — a sweep
+        // that mistook a reconnecting link for a closed window raised 297 of
+        // these overnight. A modal that can stack turns a caller's mistake
+        // into an unusable desktop, so it cannot stack: while one is up, the
+        // rest are dropped and counted.
+        if (Interlocked.CompareExchange(ref _noticeOpen, 1, 0) != 0)
+        {
+            var n = Interlocked.Increment(ref _noticesSuppressed);
+            if (n == 1 || n % 50 == 0)
+                Logging.Log.Warn("main", $"a notice was already on screen; {n} suppressed since — "
+                                       + "something is asking for these far too often");
+            return;
+        }
+
         const uint MbIconInformation = 0x00000040, MbSetForeground = 0x00010000, MbTopMost = 0x00040000;
         var t = new Thread(() =>
         {
             try { MessageBoxW(IntPtr.Zero, message, title, MbIconInformation | MbSetForeground | MbTopMost); }
             catch (Exception ex) { Logging.Log.Warn("main", "could not show the notice: " + ex.Message); }
+            finally { Interlocked.Exchange(ref _noticeOpen, 0); }
         })
         { IsBackground = true };
         t.SetApartmentState(ApartmentState.STA);
         t.Start();
     }
+
+    private static int _noticeOpen;
+    private static int _noticesSuppressed;
 
     /// <summary>
     /// Reports a fatal startup problem. Without a console there is nowhere
