@@ -515,6 +515,12 @@ try
             // which is why it survived two rounds of being called fixed.
             //
             // A notice nobody receives is the same as no notice.
+            // Only when there is actually a tray icon. Without one the text
+            // below tells somebody to click a joker in the taskbar that is not
+            // there, and a console run has somewhere better to put this: the
+            // console. It also keeps a modal off the screen of a headless or
+            // foreground run that never asked for one.
+            if (tray is null) return;
             J0kersMediaServer.Services.ConsoleWindow.Notice(
                 "j0kers Media Server",
                 "The dashboard is closed, but the server is still running in the background.\n\n"

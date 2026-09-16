@@ -680,26 +680,87 @@ public sealed partial class ControlApi : IDisposable
     /// </summary>
     private void MarkPageClosing()
     {
-        if (PagesHolding() > 0) return;
         lock (_shutdownLock)
         {
-            _zeroSinceUtc ??= DateTime.UtcNow;
+            // The shutdown mark, unchanged: it only means anything when
+            // nothing is holding the server open.
+            if (PagesHolding() <= 0) _zeroSinceUtc ??= DateTime.UtcNow;
 
             if (_config.ShutdownOnClose || !_sawDashboard) return;
-            _closedNoticeTimer?.Dispose();
-            _closedNoticeTimer = new Timer(_ =>
+
+            // The notice is deliberately NOT gated on PagesHolding, and that
+            // is the whole correction. The beacon is sent during pagehide,
+            // while the page's own live link is still open and still counted.
+            // Measured on this machine: beacon at 08:11:05.285, the link it
+            // belongs to torn down at 08:11:05.808 — half a second later.
+            //
+            // Bailing on a non-zero count here meant the notice could never
+            // fire at all. That is how the fix for "297 notices" became "no
+            // notices", and why the test that passed proved nothing: it drove
+            // /api/status, which opens no live link, so the count was zero in
+            // a way no real browser ever produces.
+            //
+            // Whether anything is still there is the callback's question. It
+            // runs after the grace, by which time the link has gone.
+            ArmClosedNotice();
+        }
+    }
+
+    /// <summary>
+    /// Arms the "still running in the background" notice, to fire once the
+    /// grace has passed with nothing holding the server open.
+    ///
+    /// Called from both ends, because neither is reliable alone:
+    ///
+    /// The beacon is early but optional. This file already records it going
+    /// missing — "closing the tab produced no request at all" — so a notice
+    /// that only listens for it is a notice that sometimes never comes. That
+    /// is what the previous attempt shipped.
+    ///
+    /// The link ending is reliable but noisy: links are rotated on purpose,
+    /// so it happens every twenty seconds with the page still on screen. On
+    /// its own that is what produced 297 notices in a night.
+    ///
+    /// Together they are neither. Whichever happens first arms this; a page
+    /// that is still there reconnects inside the grace and
+    /// <see cref="NoteActivity"/> cancels it. Re-arming is harmless because
+    /// the callback checks its own identity before doing anything.
+    ///
+    /// Caller must hold <see cref="_shutdownLock"/>.
+    /// </summary>
+    private void ArmClosedNotice()
+    {
+        if (_config.ShutdownOnClose || !_sawDashboard || _cts.IsCancellationRequested) return;
+
+        Timer? mine = null;
+        mine = new Timer(_ =>
+        {
+            try
             {
                 lock (_shutdownLock)
                 {
-                    if (_closedNoticeTimer is null) return;   // a page came back
-                    _closedNoticeTimer.Dispose();
+                    // Identity, not null. Cancelling in NoteActivity or
+                    // re-arming on a second beacon replaces the field; a
+                    // bare null-check let a superseded callback dispose
+                    // its own replacement and fire in its place.
+                    if (!ReferenceEquals(_closedNoticeTimer, mine)) return;
                     _closedNoticeTimer = null;
                 }
+                mine!.Dispose();
                 if (PagesHolding() > 0 || _cts.IsCancellationRequested) return;
                 Log.Info("control", "dashboard closed — still running in the background");
                 OnDashboardClosed?.Invoke();
-            }, null, CloseGraceMs, Timeout.Infinite);
-        }
+            }
+            catch (Exception ex)
+            {
+                // An unhandled throw on a timer thread takes the process
+                // with it, and this one calls out to a UI handler.
+                Log.Warn("control", "close notice failed: " + ex.Message);
+            }
+        }, null, CloseGraceMs, Timeout.Infinite);
+
+        _closedNoticeTimer?.Dispose();
+        _closedNoticeTimer = mine;
     }
 
     private Timer? _linkSweepTimer;
@@ -1042,7 +1103,17 @@ public sealed partial class ControlApi : IDisposable
             // a moment later, by whether anything reconnected.
             if (holding <= 0 && !_cts.IsCancellationRequested)
             {
-                lock (_shutdownLock) _zeroSinceUtc ??= DateTime.UtcNow;
+                lock (_shutdownLock)
+                {
+                    _zeroSinceUtc ??= DateTime.UtcNow;
+                    // The reliable half of the close signal. The beacon is
+                    // earlier but this file has already caught it not arriving
+                    // at all; a link ending always happens. Rotation makes it
+                    // happen with the page still open too, which is why this
+                    // only ARMS — the page comes back inside the grace and
+                    // NoteActivity cancels it. See ArmClosedNotice.
+                    ArmClosedNotice();
+                }
             }
             else if (!_cts.IsCancellationRequested)
             {

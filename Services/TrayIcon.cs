@@ -30,11 +30,13 @@ public sealed class TrayIcon : IDisposable
     // call succeeded, Windows registered a notifier for it, and nothing
     // appeared. Nothing in the return value could have said so.
     //
-    // 4 is the current version and the wrong one to reach for here: it moves
-    // the mouse message out of lParam (which becomes the cursor position) and
-    // into the low word of wParam. WndProc reads lParam, so 4 would trade a
-    // missing balloon for a dead double-click. 3 asks for modern balloon
-    // handling and leaves the callback convention alone.
+    // 4 is the current version and the wrong one to reach for here, because
+    // it repacks the callback: the mouse message moves into the LOW word of
+    // lParam and the icon id into the high word, while wParam carries the
+    // cursor position. WndProc reads lParam as the bare message, which is the
+    // version 0/3 convention, so 4 would trade a missing balloon for a dead
+    // double-click. 3 asks for modern balloon handling and leaves the
+    // callback convention alone.
     private const int NOTIFYICON_VERSION_3 = 3;
     private const int NIF_MESSAGE = 0x01, NIF_ICON = 0x02, NIF_TIP = 0x04, NIF_INFO = 0x10;
 
@@ -383,7 +385,10 @@ public sealed class TrayIcon : IDisposable
         // hand. Once was enough.
         var shown = Shell_NotifyIcon(NIM_MODIFY, ref data);
         if (shown) Log.Info("tray", $"balloon: {message}");
-        else Log.Warn("tray", $"Windows refused the balloon (error {Marshal.GetLastWin32Error()}): {message}");
+        // No error code. Shell_NotifyIcon does not document setting one, and
+        // printing whatever GetLastError happened to hold is worse than saying
+        // nothing — it reads like a diagnosis and is not one.
+        else Log.Warn("tray", $"Windows refused the balloon: {message}");
 
         _balloonTimer?.Dispose();
         _balloonTimer = null;

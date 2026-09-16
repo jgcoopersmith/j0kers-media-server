@@ -201,23 +201,43 @@ public sealed class TvCodecs
     /// entry — twenty-one times fewer, which is the difference between a
     /// second and a minute on a library this size.
     /// </summary>
+    /// <summary>
+    /// Drops cache entries whose file has changed or gone.
+    ///
+    /// Two things here are load-bearing now that this runs on a background
+    /// thread instead of during construction.
+    ///
+    /// The stat pass holds no lock. It is the slow half — thousands of stats
+    /// against an archive drive, measured at 59 seconds — and holding
+    /// <c>_lock</c> across it would block every probe and every lookup for
+    /// the duration, which is the startup stall this moved off the critical
+    /// path, reintroduced somewhere worse.
+    ///
+    /// The write pass removes only the keys it decided were dead, under the
+    /// lock. It does NOT clear and repopulate, which is what it used to do:
+    /// clearing threw away every probe recorded during those 59 seconds, and
+    /// did it while other threads were reading the same dictionary.
+    /// </summary>
     private void PruneStale()
     {
-        var live = new Dictionary<string, string>(_cache.Count, StringComparer.OrdinalIgnoreCase);
+        List<string> keys;
+        lock (_lock) keys = new List<string>(_cache.Keys);
+
         var byPath = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        var doomed = new List<string>();
         var segments = 0;
-        foreach (var key in _cache.Keys)
+        foreach (var key in keys)
         {
-            if (SplitKey(key) is not { } parts) continue;      // unrecognisable: dropped
-            // A conversion segment costs nothing to reject and there are
-            // tens of thousands of them, so they go before any stat.
-            if (IsConversionOutput(parts.path)) { segments++; continue; }
-            if (!byPath.TryGetValue(parts.path, out var keys))
-                byPath[parts.path] = keys = new List<string>();
-            keys.Add(key);
+            if (SplitKey(key) is not { } parts) { doomed.Add(key); continue; }   // unrecognisable
+            // A conversion segment costs nothing to reject and there are tens
+            // of thousands of them, so they go before any stat.
+            if (IsConversionOutput(parts.path)) { doomed.Add(key); segments++; continue; }
+            if (!byPath.TryGetValue(parts.path, out var forPath))
+                byPath[parts.path] = forPath = new List<string>();
+            forPath.Add(key);
         }
 
-        foreach (var (path, keys) in byPath)
+        foreach (var (path, forPath) in byPath)
         {
             string? current = null;
             try
@@ -226,22 +246,26 @@ public sealed class TvCodecs
                 if (info.Exists) current = $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
             }
             catch { /* unreadable path: every key for it goes */ }
-            if (current is null) continue;
-            foreach (var key in keys)
-                if (key.Equals(current, StringComparison.OrdinalIgnoreCase) && _cache.TryGetValue(key, out var v))
-                    live[key] = v;
+
+            foreach (var key in forPath)
+                if (current is null || !key.Equals(current, StringComparison.OrdinalIgnoreCase))
+                    doomed.Add(key);
         }
 
-        var dropped = _cache.Count - live.Count;
-        if (dropped <= 0) return;
-        // Rebuilt in place: the field is readonly, and every other
-        // reader holds the same reference.
-        _cache.Clear();
-        foreach (var kv in live) _cache[kv.Key] = kv.Value;
-        _dirty = true;
+        int dropped, left;
+        lock (_lock)
+        {
+            dropped = 0;
+            foreach (var key in doomed)
+                if (_cache.Remove(key)) dropped++;
+            if (dropped <= 0) return;
+            _dirty = true;
+            left = _cache.Count;
+        }
+
         Log.Info("probe", $"probe cache: dropped {dropped} entry(s) - {segments} conversion segment(s) that "
                           + $"should never have been probed, {dropped - segments} for files that changed or went - "
-                          + $"{live.Count} left");
+                          + $"{left} left");
     }
 
     /// <summary>The path out of a path|size|modified key, or null if it is not one.</summary>

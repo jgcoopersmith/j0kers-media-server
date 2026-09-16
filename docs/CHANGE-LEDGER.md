@@ -2818,3 +2818,94 @@ down"* while in tray mode, and I put that down to the test environment rather
 than to the change in front of me. It was the bug, reported twice, ignored
 twice.
 
+
+---
+
+## v2.0.306 — the audit of this session's own work
+
+The owner's verdict on the preceding rounds was that essentially all of it was
+wrong. An adversarial audit of the whole session diff (`eb680bc..HEAD`, six
+lenses, two independent refutation passes each, 85 agents) agrees on the
+substance. What it found:
+
+### The close notice could never fire
+
+Five of the six lenses reached this independently, and it is the second time
+the same feature shipped broken in the opposite direction.
+
+`MarkPageClosing` opened with `if (PagesHolding() > 0) return;`. The pagehide
+beacon is dispatched *during* pagehide, while the closing page's own live link
+is still open and still counted. Measured here: beacon at `08:11:05.285`, the
+link it belongs to torn down at `08:11:05.808`. So the guard was always true
+and the arming code below it was unreachable. The fix for "297 notices" was
+"no notices".
+
+The test that passed proved nothing. It drove `GET /api/status`, which opens no
+live link, so `PagesHolding()` was zero in a way no browser ever produces. That
+is the same error as declaring the balloon fixed because `Shell_NotifyIcon`
+returned TRUE: measuring something adjacent to the thing that matters.
+
+### And the beacon was the wrong signal to hang it on anyway
+
+The audit found this file already recording the beacon going missing —
+*"that beacon does not arrive: closing the tab produced no request at all"*
+(ControlApi.cs) and *"Tested: closing the tab left the server running with no
+'dashboard closed' in the log at all"*. The notice had been moved onto a signal
+this codebase had already measured as unreliable.
+
+Neither signal works alone:
+
+- the beacon is early but optional;
+- the link ending is reliable but happens every twenty seconds by design.
+
+So `ArmClosedNotice` is called from both, and the grace plus the pre-existing
+`NoteActivity` cancel does the discriminating. Whichever arrives first arms it;
+a page that is still there reconnects inside the grace and cancels it. Re-arming
+is harmless because the callback now checks its own identity rather than a bare
+null, which previously let a superseded callback dispose its replacement and
+fire in its place.
+
+### Verified against something that behaves like a browser
+
+The first attempt at this test used `curl -N`, which holds a link but never
+reconnects — so it looked like a misfire at 23 seconds when it was correct
+behaviour for a client that really had gone. Redone with a client that reopens
+the link as soon as it drops, the way `EventSource` does:
+
+```
+A: reconnecting client, 75s (3+ rotations)  -> max dialogs: 0
+B: client stopped, no beacon (a closed tab) -> dialogs: 1, one new log line
+```
+
+### The probe-cache prune was racing every reader
+
+`PruneStale` was moved onto `Task.Run` this session and kept touching `_cache`
+with no lock, while every other accessor takes `_lock`. It enumerates
+`_cache.Keys` for the length of the stat walk — 59 seconds on this install —
+then `Clear()`s and repopulates. Concurrently, the codec prefetch fires up to 16
+`Codecs()` calls ten seconds after start, and request threads call it as soon as
+the port binds, which is now ~59 seconds earlier than before *because of this
+change*.
+
+Two failures, both reachable: an enumerator invalidated mid-walk (swallowed by
+the new catch, so the prune silently never happens again), and a reader inside
+`TryGetValue` while `Clear()` runs. It also discarded every probe recorded
+during those 59 seconds.
+
+Now: snapshot the keys under the lock, do the stat work outside it, and remove
+only the doomed keys under the lock. No `Clear()`, so concurrent probes survive.
+
+### Smaller, all introduced this session
+
+- `ConsoleWindow.Notice` claimed its single-instance flag before starting the
+  thread and only released it inside that thread — one failed start would have
+  silenced every notice for the life of the process.
+- The notice timer callback had no `try`/`catch`; it calls out to a UI handler,
+  and an unhandled throw on a timer thread takes the process with it.
+- The modal is now raised only when there actually is a tray icon. It was
+  telling console runs to click a joker in the taskbar that does not exist.
+- `Marshal.GetLastWin32Error()` was being printed for a `Shell_NotifyIcon`
+  failure. That function is not documented to set it; a fabricated code reads
+  like a diagnosis and is not one.
+- The `NOTIFYICON_VERSION_3` comment stated version 4's callback packing
+  backwards.

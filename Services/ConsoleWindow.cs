@@ -103,15 +103,27 @@ public static class ConsoleWindow
         }
 
         const uint MbIconInformation = 0x00000040, MbSetForeground = 0x00010000, MbTopMost = 0x00040000;
-        var t = new Thread(() =>
+        try
         {
-            try { MessageBoxW(IntPtr.Zero, message, title, MbIconInformation | MbSetForeground | MbTopMost); }
-            catch (Exception ex) { Logging.Log.Warn("main", "could not show the notice: " + ex.Message); }
-            finally { Interlocked.Exchange(ref _noticeOpen, 0); }
-        })
-        { IsBackground = true };
-        t.SetApartmentState(ApartmentState.STA);
-        t.Start();
+            var t = new Thread(() =>
+            {
+                try { MessageBoxW(IntPtr.Zero, message, title, MbIconInformation | MbSetForeground | MbTopMost); }
+                catch (Exception ex) { Logging.Log.Warn("main", "could not show the notice: " + ex.Message); }
+                finally { Interlocked.Exchange(ref _noticeOpen, 0); }
+            })
+            { IsBackground = true };
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+        }
+        catch (Exception ex)
+        {
+            // The flag is claimed before the thread exists, so anything that
+            // stops it existing has to give it back. Otherwise one failed
+            // start silences every notice for the life of the process — the
+            // quiet kind of bug this whole class was added to avoid.
+            Interlocked.Exchange(ref _noticeOpen, 0);
+            Logging.Log.Warn("main", "could not start the notice thread: " + ex.Message);
+        }
     }
 
     private static int _noticeOpen;
