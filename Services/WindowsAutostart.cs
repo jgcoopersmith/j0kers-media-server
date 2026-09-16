@@ -56,7 +56,7 @@ public static class WindowsAutostart
     private const int KEY_QUERY_VALUE = 0x0001, KEY_SET_VALUE = 0x0002;
     private const int REG_SZ = 1;
     private const int RRF_RT_REG_SZ = 0x0002, RRF_RT_REG_BINARY = 0x0008;
-    private const int ERROR_SUCCESS = 0, ERROR_FILE_NOT_FOUND = 2;
+    private const int ERROR_SUCCESS = 0, ERROR_FILE_NOT_FOUND = 2, ERROR_PATH_NOT_FOUND = 3;
 
     /// <summary>Windows only. Everywhere else the setting is inert and reported unsupported.</summary>
     public static bool Supported => OperatingSystem.IsWindows();
@@ -115,12 +115,44 @@ public static class WindowsAutostart
     /// the state Task Manager's Startup tab leaves behind. See
     /// <see cref="ApprovalKey"/>.
     /// </summary>
-    public static bool DisabledByWindows()
+    public static bool DisabledByWindows() => ApprovalState() == Approval.Disabled;
+
+    /// <summary>
+    /// What Windows' startup list says about this entry — and, separately,
+    /// whether it could be asked at all.
+    ///
+    /// The third case is the point. <see cref="ReadValue"/> returns null both
+    /// for "there is no such value" and for "the read failed", and those mean
+    /// opposite things here: the first is the ordinary enabled state (Windows
+    /// only writes a record once somebody touches the switch), the second is
+    /// no information. Collapsing them made a transient failure look like
+    /// "enabled", which reset the once-only warning latch in
+    /// <see cref="Refresh"/> and let a five-minute watch repeat a warning that
+    /// exists precisely because it should be said once.
+    /// </summary>
+    private enum Approval { Enabled, Disabled, Unknown }
+
+    private static Approval ApprovalState()
     {
-        var approval = ReadValue(ApprovalKey, EntryName, RRF_RT_REG_BINARY);
-        // No approval record at all is the normal enabled case: Windows only
-        // writes one once somebody has touched the switch.
-        return approval is { Length: > 0 } && (approval[0] & 1) != 0;
+        if (!OperatingSystem.IsWindows()) return Approval.Enabled;
+        try
+        {
+            var size = 0;
+            var rc = RegGetValue(HKEY_CURRENT_USER, ApprovalKey, EntryName, RRF_RT_REG_BINARY,
+                                 out _, null, ref size);
+            // Neither the value nor the whole key existing is the normal case
+            // on a machine where nobody has opened the Startup tab.
+            if (rc == ERROR_FILE_NOT_FOUND || rc == ERROR_PATH_NOT_FOUND) return Approval.Enabled;
+            if (rc != ERROR_SUCCESS || size <= 0) return Approval.Unknown;
+
+            var buffer = new byte[size];
+            rc = RegGetValue(HKEY_CURRENT_USER, ApprovalKey, EntryName, RRF_RT_REG_BINARY,
+                             out _, buffer, ref size);
+            if (rc != ERROR_SUCCESS || size <= 0) return Approval.Unknown;
+            // Bit 0 set is "disabled": 2 and 6 enabled, 3 and 7 disabled.
+            return (buffer[0] & 1) != 0 ? Approval.Disabled : Approval.Enabled;
+        }
+        catch { return Approval.Unknown; }
     }
 
     /// <summary>
@@ -199,18 +231,24 @@ public static class WindowsAutostart
         //
         // Whether the value happens to exist has nothing to do with whether
         // somebody said no.
-        if (DisabledByWindows())
+        var approval = ApprovalState();
+
+        // Could not read it. Saying nothing and doing nothing is right: the
+        // alternative is to treat a failed read as "enabled", which is what
+        // let this warning repeat every five minutes for ever.
+        if (approval == Approval.Unknown) return;
+
+        if (approval == Approval.Disabled)
         {
-            if (!_saidDisabled)
+            if (Interlocked.Exchange(ref _saidDisabled, 1) == 0)
             {
-                _saidDisabled = true;
                 Log.Warn("startup", "start with Windows is on here, but the entry is switched off in "
                                   + "Windows' own startup list — turn it back on in Task Manager's "
                                   + "Startup tab, or untick and re-tick the box in ⚙ Config");
             }
             return;
         }
-        _saidDisabled = false;
+        Interlocked.Exchange(ref _saidDisabled, 0);
 
         if (string.Equals(current, want, StringComparison.OrdinalIgnoreCase)) return;
 
@@ -238,7 +276,8 @@ public static class WindowsAutostart
                 : $"start-with-Windows entry is stale and could not be updated: {error}");
     }
 
-    private static bool _saidDisabled;
+    // Interlocked: Refresh runs from startup and from the watch timer.
+    private static int _saidDisabled;
     private static Timer? _watch;
 
     /// <summary>How often the logon entry is re-checked while the server runs.</summary>

@@ -218,13 +218,13 @@ fi
 
 if [ "$was_running" = "1" ]; then
     # The working directory is the whole point: config resolution finds
-    # --autostart because this is automation putting the server back, not
-    # a person asking for it. Without it a tray-mode server treats the
-    # restart as a deliberate launch and opens a browser window - on every
-    # single commit.
-    #
     # server.json relative to it, and starting from anywhere else gives a
     # server with none of this install's accounts, channels or library.
+    #
+    # --autostart because this is automation putting the server back, not a
+    # person asking for it. Without it a tray-mode server treats the restart
+    # as a deliberate launch and opens a browser window - on every single
+    # commit.
     powershell -NoProfile -Command \
         "Start-Process -FilePath '$install_win\\j0kers-media-server.exe' -ArgumentList 'server.json','--autostart' -WorkingDirectory '$install_win'" 2>/dev/null
     echo "post-commit: server restarted from $install_win"

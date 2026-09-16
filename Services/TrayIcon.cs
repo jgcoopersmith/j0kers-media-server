@@ -136,6 +136,12 @@ public sealed class TrayIcon : IDisposable
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr ExtractIcon(IntPtr hInst, string exeFileName, int iconIndex);
 
+    // ExtractIcon hands back a handle this process owns and must release.
+    // Background mode can be toggled from the Config dialog as often as
+    // somebody likes, and each turn-on extracted a fresh icon that nothing
+    // ever freed.
+    [DllImport("user32.dll")] private static extern bool DestroyIcon(IntPtr hIcon);
+
     [DllImport("kernel32.dll")] private static extern IntPtr GetConsoleWindow();
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandle(string? name);
 
@@ -384,7 +390,12 @@ public sealed class TrayIcon : IDisposable
         // them apart afterwards meant reading the notification database by
         // hand. Once was enough.
         var shown = Shell_NotifyIcon(NIM_MODIFY, ref data);
-        if (shown) Log.Info("tray", $"balloon: {message}");
+        // Accepted, NOT shown, and the wording matters. This return value said
+        // TRUE every time while nothing whatsoever appeared on screen — twice
+        // in one session it was read as proof the notice had been delivered.
+        // A log line that claims more than the API can tell you is how that
+        // happened, so this one claims exactly what it knows.
+        if (shown) Log.Debug("tray", $"balloon handed to Windows (appearing is its decision): {message}");
         // No error code. Shell_NotifyIcon does not document setting one, and
         // printing whatever GetLastError happened to hold is worse than saying
         // nothing — it reads like a diagnosis and is not one.
@@ -432,6 +443,8 @@ public sealed class TrayIcon : IDisposable
 
         var data = NewData();
         Shell_NotifyIcon(NIM_DELETE, ref data);
+        // After NIM_DELETE, so the shell is no longer holding it.
+        if (_icon != IntPtr.Zero) { try { DestroyIcon(_icon); } catch { } _icon = IntPtr.Zero; }
 
         // restore the console so a following shutdown log isn't invisible
         var console = GetConsoleWindow();

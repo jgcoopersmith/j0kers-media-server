@@ -75,9 +75,15 @@ public static class ConsoleWindow
     /// and draws nothing. Every layer says it succeeded. A message box is the
     /// one channel on Windows that is either on the screen or an error.
     ///
-    /// On its own thread, because the caller is a one-second timer: a modal
-    /// box on that thread would stop the link sweep until somebody clicked OK,
-    /// and the sweep is what decides whether the server keeps running.
+    /// On its own thread, because the caller is a timer callback — the
+    /// deferred close notice, armed by the pagehide beacon or by a live link
+    /// ending. A modal on that thread would hold a thread-pool thread open
+    /// until somebody clicked OK, under the lock-free tail of a path that also
+    /// decides whether the server keeps running.
+    ///
+    /// (It used to say "a one-second timer". That caller is gone: the notice
+    /// no longer hangs off the link sweep, which is what made it fire 297
+    /// times in a night.)
     ///
     /// TOPMOST and SETFOREGROUND together, because the moment this fires is
     /// the moment a browser window is closing and taking the foreground with

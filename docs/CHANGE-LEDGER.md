@@ -2748,6 +2748,42 @@ watch existed at all for a server that started with the box unticked.
 
 ---
 
+## v2.0.304 — a disable does not stop counting because the value went missing
+
+*Written after the fact: this version shipped with no ledger entry at all,
+which left the v2.0.302 section above describing a guard that had already been
+replaced. Found by the session audit.*
+
+Adversarial review of v2.0.303 caught the guard written to stop the repair
+overruling a Task Manager disable failing in exactly the situation this class
+exists for:
+
+```csharp
+if (current is not null && DisabledByWindows())
+```
+
+The approval record is keyed by value **name** and outlives the value — this
+file documents that itself, at `ApprovalKey`. So: the owner switches the entry
+off in Task Manager (approval byte `03`, value stays), Bitdefender then deletes
+the value, and the presence test skips the guard, falls through to the restore,
+and `ClearApproval()` tears up the `03` on the way past. The server starts at
+the next logon having been told not to, and the log calls it a repair.
+
+Whether the value happens to exist has nothing to do with whether somebody said
+no. The check no longer asks: it is `if (DisabledByWindows())`.
+
+Alongside it, `Write` gained an explicit `clearApproval`. Only
+`Apply(enable: true)` passes true, because that runs when somebody has just
+ticked the box and a fresh decision outranks an older one. `Refresh` is
+housekeeping, never a fresh decision, and passes false — so no amount of
+housekeeping can silently re-enable something the owner switched off.
+
+It also corrected a load-bearing comment in `ControlApi`: the dialog stopped
+posting every field on every save when `dashboard-config.js` gained its diff
+loop.
+
+---
+
 ## v2.0.305 — 297 notices for a window nobody closed
 
 Reported: "I left the media server open all night and there are thousands of
@@ -2925,3 +2961,98 @@ one session, and the second caused by the watch.
 `Apply` now commits the value to the live config the moment the registry
 changes. `UpdateSettings` still sets and persists it; this only closes the gap
 in between.
+
+---
+
+## v2.0.308 — the eight the audit left standing
+
+All eight remaining confirmed findings, each verified as still present in the
+working tree before it was touched.
+
+### 1. A device on the network could put a window on this desktop
+
+`/api/server/closing` is outside the auth gate on purpose — a page unloading
+cannot be relied on to carry credentials — so anything on the LAN could post it
+and raise the modal.
+
+The shutdown mark is fine to take from anyone: it only ever agrees with what
+the link count already says. The notice is not. A genuine beacon always arrives
+while its own link is still open — that is the whole reason the notice cannot
+be gated on the count — so the sender is in `_openPages`. A stranger is not,
+and now only a sender this server recognises arms the notice. The link-teardown
+path arms it too and cannot be forged from off the machine, so nothing is lost.
+
+```
+A: beacon, no page open (a stranger)      -> 0 notices
+B: real live link, beacon from it, killed -> exactly 1
+```
+
+### 2. The tray icon handle was never released
+
+`ExtractIcon` hands back a handle this process owns. `DestroyIcon` appeared
+zero times in the file. Background mode can be toggled from ⚙ Config as often
+as somebody likes and each turn-on extracted a fresh icon. Released now on
+`NIM_DELETE`.
+
+### 3. A failed registry read read as "enabled"
+
+`ReadValue` returns null both for *there is no such value* and for *the read
+failed*, and here those mean opposite things: the first is the ordinary enabled
+state, the second is no information. Collapsing them let a transient failure
+reset the once-only latch, so the five-minute watch could repeat a warning that
+exists precisely because it should be said once.
+
+`ApprovalState()` now returns Enabled / Disabled / **Unknown**, distinguishing
+`ERROR_FILE_NOT_FOUND` and `ERROR_PATH_NOT_FOUND` (no record — normal) from any
+other failure. Unknown does nothing at all: it neither warns, nor writes, nor
+touches the latch. `_saidDisabled` is an `int` under `Interlocked` now, because
+`Refresh` runs from startup and from the watch thread.
+
+### 4. Deleted: a shutdown path nothing could reach
+
+`CloseShutdownTick` had no caller and `_closeShutdownTimer` was never assigned
+a timer — only null-checked, disposed and nulled. `DashboardWentAway` used to
+arm it; nothing has since the link sweep took over deciding.
+
+Its doc block described, in detail, close-shutdown behaviour that no code
+performed, and `StreamingBlockedBy` still pointed at it as if live. That is the
+exact hazard that cost this session twice over, so it is deleted rather than
+left to be read as fact.
+
+### 5. v2.0.304 had no ledger entry
+
+It shipped without one, which left the v2.0.302 section describing a guard that
+had already been replaced. Backfilled above, marked as written after the fact.
+
+### 6. The post-commit comment was two sentences welded together
+
+*"The working directory is the whole point: config resolution finds
+`--autostart` because this is automation putting the server back…"* — the
+`--autostart` note had been spliced into the middle of the working-directory
+sentence, whose ending was left orphaned four lines below. Separated.
+
+### 7. `ConsoleWindow.Notice` named a caller that no longer exists
+
+*"because the caller is a one-second timer"* — my own comment, stale the moment
+the notice moved off the sweep. It now describes the real caller, and says what
+it used to say and why that caller is gone.
+
+### 8. The balloon log claimed more than the API can tell you
+
+`if (shown) Log.Info("tray", $"balloon: {message}")` — `shown` is
+`Shell_NotifyIcon`'s return value, which said TRUE every time while nothing
+appeared on screen, and which was read as proof of delivery twice in one
+session. It now logs at Debug and says what it actually knows: the balloon was
+handed to Windows, and appearing is Windows' decision.
+
+### Testing
+
+Everything ran on a loopback-bound scratch instance on spare ports, which skips
+`WindowsUrlAcl`'s `anyWide` branch entirely — no admin prompt, no URL ACLs, and
+the live firewall rule untouched (checked before and after at
+`8554,8080,9090`). Scratch directory removed, test process stopped, the dialog
+raised on the desktop closed with `WM_CLOSE` and confirmed gone.
+
+The logon entry was deliberately deleted to verify #3's normal path — that an
+absent approval record still reads as Enabled and still restores — and the
+restart below is that verification, not a side effect.

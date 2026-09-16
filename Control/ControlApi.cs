@@ -39,7 +39,6 @@ public sealed partial class ControlApi : IDisposable
     private readonly Media.FfmpegManager? _ffmpeg;
     private readonly Media.SubtitleManager? _subtitles;
     private readonly Action? _requestShutdown;
-    private Timer? _closeShutdownTimer;
     private readonly object _shutdownLock = new();
 
     /// <summary>
@@ -649,7 +648,7 @@ public sealed partial class ControlApi : IDisposable
     /// Somebody is watching, so the *silence* watch must not act.
     ///
     /// This answers one question only, and it is no longer asked about a
-    /// deliberate close — see CloseShutdownTick, which asks nothing. It is
+    /// deliberate close — the link sweep decides that and asks nothing. It is
     /// left for the silence path, where the server has been told nothing and
     /// is guessing from a gap in the polling: a television part way through a
     /// film is exactly the case where that guess would be wrong.
@@ -678,8 +677,20 @@ public sealed partial class ControlApi : IDisposable
     /// leaving. Whichever page comes back cancels it in
     /// <see cref="NoteActivity"/> before it ever fires.
     /// </summary>
-    private void MarkPageClosing()
+    /// <param name="fromAddress">
+    /// Where the beacon came from. This route is deliberately outside the auth
+    /// gate — a page unloading cannot be relied on to carry credentials — so
+    /// anything on the network can post it. That is fine for the shutdown
+    /// mark, which only ever agrees with what the link count already says, and
+    /// not fine for the notice, which puts a window on somebody's screen.
+    /// A genuine beacon always arrives while its own link is still open (that
+    /// is the whole reason the notice cannot be gated on the count), so the
+    /// sender is in <see cref="_openPages"/>. A stranger is not.
+    /// </param>
+    private void MarkPageClosing(string? fromAddress)
     {
+        var known = fromAddress is { Length: > 0 }
+                    && _openPages.Values.Contains(fromAddress, StringComparer.Ordinal);
         lock (_shutdownLock)
         {
             // The shutdown mark, unchanged: it only means anything when
@@ -702,7 +713,11 @@ public sealed partial class ControlApi : IDisposable
             //
             // Whether anything is still there is the callback's question. It
             // runs after the grace, by which time the link has gone.
-            ArmClosedNotice();
+            //
+            // Only for a beacon from a page this server actually has. The
+            // link-teardown path arms this too and cannot be forged from off
+            // the machine, so nothing is lost by ignoring a stranger here.
+            if (known) ArmClosedNotice();
         }
     }
 
@@ -957,10 +972,6 @@ public sealed partial class ControlApi : IDisposable
                 _closedNoticeTimer.Dispose();
                 _closedNoticeTimer = null;
             }
-            if (_closeShutdownTimer is null) return;
-            Log.Info("control", "dashboard still open — shutdown cancelled");
-            _closeShutdownTimer.Dispose();
-            _closeShutdownTimer = null;
         }
     }
 
@@ -1175,47 +1186,14 @@ public sealed partial class ControlApi : IDisposable
     /// remade comfortably before that watch would give up on the page.
     private static readonly TimeSpan LinkLifetime = TimeSpan.FromSeconds(20);
 
-    /// <summary>
-    /// The moment of deciding, once the grace has run out. Nothing is asked
-    /// except whether a dashboard came back.
-    ///
-    /// Closing the dashboard stops the server. Not "once the conversions
-    /// finish", not "once the last phone stops watching" — then. It is the
-    /// off switch, and an off switch that argues is not one: every condition
-    /// that used to be consulted here was a way for the server to still be
-    /// running after the user had told it to stop, which is the whole
-    /// complaint this endpoint exists to answer.
-    ///
-    /// So both guards are gone, and they are worth naming so nobody
-    /// reinstates them by accident:
-    ///
-    ///   • Conversions never vetoed it, and still do not. A queue can run for
-    ///     hours, and blocking on it left no way to stop the server at all.
-    ///     An interrupted conversion keeps its part-finished directory and is
-    ///     replaced when it is converted again, so this costs encoding time,
-    ///     not work on disk.
-    ///   • Somebody else watching used to veto it, and no longer does. That
-    ///     is a real cost — a film can cut out on another person's screen —
-    ///     and it is the deliberate trade: an off switch that a television in
-    ///     another room can hold shut is not one either. Leave the server in
-    ///     the tray (background mode) when other people are watching; that is
-    ///     what background mode is, and it turns this whole path off.
-    ///
-    /// The silence watch is a different act and keeps its own guards: going
-    /// quiet is not somebody telling the server to stop, so a locked screen
-    /// still must not kill a conversion. See SilenceShutdownBlockedBy.
-    /// </summary>
-    private void CloseShutdownTick()
-    {
-        lock (_shutdownLock)
-        {
-            if (_closeShutdownTimer is null) return;   // a dashboard came back
-            _closeShutdownTimer.Dispose();
-            _closeShutdownTimer = null;
-        }
-        Log.Info("control", "no dashboard open — shutting down");
-        _requestShutdown?.Invoke();
-    }
+    // CloseShutdownTick and _closeShutdownTimer used to live here: a deferred
+    // "the dashboard closed, so stop" that DashboardWentAway armed. Nothing has
+    // armed it since the link sweep took over deciding, so the timer was only
+    // ever null-checked and disposed, and the tick was unreachable. The doc
+    // block described, in detail, shutdown behaviour that no code performed —
+    // which is the exact hazard that cost this session twice over. Deleted
+    // rather than left to be read as fact. The sweep owns close-shutdown; see
+    // StartLinkSweep.
 
     /// <summary>
     /// Raised a couple of seconds after the last dashboard closes while the
@@ -1884,7 +1862,7 @@ public sealed partial class ControlApi : IDisposable
                 // the beacon as well — a third mechanism disabled by the same
                 // stale entry. Marking zero is the sweep's job; all this has
                 // to do is be heard.
-                MarkPageClosing();
+                MarkPageClosing(ctx.Request.RemoteEndPoint?.Address.ToString());
                 WriteJson(res, 200, new { noted = true });
                 return;
             }
@@ -5939,7 +5917,6 @@ public sealed partial class ControlApi : IDisposable
         try { Services.KeepAwake.Busy(false); } catch { }   // let the machine sleep again
         lock (_shutdownLock)
         {
-            try { _closeShutdownTimer?.Dispose(); _closeShutdownTimer = null; } catch { }
             try { _closedNoticeTimer?.Dispose(); _closedNoticeTimer = null; } catch { }
         }
         try { _listener?.Stop(); } catch { }
