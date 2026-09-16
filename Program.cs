@@ -255,7 +255,7 @@ J0kersMediaServer.Logging.AccessLog.Enabled = config.Logging.AccessLog;
 J0kersMediaServer.Services.WindowsAutostart.Refresh(config.StartWithWindows, config.ConfigFile);
 // And again every few minutes: the entry is removed while the machine is
 // up, so a check that only runs at startup is a check that never runs.
-J0kersMediaServer.Services.WindowsAutostart.StartWatch(config.StartWithWindows, config.ConfigFile);
+J0kersMediaServer.Services.WindowsAutostart.StartWatch(() => config.StartWithWindows, () => config.ConfigFile);
 
 // ---- TLS ----
 // Decided before anything binds, announces, or builds a URL: the scheme is

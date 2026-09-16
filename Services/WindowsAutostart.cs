@@ -245,15 +245,28 @@ public static class WindowsAutostart
     /// So a running server keeps an eye on it. <see cref="Refresh"/> is silent
     /// when there is nothing to do, so this costs one registry read every five
     /// minutes and says nothing until something has actually changed.
+    ///
+    /// Both arguments are read at each tick rather than captured: the setting
+    /// can be changed from the dashboard while the server runs, and a watch
+    /// holding the value it started with would undo that.
     /// </summary>
-    public static void StartWatch(bool enabled, string? configPath)
+    public static void StartWatch(Func<bool> wanted, Func<string?> configPath)
     {
-        if (!OperatingSystem.IsWindows() || !enabled) return;
-        if (string.IsNullOrWhiteSpace(configPath)) return;
+        if (!OperatingSystem.IsWindows()) return;
         _watch?.Dispose();
         _watch = new Timer(_ =>
         {
-            try { Refresh(enabled, configPath); }
+            try
+            {
+                // Read, not captured. Taking the setting by value here was a
+                // bug with a very clear shape: somebody unticks the box, the
+                // save removes the entry, and five minutes later this puts it
+                // straight back — a setting that cannot be turned off is worse
+                // than one that cannot be turned on, because nothing about it
+                // looks broken until the next logon.
+                if (!wanted()) return;
+                Refresh(true, configPath());
+            }
             catch (Exception ex) { Log.Warn("startup", "start-with-Windows check failed: " + ex.Message); }
         }, null, WatchIntervalMs, WatchIntervalMs);
     }

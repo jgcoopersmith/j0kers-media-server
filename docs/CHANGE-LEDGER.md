@@ -2703,3 +2703,45 @@ itself permanently the first time it is touched.
 `StartWatch` re-checks every five minutes for as long as the server runs.
 `Refresh` is silent when there is nothing to do, so the cost is one registry
 read per interval and no log line until something has actually changed.
+
+### Verified end to end
+
+Startup restore, against the real installed binary with the entry genuinely absent:
+
+```
+20:46:41 [startup] start-with-Windows entry was missing and has been restored: "…exe" "…server.json" --autostart
+```
+
+Then the watch, by deleting the value out from under a running server:
+
+```
+deleted at 20:47:07 — present now? False
+20:51:41 [startup] start-with-Windows entry was missing and has been restored: …
+RESTORED BY THE WATCH after ~275s
+```
+
+## v2.0.303 — the watch held the setting it started with
+
+Caught reviewing the change above before it could be reported.
+
+`StartWatch(bool enabled, string? configPath)` took the setting **by value** at
+startup and the timer closed over it. The shape of that bug:
+
+1. Server starts with the box ticked. The watch captures `enabled = true`.
+2. The user unticks it in ⚙ Config. The save calls `Apply(false)`, which
+   removes the entry. Correct so far.
+3. Five minutes later the watch fires, still holding `true`, and puts it back.
+
+A setting that cannot be turned off is worse than one that cannot be turned on,
+because nothing about it looks broken until the next logon.
+
+`ServerConfig.cs:271` assigns `StartWithWindows` on the live config object when
+settings are saved, so the value is there to be read — it was only ever the
+capture that was wrong. The signature is now
+`StartWatch(Func<bool> wanted, Func<string?> configPath)` and both are read at
+each tick. `Program.cs` passes `() => config.StartWithWindows` and
+`() => config.ConfigFile`.
+
+The `!enabled` early return moved out of `StartWatch` and into the tick, so
+turning the setting ON at runtime is now picked up as well — previously no
+watch existed at all for a server that started with the box unticked.
