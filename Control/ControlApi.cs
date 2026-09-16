@@ -3213,6 +3213,16 @@ public sealed partial class ControlApi : IDisposable
                 WriteJson(res, 400, new { error = autostartError ?? "could not change the Windows startup entry" });
                 return;
             }
+            // Committed to the live config HERE, not left to UpdateSettings
+            // fifty lines below. The registry has just changed, and between
+            // this point and there the handler restarts DLNA and can return
+            // early on failure — leaving the entry removed while
+            // config.StartWithWindows still says true, so the five-minute
+            // watch puts it straight back and the box will not turn off.
+            // UpdateSettings sets the same value again and persists it; this
+            // only closes the window in between.
+            _serverConfig.StartWithWindows = wantAutostart;
+
             Log.Info("config", wantAutostart
                 ? $"start with Windows: on ({Services.WindowsAutostart.Registered()})"
                 : "start with Windows: off");

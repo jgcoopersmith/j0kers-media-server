@@ -2909,3 +2909,19 @@ only the doomed keys under the lock. No `Clear()`, so concurrent probes survive.
   like a diagnosis and is not one.
 - The `NOTIFYICON_VERSION_3` comment stated version 4's callback packing
   backwards.
+
+### v2.0.307 — and the same "cannot turn it off" shape, one more time
+
+The save path calls `WindowsAutostart.Apply` at ControlApi.cs:3211 but does not
+reach `_serverConfig.UpdateSettings(s)` until :3260. In between it restarts
+DLNA and can return early on failure.
+
+So: untick the box, `Apply(false)` removes the entry, the DLNA restart fails,
+the handler returns, `config.StartWithWindows` is never updated and still reads
+true — and five minutes later the watch added in v2.0.303 puts the entry back.
+The box will not turn off. That is the third variant of this exact failure in
+one session, and the second caused by the watch.
+
+`Apply` now commits the value to the live config the moment the registry
+changes. `UpdateSettings` still sets and persists it; this only closes the gap
+in between.
