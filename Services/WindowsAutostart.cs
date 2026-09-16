@@ -157,7 +157,7 @@ public static class WindowsAutostart
             return false;
         }
 
-        return Write(ComposeCommand(exe, configPath), out error);
+        return Write(ComposeCommand(exe, configPath), clearApproval: true, out error);
     }
 
     /// <summary>
@@ -183,12 +183,23 @@ public static class WindowsAutostart
         var want = ComposeCommand(exe, configPath);
         var current = Registered();
 
-        // Present, but switched off in Task Manager or Settings. That is a
-        // decision somebody made in the place Windows offers for making it,
-        // and rewriting the value would clear the approval record and quietly
-        // overrule them — so it is reported and left alone. Once, not every
-        // time the watch below comes round.
-        if (current is not null && DisabledByWindows())
+        // Switched off in Task Manager or Settings. That is a decision somebody
+        // made in the place Windows offers for making it, so it is reported and
+        // left alone. Once, not every time the watch below comes round.
+        //
+        // Deliberately NOT "current is not null && DisabledByWindows()", which
+        // is what this said first and which fails in precisely the situation
+        // the rest of this class exists for. The approval record is keyed by
+        // value NAME and outlives the value — this file says so itself, up at
+        // ApprovalKey. So: owner switches it off in Task Manager (approval 03,
+        // value stays), the antivirus then deletes the value, and a presence
+        // test skips this branch, falls through to the restore below, and
+        // clears the 03 on the way past. The server would start at the next
+        // logon having been told not to, and the log would call it a repair.
+        //
+        // Whether the value happens to exist has nothing to do with whether
+        // somebody said no.
+        if (DisabledByWindows())
         {
             if (!_saidDisabled)
             {
@@ -215,7 +226,9 @@ public static class WindowsAutostart
         //
         // The registry is not the record of intent. settings.json is. This
         // makes the registry match it.
-        if (Write(want, out var error))
+        // clearApproval: false — see Write. Nothing here is a fresh instruction
+        // from the owner, so nothing here may overrule one.
+        if (Write(want, clearApproval: false, out var error))
             Log.Info("startup", current is null
                 ? $"start-with-Windows entry was missing and has been restored: {want}"
                 : $"start-with-Windows entry updated: {want}");
@@ -271,7 +284,20 @@ public static class WindowsAutostart
         }, null, WatchIntervalMs, WatchIntervalMs);
     }
 
-    private static bool Write(string command, out string? error)
+    /// <summary>
+    /// Writes the logon command.
+    ///
+    /// <paramref name="clearApproval"/> decides whether a "disabled in Task
+    /// Manager" record is torn up along with it, and only one caller may say
+    /// yes: <see cref="Apply"/> with enable true, which runs because somebody
+    /// has just ticked the box. That is a fresh decision and it outranks an
+    /// older one made in Task Manager.
+    ///
+    /// <see cref="Refresh"/> is never a fresh decision — it is housekeeping —
+    /// so it passes false. Without that separation, housekeeping silently
+    /// re-enables something the owner switched off.
+    /// </summary>
+    private static bool Write(string command, bool clearApproval, out string? error)
     {
         error = null;
         var key = IntPtr.Zero;
@@ -296,7 +322,7 @@ public static class WindowsAutostart
             // Writing the Run value is not enough on its own: if this entry was
             // ever switched off in Task Manager, the "disabled" record outlives
             // a delete-and-rewrite and the new value would never run.
-            ClearApproval();
+            if (clearApproval) ClearApproval();
             return true;
         }
         catch (Exception ex)

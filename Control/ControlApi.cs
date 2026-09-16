@@ -3088,9 +3088,12 @@ public sealed partial class ControlApi : IDisposable
         // nothing starts is the failure this feature can least afford: it is
         // invisible until the one morning somebody expects the server to be
         // there and it is not.
-        // The dialog posts every field on every save, so this compares against
-        // what is actually registered rather than rewriting the hive each time
-        // somebody changes a port.
+        // Compared against what is actually registered rather than rewritten on
+        // every save. The dialog used to post every field each time, which is
+        // what this comment used to say; it now sends only the ones that
+        // changed (see the diff loop in dashboard-config.js), so an untouched
+        // box does not arrive here at all and this guard is what stops a port
+        // change from rewriting the hive.
         if (s.StartWithWindows is bool wantAutostart
             && wantAutostart != Services.WindowsAutostart.IsEnabled())
         {
