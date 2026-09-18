@@ -531,11 +531,17 @@ async function pullPreferences() {
 }
 
 /* Who are we, and does this server have accounts at all? Drives both the
-   sign-in gate and which controls the page is allowed to show. */
+   sign-in gate and which controls the page is allowed to show.
+
+   Three answers, not two: true signed in, false signed out (and already on
+   the way to the sign-in page), null no answer at all. A request that
+   failed says nothing about who this is, and start-up treated it as "signed
+   out" and gave up - see the bottom of dashboard-ui.js. Through api() so it
+   gets the same deadline as every other read. */
 async function refreshAuth() {
   try {
-    authState = await (await fetch("/api/auth/state", { headers: headers() })).json();
-  } catch { return false; }
+    authState = await api("/api/auth/state");
+  } catch { return null; }
   me = authState.user || null;
   const role = (me && me.role) || "";
   document.body.classList.toggle("is-server-admin", role === "serveradmin");

@@ -34,22 +34,20 @@ public sealed class DlnaLive : IDisposable
     // Public so the DLNA listing advertises the very same size it is served.
     public const long AdvertisedBytes = 32L * 1024 * 1024 * 1024;
 
-    // How much of a recording is kept: all of it, for as long as anyone is
-    // watching.
+    // How much of a recording is kept: the newest discovery.dlnaLiveMaxGb of
+    // it (DefaultMaxBytes when unset). It used to be all of it, for as long as
+    // anyone watched - roughly 1-3 GB an hour, so a set left on overnight
+    // filled the drive conversions write to.
     //
-    // A constant stood here, RewindBytes, whose comment said played segments
-    // more than 512 MB behind the slowest viewer were deleted to keep the
-    // buffer bounded. Nothing ever did that - nothing even read it - and it
-    // cannot simply be made true. The recording is served as one file from
-    // byte 0, and a second set tuning to a channel another has been watching
-    // for an hour asks for byte 0: with the front trimmed it would be answered
-    // 416 and would not play at all. A cap would instead end a long evening's
-    // viewing part way. So the file grows at the channel's bitrate - roughly
-    // 1-3 GB an hour - until the last viewer has been gone for IdleGrace, the
-    // server stops (Dispose), or the next start clears what a server that was
-    // killed left behind (RemoveLeftovers). Bounding it for real means giving
-    // each set a starting offset of its own, which is a different design, not
-    // a number.
+    // Trimming the front could not simply be switched on, because of how a
+    // set plays this: it reads the recording as one file, by byte offset, and
+    // a second set tuning in asks for byte 0 - which, trimmed, would be
+    // answered 416 and never play. So the recording is kept as a run of files
+    // (see Buffer) and the oldest are deleted as it grows, and each set gets a
+    // starting offset of its own: a request for bytes the recording no longer
+    // holds is served from the oldest it does, and that set's offsets are
+    // shifted to match from then on, so its next request carries on where the
+    // last one ended. Offsets never move for anyone else.
 
     // No new segment for this long, with a viewer already at the live edge,
     // means the channel is gone rather than slow — end the response so the set
@@ -72,8 +70,19 @@ public sealed class DlnaLive : IDisposable
     private readonly System.Threading.Timer _janitor;
     private bool _disposed;
 
-    public DlnaLive(string mediaRoot)
+    /// <summary>
+    /// How much of one channel's recording is kept, in bytes: read each time a
+    /// segment is added, so a changed setting applies to recordings under way.
+    /// See discovery.dlnaLiveMaxGb.
+    /// </summary>
+    private readonly Func<long> _maxBytes;
+
+    /// <summary>The limit when nothing sets one: 4 GB, one to two hours of an ordinary channel.</summary>
+    public const long DefaultMaxBytes = 4L * 1024 * 1024 * 1024;
+
+    public DlnaLive(string mediaRoot, Func<long>? maxBytes = null)
     {
+        _maxBytes = maxBytes ?? (() => DefaultMaxBytes);
         _bufferRoot = BufferRootFor(mediaRoot);
         // A buffer left behind by a previous run is stale by definition — its
         // offsets belong to a stream that has moved on. Clear the lot on start.
@@ -128,7 +137,8 @@ public sealed class DlnaLive : IDisposable
                 // sharing its files allow (see Serve) made it succeed - and the
                 // channel went dead to every set until they all gave up.
                 buf = new Buffer(stream, channelDir,
-                                 Path.Combine(_bufferRoot, stream + "." + Guid.NewGuid().ToString("N")[..8]));
+                                 Path.Combine(_bufferRoot, stream + "." + Guid.NewGuid().ToString("N")[..8]),
+                                 _maxBytes);
                 _buffers[stream] = buf;
                 buf.Start();
             }
@@ -140,6 +150,18 @@ public sealed class DlnaLive : IDisposable
     public long CurrentSizeFor(string stream)
     {
         lock (_lock) return _buffers.TryGetValue(stream, out var b) ? b.CurrentSize : 0;
+    }
+
+    /// <summary>
+    /// The size a set tuning in to this channel now is served: the part of the
+    /// recording still kept (all of it, until the front has been trimmed).
+    /// What the DLNA listing advertises - it used to say the whole recorded
+    /// size, and once the front was trimmed a set that believed it and seeked
+    /// near that end asked past what it would be served. 0 if none.
+    /// </summary>
+    public long KeptSizeFor(string stream)
+    {
+        lock (_lock) return _buffers.TryGetValue(stream, out var b) ? b.KeptBytes : 0;
     }
 
     /// <summary>The folder the channel's current buffer records into, if it has one. For the tests.</summary>
@@ -184,17 +206,34 @@ public sealed class DlnaLive : IDisposable
         try { if (Directory.Exists(_bufferRoot)) Directory.Delete(_bufferRoot, true); } catch { }
     }
 
-    // ---- one channel recorded to a single real, growing MPEG-TS file ------
+    // ---- one channel recorded as one growing MPEG-TS stream -------------
+    //
+    // One stream of bytes with fixed offsets, kept on disk as a run of files -
+    // each named after the offset it starts at - so the oldest can be deleted
+    // once the whole is past its limit. See the note on _maxBytes.
 
     private sealed class Buffer : IDisposable
     {
         public string Stream { get; }
         private readonly string _channelDir;
         private readonly string _bufDir;
-        private readonly string _filePath;               // the real growing recording
+        private readonly Func<long> _maxBytes;
 
-        private readonly object _gate = new();           // guards _size/_lastSrc/_dead
-        private long _size;                               // real bytes recorded so far
+        /// <summary>One file of the recording: where in it the file starts, and how long it is so far.</summary>
+        private sealed class Piece(long start, string path)
+        {
+            public long Start { get; } = start;
+            public string Path { get; } = path;
+            public long Length;
+        }
+
+        private readonly object _gate = new();           // guards everything below it that changes
+        private long _size;                               // real bytes recorded so far, trimmed or not
+        private readonly List<Piece> _pieces = new();     // oldest first; the last one is being written
+        private long _floor;                              // the oldest byte still kept
+        private bool _saidTrimming;
+        /// <summary>Each set's own starting offset, by address: see Serve.</summary>
+        private readonly Dictionary<string, long> _shifts = new(StringComparer.Ordinal);
         private int _lastSrc = int.MinValue;
         private bool _seeded;
         private volatile bool _channelDead;
@@ -207,12 +246,12 @@ public sealed class DlnaLive : IDisposable
         private CancellationTokenSource? _cts;
         private Task? _pump;
 
-        public Buffer(string stream, string channelDir, string bufDir)
+        public Buffer(string stream, string channelDir, string bufDir, Func<long> maxBytes)
         {
             Stream = stream;
             _channelDir = channelDir;
             _bufDir = bufDir;
-            _filePath = Path.Combine(bufDir, "dlna.ts");
+            _maxBytes = maxBytes;
         }
 
         public TimeSpan IdleFor => _refs > 0 ? TimeSpan.Zero : DateTime.UtcNow - _idleSince;
@@ -222,7 +261,6 @@ public sealed class DlnaLive : IDisposable
         public void Start()
         {
             try { Directory.CreateDirectory(_bufDir); } catch { }
-            try { if (File.Exists(_filePath)) File.Delete(_filePath); } catch { }
             _cts = new CancellationTokenSource();
             _pump = Task.Run(() => Pump(_cts.Token));
         }
@@ -302,11 +340,6 @@ public sealed class DlnaLive : IDisposable
                 }
             }
 
-            // Delete shared for the same reason as the readers': a recorder that
-            // outlives Dispose's two-second wait must not be what keeps the file.
-            _writer ??= new FileStream(_filePath, FileMode.Append, FileAccess.Write,
-                                       FileShare.Read | FileShare.Delete, 1 << 16);
-
             foreach (var (idx, path) in onDisk)
             {
                 if (idx >= maxIdx) break;
@@ -317,31 +350,112 @@ public sealed class DlnaLive : IDisposable
                 catch (IOException) { continue; }
                 if (bytes.Length == 0) continue;
 
-                _writer.Write(bytes, 0, bytes.Length);
+                var piece = PieceToWrite();
+                _writer!.Write(bytes, 0, bytes.Length);
                 _writer.Flush();
                 lock (_gate)
                 {
                     _size += bytes.Length;
+                    piece.Length += bytes.Length;
                     _lastSrc = idx;
                     _lastAppend = DateTime.UtcNow;
                     System.Threading.Monitor.PulseAll(_gate);
                 }
+                TrimToLimit();
             }
         }
 
-        /// <summary>The real bytes recorded so far.</summary>
+        /// <summary>The limit in bytes, as set now; the default when the setting gives nothing usable.</summary>
+        private long Limit()
+        {
+            try { var limit = _maxBytes(); return limit > 0 ? limit : DefaultMaxBytes; }
+            catch { return DefaultMaxBytes; }
+        }
+
+        /// <summary>
+        /// The piece the next segment goes into: the one being written, or a
+        /// new one once that has had its share. A piece is at most 64 MB and at
+        /// most an eighth of the limit, so what is kept stays within an eighth
+        /// of the limit rather than a whole piece past it.
+        /// </summary>
+        private Piece PieceToWrite()
+        {
+            Piece? current;
+            lock (_gate) current = _pieces.Count > 0 ? _pieces[^1] : null;
+            var share = Math.Clamp(Limit() / 8, 1, 64L * 1024 * 1024);
+            if (current is not null && _writer is not null && current.Length < share) return current;
+
+            try { _writer?.Dispose(); } catch { }
+            _writer = null;
+            long start;
+            lock (_gate) start = _size;
+            var next = new Piece(start, Path.Combine(_bufDir, $"dlna-{start:D15}.ts"));
+            // Delete shared for the same reason as the readers': a recorder that
+            // outlives Dispose's two-second wait must not be what keeps the file.
+            _writer = new FileStream(next.Path, FileMode.Create, FileAccess.Write,
+                                     FileShare.Read | FileShare.Delete, 1 << 16);
+            lock (_gate) _pieces.Add(next);
+            return next;
+        }
+
+        /// <summary>
+        /// Deletes the oldest pieces while what is kept is past the limit -
+        /// never the one being written. A set part way through a deleted piece
+        /// reads on to the end of it (readers share delete).
+        /// </summary>
+        private void TrimToLimit()
+        {
+            var limit = Limit();
+            List<Piece>? gone = null;
+            var first = false;
+            long floor;
+            lock (_gate)
+            {
+                while (_pieces.Count > 1 && _size - _pieces[0].Start > limit)
+                {
+                    (gone ??= new List<Piece>()).Add(_pieces[0]);
+                    _pieces.RemoveAt(0);
+                }
+                _floor = _pieces.Count > 0 ? _pieces[0].Start : _size;
+                floor = _floor;
+                if (gone is not null && !_saidTrimming) { _saidTrimming = true; first = true; }
+            }
+            if (gone is null) return;
+            foreach (var p in gone)
+            {
+                try { File.Delete(p.Path); }
+                catch { /* swept with the folder when the buffer goes */ }
+            }
+            if (first)
+                Log.Info("dlnalive", $"{Stream}: the recording reached its limit of {limit / (1024.0 * 1024 * 1024):0.##} GB "
+                                     + "(discovery.dlnaLiveMaxGb) - from here the oldest part is dropped as it grows");
+            Log.Debug("dlnalive", $"{Stream}: dropped {gone.Count} piece(s); the recording now starts at byte {floor}");
+        }
+
+        /// <summary>The real bytes recorded so far, trimmed or not.</summary>
         public long CurrentSize { get { lock (_gate) return _size; } }
 
-        // ---- the reader: the real recording file → HTTP response ----------
+        /// <summary>The bytes of the recording still on disk.</summary>
+        public long KeptBytes { get { lock (_gate) return _size - _floor; } }
+
+        // ---- the reader: the recording's pieces → HTTP response ------------
 
         public void Serve(HttpListenerContext ctx, Action<long>? onBytes)
         {
             System.Threading.Interlocked.Increment(ref _refs);
             var res = ctx.Response;
             long served = 0, from = 0;
+            // Which set this is, for its own starting offset (see _shifts): its
+            // address and what it says it is. A television is one address and
+            // its requests for a channel come one after another; two players on
+            // one address (a set's own app beside its built-in player, two
+            // devices behind one router) are kept apart by what they call
+            // themselves, so one tuning in cannot move the other's offsets.
+            var client = (ctx.Request.RemoteEndPoint?.Address.ToString() ?? "") + "|" + (ctx.Request.UserAgent ?? "");
+            var who = ctx.Request.RemoteEndPoint?.Address.ToString() ?? "?";
             try
             {
-                long size;
+                long size, shift;
                 lock (_gate)
                 {
                     // On a cold tune the file is still empty; wait briefly for
@@ -349,9 +463,15 @@ public sealed class DlnaLive : IDisposable
                     for (var i = 0; i < 40 && _size == 0 && !_channelDead; i++)
                         System.Threading.Monitor.Wait(_gate, 250);
                     size = _size;
+                    shift = _shifts.GetValueOrDefault(client);
                 }
 
-                long to = size - 1;
+                // Offsets from here on are this set's: its byte r is byte
+                // r + shift of the recording, and the file it sees is that much
+                // shorter. Zero for every set until the front has been trimmed
+                // under it.
+                var seen = size - shift;
+                long to = seen - 1;
                 var partial = false;
                 var range = ctx.Request.Headers["Range"];
                 if (!string.IsNullOrEmpty(range) && range.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase))
@@ -360,7 +480,7 @@ public sealed class DlnaLive : IDisposable
                     if (span.Length == 2)
                     {
                         if (long.TryParse(span[0], out var f)) { from = f; if (long.TryParse(span[1], out var t)) to = t; }
-                        else if (long.TryParse(span[1], out var t)) from = Math.Max(0, size - t);
+                        else if (long.TryParse(span[1], out var t)) from = Math.Max(0, seen - t);
                         partial = true;
                     }
                 }
@@ -369,25 +489,62 @@ public sealed class DlnaLive : IDisposable
                 // the next of a growing file: wait for the recorder to append
                 // more rather than answering empty — that is what keeps a live
                 // channel playing across successive range requests.
-                if (from >= size)
+                if (from >= seen)
                 {
                     lock (_gate)
                     {
-                        for (var i = 0; i < 240 && _size <= from && !_channelDead; i++)
+                        for (var i = 0; i < 240 && _size - shift <= from && !_channelDead; i++)
                             System.Threading.Monitor.Wait(_gate, 250);
                         size = _size;
                     }
-                    if (from >= size)
+                    seen = size - shift;
+                    if (from >= seen)
                     {
                         res.StatusCode = 416;
-                        res.Headers["Content-Range"] = $"bytes */{Math.Max(size, 1)}";
+                        res.Headers["Content-Range"] = $"bytes */{Math.Max(seen, 1)}";
                         res.Close();
                         return;
                     }
-                    to = size - 1;
+                    to = seen - 1;
                 }
                 if (from < 0) from = 0;
-                if (to > size - 1 || to < from) to = size - 1;
+                if (to > seen - 1 || to < from) to = seen - 1;
+
+                // Older than the recording keeps: the front has been trimmed
+                // (see _maxBytes). Answered from the oldest byte still kept, and
+                // this set's offsets moved to match, so that its next request -
+                // for where this one ends - carries on from there. Answering 416
+                // instead stopped a set tuning in to a channel another had been
+                // watching for longer than the limit before it played a frame.
+                //
+                // Decided and noted under one hold of the lock, so two requests
+                // from one set cannot each read the floor and race to write. And
+                // not for a HEAD: it asks what is there and takes nothing, and a
+                // set probing byte 0 while it plays at the live edge would
+                // otherwise move its own offsets out from under its playback -
+                // the next request for where it was would name bytes past the
+                // end, wait a minute and be refused.
+                var head = ctx.Request.HttpMethod == "HEAD";
+                long floor;
+                var moved = -1L;
+                lock (_gate)
+                {
+                    floor = _floor;
+                    if (from + shift < floor)
+                    {
+                        moved = floor - from;
+                        if (!head) _shifts[client] = moved;
+                    }
+                }
+                if (moved >= 0)
+                {
+                    if (!head)
+                        Log.Info("dlnalive", $"{Stream}: {who} asked for byte {from + shift}, which the recording no longer "
+                                             + $"keeps (it starts at {floor}) - served from there");
+                    shift = moved;
+                    seen = size - shift;
+                    if (to > seen - 1) to = seen - 1;
+                }
 
                 var count = to - from + 1;
                 res.StatusCode = partial ? 206 : 200;
@@ -397,32 +554,23 @@ public sealed class DlnaLive : IDisposable
                 res.Headers["transferMode.dlna.org"] = "Streaming";
                 res.Headers["contentFeatures.dlna.org"] =
                     "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
-                if (partial) res.Headers["Content-Range"] = $"bytes {from}-{to}/{size}";
-                Log.Info("dlnalive", $"{ctx.Request.HttpMethod} {Stream} range='{range ?? "-"}' from={from} to={to} size={size} -> {res.StatusCode}");
+                if (partial) res.Headers["Content-Range"] = $"bytes {from}-{to}/{seen}";
+                Log.Info("dlnalive", $"{ctx.Request.HttpMethod} {Stream} range='{range ?? "-"}' from={from} to={to} size={seen}"
+                                     + (shift != 0 ? $" (+{shift})" : "") + $" -> {res.StatusCode}");
                 if (ctx.Request.HttpMethod == "HEAD") { res.Close(); return; }
 
-                // Delete is shared so that taking the buffer down - the last
-                // viewer gone, or the server stopping - removes the recording
-                // even while a set is part way through a response. Without it
-                // the delete was refused for as long as this handle was open,
-                // which on a server stopped mid-programme is exactly when it is
-                // open, and a recording of several gigabytes stayed in the
-                // media root. The name goes at once; this read carries on from
-                // the handle until the response ends.
-                using var fs = new FileStream(_filePath, FileMode.Open, FileAccess.Read,
-                                              FileShare.ReadWrite | FileShare.Delete, 1 << 16);
-                fs.Seek(from, SeekOrigin.Begin);
-                var buffer = new byte[64 * 1024];
-                long remaining = count, pending = 0;
-                while (remaining > 0)
+                // Short only when the part it needed was trimmed away under a
+                // set that fell that far behind. The answer promised `count`
+                // bytes, and closing it short left the set waiting for the rest
+                // until its own timeout - two minutes, measured. Dropping the
+                // connection instead has it ask again at once, and that request
+                // is moved on to what is kept.
+                if (!CopyRange(from + shift, count, res.OutputStream, onBytes, ref served))
                 {
-                    var read = fs.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
-                    if (read <= 0) break;
-                    res.OutputStream.Write(buffer, 0, read);
-                    remaining -= read; served += read; pending += read;
-                    if (onBytes is not null && pending >= 1024 * 1024) { onBytes(pending); pending = 0; }
+                    Log.Info("dlnalive", $"{Stream}: {who} fell behind what the recording keeps - asked to come again");
+                    res.Abort();
+                    return;
                 }
-                if (onBytes is not null && pending > 0) { try { onBytes(pending); } catch { } }
             }
             catch (HttpListenerException) { /* the set stopped or seeked away */ }
             catch (IOException) { }
@@ -434,6 +582,61 @@ public sealed class DlnaLive : IDisposable
                 if (System.Threading.Interlocked.Decrement(ref _refs) == 0) _idleSince = DateTime.UtcNow;
                 try { res.Close(); } catch { }
             }
+        }
+
+        /// <summary>
+        /// Writes <paramref name="count"/> bytes of the recording, from byte
+        /// <paramref name="at"/>, across as many pieces as that spans, and says
+        /// whether it wrote them all. It stops early only if the piece it needs
+        /// has been trimmed away under a reader that fell that far behind.
+        /// </summary>
+        private bool CopyRange(long at, long count, Stream output, Action<long>? onBytes, ref long served)
+        {
+            var buffer = new byte[64 * 1024];
+            long remaining = count, pending = 0;
+            while (remaining > 0)
+            {
+                Piece? piece;
+                lock (_gate) piece = _pieces.LastOrDefault(p => p.Start <= at);
+                if (piece is null) break;
+
+                // Delete is shared so that taking the buffer down - the last
+                // viewer gone, or the server stopping - or trimming its front
+                // removes the recording even while a set is part way through a
+                // response. Without it the delete was refused for as long as
+                // this handle was open, which on a server stopped mid-programme
+                // is exactly when it is open, and a recording of several
+                // gigabytes stayed in the media root. The name goes at once;
+                // this read carries on from the handle until it is done.
+                FileStream fs;
+                try
+                {
+                    fs = new FileStream(piece.Path, FileMode.Open, FileAccess.Read,
+                                        FileShare.ReadWrite | FileShare.Delete, 1 << 16);
+                }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                {
+                    // Trimmed between the lookup above and this open - deleted,
+                    // or on its way out. The same as not finding it: the part
+                    // this set needed is gone, and the caller drops the
+                    // connection rather than leaving the answer short.
+                    break;
+                }
+                using var open = fs;
+                fs.Seek(at - piece.Start, SeekOrigin.Begin);
+                var before = remaining;
+                while (remaining > 0)
+                {
+                    var read = fs.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
+                    if (read <= 0) break;                 // the end of this piece; the next follows on
+                    output.Write(buffer, 0, read);
+                    remaining -= read; served += read; pending += read; at += read;
+                    if (onBytes is not null && pending >= 1024 * 1024) { onBytes(pending); pending = 0; }
+                }
+                if (remaining == before) break;           // nothing more here: never spin
+            }
+            if (onBytes is not null && pending > 0) { try { onBytes(pending); } catch { } }
+            return remaining == 0;
         }
 
         private static int ParseIndex(string name)

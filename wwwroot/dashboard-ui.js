@@ -369,9 +369,18 @@ function openLiveLink() {
     // by itself on a same-origin request; a key/token sign-in goes in the
     // query string, which this server already accepts (?key=/?token=) and
     // never writes to the log.
-    liveLink = new EventSource("/api/server/session"
+    const link = liveLink = new EventSource("/api/server/session"
       + (token ? "?token=" + encodeURIComponent(token) : ""));
-    liveLink.addEventListener("link", e => { liveLinkId = e.data; });
+    link.addEventListener("link", e => { liveLinkId = e.data; });
+    // A dropped connection it retries by itself. An error answer - a 503
+    // from a server that is busy or part way through a restart - it does
+    // not: it closes for good, and the page would hold nothing from then
+    // on. So that one is retried here, well inside the server's grace.
+    link.addEventListener("error", () => {
+      if (link.readyState !== EventSource.CLOSED || liveLink !== link) return;
+      liveLink = null;
+      setTimeout(openLiveLink, 1000);
+    });
   } catch {
     liveLink = null;   // no EventSource: the beacon and the silence watch stand
   }
@@ -587,10 +596,32 @@ function applyCardOrder() {
 applyCardOrder();
 initCardFolding();
 
-refreshAuth().then(async ok => {
-  if (!ok) return;
-  openLiveLink();              // from here on, closing this page closes the server
-  await refreshMediaToken();   // before the first render, so no media URL goes out unsigned
-  tick();
-});
+/* The live link opens first, before anything is asked of the server.
+
+   It used to open only once /api/auth/state had answered, so one failed
+   request - a Wi-Fi blip, a reload racing a restart - left the page polling
+   with no link at all. With shutdown-on-close on, the server took that as
+   nobody being here and stopped three seconds later, under a page that was
+   still open and then said "server unreachable" for ever.
+
+   The link needs nothing that answer carries. The server hands this page
+   only to a signed-in browser, the cookie rides along by itself, and the
+   token was settled when dashboard-core.js loaded - which matters, because
+   the link keeps the URL it was opened with. A page that does turn out to
+   be signed out leaves for the sign-in page and its link goes with it. */
+openLiveLink();                // from here on, closing this page closes the server
+
+/* Then who this is, asked again until the server answers. No answer is not
+   "signed out" - that one goes to the sign-in page - and giving up on it
+   left the page without its role or its media token for as long as it was
+   open. A page that has gone takes this timer with it. */
+function startUp() {
+  refreshAuth().then(async ok => {
+    if (ok === null) { setTimeout(startUp, POLL_MS); return; }
+    if (!ok) return;
+    await refreshMediaToken();   // before the first render, so no media URL goes out unsigned
+    tick();
+  });
+}
+startUp();
 setInterval(tick, POLL_MS);

@@ -172,6 +172,12 @@
     // file whose bytes arrive at real time once you catch the live edge).
     // Retains a channel's segments on disk while a TV watches (a few GB/hour,
     // swept when nobody is). On for testing on this network's TVs.
-    "dlnaLiveTv": true
+    "dlnaLiveTv": true,
+
+    // How much of each channel's live-TV recording is kept, in GB - how far
+    // back a TV can rewind. Past it the oldest part is deleted as it grows,
+    // and a TV asking for what has gone is served from the oldest part kept.
+    // 4 GB is one to two hours of an ordinary channel; the least is 0.25.
+    "dlnaLiveMaxGb": 4
   }
 }

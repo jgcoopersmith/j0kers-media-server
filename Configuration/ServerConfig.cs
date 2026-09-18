@@ -927,8 +927,25 @@ public sealed class DiscoveryConfig
     /// that set has a file to play, not a stream to refuse.
     ///
     /// Off by default: it retains segments on disk while a television watches
-    /// (a few GB per hour per channel, swept when nobody is), and whether a
-    /// given set accepts the timeshift shape can only be found by trying it.
+    /// (a few GB per hour per channel, swept when nobody is - and never more
+    /// than <see cref="DlnaLiveMaxGb"/>), and whether a given set accepts the
+    /// timeshift shape can only be found by trying it.
     /// </summary>
     [JsonPropertyName("dlnaLiveTv")] public bool DlnaLiveTv { get; set; }
+
+    /// <summary>
+    /// How much of each live channel's DLNA recording is kept on disk, in GB -
+    /// how far back a television can rewind. Past it the oldest part is
+    /// deleted as the recording grows; a set asking for what has gone is
+    /// served from the oldest part still kept. There was no limit, and a set
+    /// left on a channel overnight filled the drive conversions write to.
+    /// 4 GB is one to two hours of an ordinary channel. Anything below a
+    /// quarter of a GB is taken as a quarter.
+    /// </summary>
+    [JsonPropertyName("dlnaLiveMaxGb")] public double DlnaLiveMaxGb { get; set; } = 4;
+
+    /// <summary><see cref="DlnaLiveMaxGb"/> in bytes, with its floor applied.</summary>
+    [JsonIgnore]
+    public long DlnaLiveMaxBytes =>
+        (long)(Math.Max(0.25, double.IsFinite(DlnaLiveMaxGb) ? DlnaLiveMaxGb : 4) * 1024 * 1024 * 1024);
 }

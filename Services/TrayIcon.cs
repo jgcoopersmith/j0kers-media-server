@@ -1,4 +1,5 @@
-﻿using System.Runtime.InteropServices;
+﻿using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using J0kersMediaServer.Logging;
 
 namespace J0kersMediaServer.Services;
@@ -151,12 +152,53 @@ public sealed class TrayIcon : IDisposable
     private readonly Action<bool> _setServices;
     private readonly Action _requestShutdown;
 
+    // One window class for the whole process, with one window procedure that
+    // hands each message to the TrayIcon owning the window it was sent to.
+    //
+    // The class used to be registered by each TrayIcon with its own instance
+    // WndProc, and every registration after the first failed and was ignored
+    // as "a duplicate registration is harmless". It was not: Windows keeps the
+    // procedure a class was registered with, so once background mode had been
+    // turned off and on again the new icon's window delivered every click to
+    // the FIRST TrayIcon - disposed, its window handle zeroed. The right-click
+    // menu was built for a window that no longer existed and never appeared,
+    // and Exit, the one way to stop a background-mode server, went with it for
+    // the life of the process. Worse, Program.cs drops the disposed icon, and
+    // once it was collected so was the delegate the class still pointed at:
+    // the next icon's CreateWindowEx then ended the process outright with "a
+    // callback was made on a garbage collected delegate".
+    //
+    // Static and readonly, so the delegate native code holds is rooted for as
+    // long as the process - and so the class - exists.
+    private const string ClassName = "J0kersMediaServerTray";
+    private static readonly WndProcDelegate ClassWndProc = DispatchToOwner;
+    private static readonly ConcurrentDictionary<IntPtr, TrayIcon> Owners = new();
+    private static readonly object ClassGate = new();
+    private static bool _classRegistered;
+
+    private const int WM_NCDESTROY = 0x0082;
+    private const int ERROR_CLASS_ALREADY_EXISTS = 1410;
+
     private IntPtr _hwnd;
     private IntPtr _icon;
     private Thread? _thread;
-    private WndProcDelegate? _wndProc; // must stay rooted: native code holds the pointer
     private bool _consoleVisible;
     private volatile bool _disposed;
+
+    /// <summary>
+    /// For tests: the hidden window that receives this icon's clicks, so a
+    /// test can post a click to it.
+    /// </summary>
+    internal IntPtr WindowHandleForTests => _hwnd;
+
+    /// <summary>
+    /// For tests: stands in for the person at the menu. When set, a
+    /// right-click builds the real menu and hands it to this instead of
+    /// putting it on screen, and the command it returns is carried out
+    /// exactly as a click on that item would be (0 = dismissed). Runs on the
+    /// tray thread, inside the window procedure, so it must not throw.
+    /// </summary>
+    internal Func<IntPtr, int>? ChooseFromMenuForTests { get; set; }
 
     public TrayIcon(string tip, Action openDashboard, Func<bool> servicesRunning,
         Action<bool> setServices, Action requestShutdown)
@@ -222,20 +264,15 @@ public sealed class TrayIcon : IDisposable
     private bool CreateWindowAndIcon()
     {
         var hInstance = GetModuleHandle(null);
-        _wndProc = WndProc;
-        var className = "J0kersMediaServerTray";
-        var wc = new WNDCLASSEX
-        {
-            cbSize = Marshal.SizeOf<WNDCLASSEX>(),
-            lpfnWndProc = Marshal.GetFunctionPointerForDelegate(_wndProc),
-            hInstance = hInstance,
-            lpszClassName = className,
-        };
-        RegisterClassEx(ref wc); // a duplicate registration is harmless here
+        if (!EnsureClassRegistered(hInstance)) return false;
 
-        _hwnd = CreateWindowEx(0, className, "j0kers", 0, 0, 0, 0, 0,
+        _hwnd = CreateWindowEx(0, ClassName, "j0kers", 0, 0, 0, 0, 0,
             IntPtr.Zero, IntPtr.Zero, hInstance, IntPtr.Zero);
         if (_hwnd == IntPtr.Zero) return false;
+        // Before the icon exists, so no click can arrive for a window nobody
+        // owns. What came during CreateWindowEx itself (WM_NCCREATE and the
+        // rest of creation) went to DefWindowProc, which is all it needed.
+        Owners[_hwnd] = this;
 
         // reuse the executable's own joker icon
         var exe = Environment.ProcessPath ?? "";
@@ -258,6 +295,50 @@ public sealed class TrayIcon : IDisposable
         else
             Log.Debug("tray", $"notify-icon version {NOTIFYICON_VERSION_3} set; icon handle 0x{_icon:X}");
         return true;
+    }
+
+    /// <summary>
+    /// Registers the class once per process, with <see cref="ClassWndProc"/>.
+    /// A failure is reported, not ignored: a class that exists with some
+    /// other procedure is exactly the dead icon this replaced.
+    /// </summary>
+    private static bool EnsureClassRegistered(IntPtr hInstance)
+    {
+        lock (ClassGate)
+        {
+            if (_classRegistered) return true;
+            var wc = new WNDCLASSEX
+            {
+                cbSize = Marshal.SizeOf<WNDCLASSEX>(),
+                lpfnWndProc = Marshal.GetFunctionPointerForDelegate(ClassWndProc),
+                hInstance = hInstance,
+                lpszClassName = ClassName,
+            };
+            if (RegisterClassEx(ref wc) == 0)
+            {
+                var error = Marshal.GetLastWin32Error();
+                Log.Warn("tray", error == ERROR_CLASS_ALREADY_EXISTS
+                    ? $"the tray window class {ClassName} is already registered by something else in this process"
+                    : $"could not register the tray window class (error {error})");
+                return false;
+            }
+            _classRegistered = true;
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// The class's window procedure: finds the TrayIcon that owns
+    /// <paramref name="hWnd"/> and lets it answer.
+    /// </summary>
+    private static IntPtr DispatchToOwner(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam)
+    {
+        if (!Owners.TryGetValue(hWnd, out var owner))
+            return DefWindowProc(hWnd, msg, wParam, lParam);   // still being created
+        // The last message a window gets. The handle can be reused after it,
+        // and a disposed icon must not stay reachable through this map.
+        if (msg == WM_NCDESTROY) Owners.TryRemove(new KeyValuePair<IntPtr, TrayIcon>(hWnd, owner));
+        return owner.WndProc(hWnd, msg, wParam, lParam);
     }
 
     private NOTIFYICONDATA NewData() => new()
@@ -318,10 +399,18 @@ public sealed class TrayIcon : IDisposable
             AppendMenu(menu, MF_SEPARATOR, 0, null);
             AppendMenu(menu, MF_STRING, IdExit, "Exit j0kers Media Server");
 
-            GetCursorPos(out var pt);
-            SetForegroundWindow(_hwnd); // required or the menu won't dismiss properly
-            var cmd = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, pt.X, pt.Y, 0, _hwnd, IntPtr.Zero);
-            PostMessage(_hwnd, 0x0000, IntPtr.Zero, IntPtr.Zero); // WM_NULL, per the classic quirk
+            int cmd;
+            if (ChooseFromMenuForTests is { } choose)
+            {
+                cmd = choose(menu);
+            }
+            else
+            {
+                GetCursorPos(out var pt);
+                SetForegroundWindow(_hwnd); // required or the menu won't dismiss properly
+                cmd = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, pt.X, pt.Y, 0, _hwnd, IntPtr.Zero);
+                PostMessage(_hwnd, 0x0000, IntPtr.Zero, IntPtr.Zero); // WM_NULL, per the classic quirk
+            }
             if (cmd != 0) HandleCommand(cmd);
         }
         finally
@@ -457,6 +546,10 @@ public sealed class TrayIcon : IDisposable
         // its thread, so re-enabling tray mode created a second one.
         PostMessage(_hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
         try { _thread?.Join(2000); } catch { }
+        // WM_NCDESTROY normally took it out already. Not if the window went
+        // with its thread instead (Start failing after the window was made,
+        // or a pump that stopped before the WM_CLOSE) - so here as well.
+        Owners.TryRemove(new KeyValuePair<IntPtr, TrayIcon>(_hwnd, this));
         _hwnd = IntPtr.Zero;
         _thread = null;
     }

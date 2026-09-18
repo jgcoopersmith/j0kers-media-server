@@ -20,5 +20,5 @@
                "rotateSizeMb": 10, "rotatePeriod": "daily", "maxFiles": 7 },
   "discovery": { "enabled": true, "hostName": "j0kers", "mdns": true, "ssdp": true,
                  "udpProbe": true, "udpProbePort": 7359, "dlna": false, "dlnaPort": 0,
-                 "dlnaUseTranscode": false, "dlnaLiveTv": false }
+                 "dlnaUseTranscode": false, "dlnaLiveTv": false, "dlnaLiveMaxGb": 4 }
 }

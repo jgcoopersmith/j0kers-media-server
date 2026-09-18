@@ -45,7 +45,8 @@ public static class StartupSummary
              $"http://{host}:{dlnaPort}/dlna/  NO SIGN-IN - any device on this network");
 
         Line("DLNA live TV", d.Dlna && d.DlnaLiveTv,
-             "running channels offered to televisions as timeshift streams");
+             "running channels offered to televisions as timeshift streams, "
+             + $"the last {d.DlnaLiveMaxBytes / (1024.0 * 1024 * 1024):0.##} GB of each kept");
 
         Line("DLNA transcodes", d.Dlna && d.DlnaUseTranscode,
              "a converted copy is served in place of the original where one exists");

@@ -23,6 +23,9 @@ public sealed class HlsServer : IDisposable
 {
     private static readonly string[] SegmentExtensions = { ".ts", ".mp4", ".m4s", ".aac" };
 
+    /// <summary>Either separator, whichever platform: neither belongs inside a decoded name.</summary>
+    private static readonly char[] PathSeparators = { '/', '\\' };
+
     private readonly HlsConfig _config;
     private readonly string _mediaRoot;
     private HttpListener? _listener;
@@ -193,7 +196,35 @@ public sealed class HlsServer : IDisposable
             if (Log.Enabled(LogLevel.Debug))
                 Log.Debug("hls", $"{ctx.Request.RemoteEndPoint} GET {path}");
 
+            // Routed on names, not on their URL spelling. AbsolutePath is still
+            // percent-encoded, and a stream name with any letter outside ASCII
+            // ("vod-amélie-2001-…", "ch-télé-info" - Slugify and ChannelStream
+            // keep every letter) always arrives that way, because a browser has
+            // to encode it. Looked up as sent, it named a directory that does
+            // not exist - 404 "unknown stream" - and a share link, which
+            // /api/media/token signs over the decoded name, never matched its
+            // own stream: 401.
+            //
+            // Split first, then decode each piece exactly once. An encoded "/"
+            // or "\" stays inside the piece it was written in, where it is
+            // refused just below instead of becoming a path level of its own,
+            // and "%252E" becomes the literal text "%2E", never ".". Everything
+            // after this - the token scope, SafeStreamDirectory, SafeChildPath,
+            // the subtitle name - then sees the same name the file system and
+            // the signer do.
             var parts = path.Trim('/').Split('/');
+            for (var i = 0; i < parts.Length; i++)
+                parts[i] = Uri.UnescapeDataString(parts[i]);
+
+            // No stream, file or route name has a separator in it, so a piece
+            // that decodes to one is not a name. Refused before it can choose a
+            // token scope or reach the disk; the containment checks below stay
+            // exactly as they were, as the second line.
+            if (parts.Any(p => p.IndexOfAny(PathSeparators) >= 0))
+            {
+                WriteText(res, 404, "text/plain", "not found");
+                return;
+            }
 
             // the watch page needs hls.js on this origin; a third-party
             // library file with nothing in it to protect stays open, or the
@@ -542,7 +573,14 @@ public sealed class HlsServer : IDisposable
         // TrimEnd first: GetFullPath leaves a trailing separator on a drive
         // root ("C:\"), and appending another would match nothing.
         var prefix = _mediaRoot.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        return full.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? full : null;
+        // A child of the root, never the root itself. Windows drops trailing
+        // spaces from a path segment, so a name of nothing but spaces - which
+        // a decoded "%20" is - normalises to "…\media\" and passes a prefix
+        // test written for the root's children. It would then be served as a
+        // stream of whatever lies loose in the media root.
+        return full.Length > prefix.Length && full.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            ? full
+            : null;
     }
 
     /// <summary>

@@ -142,6 +142,287 @@ public class AuditDlnaTests
         Assert.Equal(6000, live.CurrentSizeFor("ch-test"));
     }
 
+    // ------------------------------------------------------------- [76] limit
+
+    /// <summary>A channel whose segment i is 100 KB of the byte i, so what a set is served says where it came from.</summary>
+    private static (string Dir, Action<int> Segment) Channel(Scratch dir, string name)
+    {
+        var channelDir = Path.Combine(dir.Path, name);
+        Directory.CreateDirectory(channelDir);
+        return (channelDir, i => File.WriteAllBytes(Path.Combine(channelDir, $"seg_{i:D5}.ts"),
+                                                    Enumerable.Repeat((byte)i, 100_000).ToArray()));
+    }
+
+    private static async Task RecordedTo(DlnaLive live, string stream, long size)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (live.CurrentSizeFor(stream) < size && DateTime.UtcNow < deadline) await Task.Delay(50);
+        Assert.Equal(size, live.CurrentSizeFor(stream));
+    }
+
+    /// <summary>
+    /// [76] The live-TV recording grew for as long as a set watched - a few
+    /// GB an hour - and a set left on overnight filled the drive. It is now
+    /// kept to discovery.dlnaLiveMaxGb, the oldest part deleted as it grows.
+    /// Twenty 100 KB segments against a limit of five.
+    /// </summary>
+    [Fact]
+    public async Task A_live_recording_is_kept_within_its_limit()
+    {
+        using var dir = new Scratch();
+        var (channelDir, segment) = Channel(dir, "ch-long");
+        for (var i = 0; i <= 20; i++) segment(i);          // 0-19 recorded; 20 is the newest
+        const long limit = 500_000;
+
+        using var live = new DlnaLive(dir.Path, () => limit);
+        using var tv = new Loopback(ctx => live.Serve(ctx, "ch-long", channelDir));
+        (await tv.Http.GetAsync("dlna/live", HttpCompletionOption.ResponseHeadersRead)).Dispose();
+        await RecordedTo(live, "ch-long", 2_000_000);
+
+        var onDisk = Directory.EnumerateFiles(live.BufferFolderOf("ch-long")!).Sum(f => new FileInfo(f).Length);
+        Assert.True(onDisk <= limit,
+                    $"a live recording with a limit of {limit:N0} bytes kept {onDisk:N0} on disk after 2,000,000 were recorded");
+        Assert.True(onDisk >= limit - 100_000, $"the recording kept only {onDisk:N0} bytes - it trimmed far past its limit");
+    }
+
+    /// <summary>
+    /// [76] Why the front could not simply be trimmed: a set tuning in asks
+    /// for byte 0, and with the front gone that was nothing - it would never
+    /// play. It is served from the oldest part kept, and its next request, for
+    /// where that ended, carries on from there: its offsets are its own.
+    /// </summary>
+    [Fact]
+    public async Task A_set_tuning_in_after_the_front_was_trimmed_is_served_from_the_oldest_part_kept()
+    {
+        using var dir = new Scratch();
+        var (channelDir, segment) = Channel(dir, "ch-long");
+        for (var i = 0; i <= 20; i++) segment(i);
+        using var live = new DlnaLive(dir.Path, () => 500_000);
+        using var tv = new Loopback(ctx => live.Serve(ctx, "ch-long", channelDir));
+        (await tv.Http.GetAsync("dlna/live", HttpCompletionOption.ResponseHeadersRead)).Dispose();
+        await RecordedTo(live, "ch-long", 2_000_000);       // kept: segments 15-19
+
+        async Task<(HttpStatusCode Code, string? Range, byte[] Body)> Ask(string range)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, "dlna/live");
+            request.Headers.TryAddWithoutValidation("Range", range);
+            using var answer = await tv.Http.SendAsync(request);
+            try { return (answer.StatusCode, answer.Content.Headers.ContentRange?.ToString(), await answer.Content.ReadAsByteArrayAsync()); }
+            catch (HttpRequestException e)
+            {
+                throw new Xunit.Sdk.XunitException(
+                    $"asking for {range} after the front was trimmed got a broken answer ({(int)answer.StatusCode}): {e.Message}");
+            }
+        }
+
+        var first = await Ask("bytes=0-");
+        Assert.True(first.Code == HttpStatusCode.PartialContent && first.Body.Length == 500_000
+                    && first.Body[0] == 15 && first.Body[^1] == 19,
+                    $"a set tuning in was answered {(int)first.Code} with {first.Body.Length:N0} byte(s) starting with segment "
+                    + $"{(first.Body.Length > 0 ? first.Body[0] : -1)} - not the oldest part kept (15-19)");
+        Assert.Equal("bytes 0-499999/500000", first.Range);
+
+        segment(21);                                        // 20 is recorded now
+        var next = await Ask("bytes=500000-");
+        Assert.True(next.Code == HttpStatusCode.PartialContent && next.Body.Length == 100_000 && next.Body.All(b => b == 20),
+                    $"the set's next request, for where its first ended, was answered {(int)next.Code} with "
+                    + $"{next.Body.Length:N0} byte(s) - not segment 20, the one that followed");
+    }
+
+    /// <summary>A range request from a set, answered within ten seconds or failed: a wait of a minute is a set stranded.</summary>
+    private static async Task<(HttpStatusCode Code, string? Range, byte[] Body)> AskSoon(
+        Loopback tv, string range, string? userAgent = null, HttpMethod? method = null)
+    {
+        using var request = new HttpRequestMessage(method ?? HttpMethod.Get, "dlna/live");
+        request.Headers.TryAddWithoutValidation("Range", range);
+        if (userAgent is not null) request.Headers.TryAddWithoutValidation("User-Agent", userAgent);
+        using var soon = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        try
+        {
+            using var answer = await tv.Http.SendAsync(request, soon.Token);
+            return (answer.StatusCode, answer.Content.Headers.ContentRange?.ToString(),
+                    await answer.Content.ReadAsByteArrayAsync(soon.Token));
+        }
+        catch (OperationCanceledException)
+        {
+            throw new Xunit.Sdk.XunitException($"asking for {range}{(userAgent is null ? "" : " as " + userAgent)} "
+                                               + "was left waiting - a set asking where it was playing, stranded");
+        }
+    }
+
+    /// <summary>
+    /// Found in review of [76]. The DLNA listing advertised the whole
+    /// recorded size, and a set tuning in after trimming is served only what
+    /// is kept: a set that believed the listing and seeked near its end asked
+    /// past what it would be served. The listing now says the kept size, and
+    /// it is exactly what a set tuning in is told.
+    /// </summary>
+    [Fact]
+    public async Task The_size_a_set_tuning_in_is_served_is_the_size_listed()
+    {
+        using var dir = new Scratch();
+        var (channelDir, segment) = Channel(dir, "ch-long");
+        for (var i = 0; i <= 20; i++) segment(i);
+        using var live = new DlnaLive(dir.Path, () => 500_000);
+        using var tv = new Loopback(ctx => live.Serve(ctx, "ch-long", channelDir));
+        (await tv.Http.GetAsync("dlna/live", HttpCompletionOption.ResponseHeadersRead)).Dispose();
+        await RecordedTo(live, "ch-long", 2_000_000);
+
+        var tuned = await AskSoon(tv, "bytes=0-", "tv-new");
+        Assert.True(tuned.Range == $"bytes 0-{live.KeptSizeFor("ch-long") - 1}/{live.KeptSizeFor("ch-long")}",
+                    $"the listing would say {live.KeptSizeFor("ch-long"):N0} bytes, and a set tuning in was served "
+                    + $"{tuned.Range}");
+    }
+
+    /// <summary>
+    /// Found in review of [76]. A set's own offset was moved by any request of
+    /// its that asked below the kept part - a HEAD included, which takes
+    /// nothing. A set playing at the live edge that probed byte 0 had its
+    /// offsets moved out from under its playback: its next request, for where
+    /// it was, named bytes past the end, waited a minute and was refused.
+    /// </summary>
+    [Fact]
+    public async Task A_head_request_does_not_move_a_set_playing_at_the_live_edge()
+    {
+        using var dir = new Scratch();
+        var (channelDir, segment) = Channel(dir, "ch-long");
+        for (var i = 0; i <= 20; i++) segment(i);
+        using var live = new DlnaLive(dir.Path, () => 500_000);
+        using var tv = new Loopback(ctx => live.Serve(ctx, "ch-long", channelDir));
+        (await tv.Http.GetAsync("dlna/live", HttpCompletionOption.ResponseHeadersRead)).Dispose();
+        await RecordedTo(live, "ch-long", 2_000_000);
+
+        var tuned = await AskSoon(tv, "bytes=0-", "tv");               // segments 15-19, its own offsets from here
+        Assert.Equal(500_000, tuned.Body.Length);
+        segment(21); segment(22);                                       // 20 and 21 recorded; the front moves on
+        await RecordedTo(live, "ch-long", 2_200_000);
+
+        var probe = await AskSoon(tv, "bytes=0-", "tv", HttpMethod.Head);
+        Assert.Equal(HttpStatusCode.PartialContent, probe.Code);
+
+        var next = await AskSoon(tv, "bytes=500000-", "tv");            // where it was playing
+        Assert.True(next.Code == HttpStatusCode.PartialContent && next.Body.Length == 200_000 && next.Body[0] == 20,
+                    $"after a HEAD, the set's next request for where it was playing was answered {(int)next.Code} with "
+                    + $"{next.Body.Length:N0} byte(s) - not segments 20 and 21");
+    }
+
+    /// <summary>
+    /// Found in review of [76]. Offsets were kept by address alone, so a
+    /// second player on the same address tuning in moved the first one's too,
+    /// out from under its playback. They are kept by address and User-Agent.
+    /// </summary>
+    [Fact]
+    public async Task A_second_player_on_the_same_address_does_not_move_the_first()
+    {
+        using var dir = new Scratch();
+        var (channelDir, segment) = Channel(dir, "ch-long");
+        for (var i = 0; i <= 20; i++) segment(i);
+        using var live = new DlnaLive(dir.Path, () => 500_000);
+        using var tv = new Loopback(ctx => live.Serve(ctx, "ch-long", channelDir));
+        (await tv.Http.GetAsync("dlna/live", HttpCompletionOption.ResponseHeadersRead)).Dispose();
+        await RecordedTo(live, "ch-long", 2_000_000);
+
+        var first = await AskSoon(tv, "bytes=0-", "player-one");
+        Assert.Equal(500_000, first.Body.Length);
+        segment(21); segment(22);
+        await RecordedTo(live, "ch-long", 2_200_000);
+
+        var second = await AskSoon(tv, "bytes=0-", "player-two");      // tunes in later, from what is kept then
+        Assert.True(second.Body.Length > 0 && second.Body[0] == 17,
+                    $"the second player tuning in did not start at the oldest part kept (it got segment {second.Body.FirstOrDefault()})");
+
+        var next = await AskSoon(tv, "bytes=500000-", "player-one");
+        Assert.True(next.Code == HttpStatusCode.PartialContent && next.Body.Length == 200_000 && next.Body[0] == 20,
+                    $"after a second player on the same address tuned in, the first one's next request was answered "
+                    + $"{(int)next.Code} with {next.Body.Length:N0} byte(s) - not segments 20 and 21");
+    }
+
+    /// <summary>
+    /// Found in review of [76]. A piece deleted between being looked up and
+    /// being opened - trimmed at that moment - threw on the open, which the
+    /// dropped-connection path never saw: the answer was closed short and the
+    /// set waited out its own timeout. Made deterministic by deleting a piece's
+    /// file by hand before asking for it.
+    /// </summary>
+    [Fact]
+    public async Task A_piece_gone_before_it_is_opened_does_not_leave_the_set_waiting()
+    {
+        using var dir = new Scratch();
+        var (channelDir, segment) = Channel(dir, "ch-gone");
+        for (var i = 0; i <= 30; i++) segment(i);                       // 3 MB recorded, in several pieces
+        using var live = new DlnaLive(dir.Path, () => 10_000_000);
+        using var tv = new Loopback(ctx => live.Serve(ctx, "ch-gone", channelDir));
+        (await tv.Http.GetAsync("dlna/live", HttpCompletionOption.ResponseHeadersRead)).Dispose();
+        await RecordedTo(live, "ch-gone", 3_000_000);
+
+        var pieces = Directory.GetFiles(live.BufferFolderOf("ch-gone")!, "*.ts").OrderBy(p => p, StringComparer.Ordinal).ToList();
+        Assert.True(pieces.Count >= 2, $"precondition: the recording is in {pieces.Count} piece(s), not several");
+        File.Delete(pieces[0]);                                         // the oldest, closed: gone before anyone opens it
+
+        try { await AskSoon(tv, "bytes=0-", "tv"); }
+        catch (Xunit.Sdk.XunitException) { throw; }
+        catch (Exception) { /* the connection dropped: what this wants */ }
+    }
+
+    /// <summary>
+    /// [76] A set part way through an answer can fall behind what the
+    /// recording keeps: it stops reading, the channel moves on, and the part
+    /// it was being sent is trimmed. The answer had promised every byte, and
+    /// closing it short left the set waiting for the rest until its own
+    /// timeout (two minutes, measured). The connection is dropped instead, so
+    /// the set asks again at once.
+    /// </summary>
+    [Fact]
+    public async Task A_set_that_falls_behind_what_is_kept_is_not_left_waiting()
+    {
+        using var dir = new Scratch();
+        var channelDir = Path.Combine(dir.Path, "ch-slow");
+        Directory.CreateDirectory(channelDir);
+        const int mb4 = 4 * 1024 * 1024;
+        void Segment(int i) => File.WriteAllBytes(Path.Combine(channelDir, $"seg_{i:D5}.ts"),
+                                                  Enumerable.Repeat((byte)i, mb4).ToArray());
+        for (var i = 0; i <= 4; i++) Segment(i);            // 0-3 recorded: 16 MB
+        using var live = new DlnaLive(dir.Path, () => 4L * mb4);
+        using var tv = new Loopback(ctx => live.Serve(ctx, "ch-slow", channelDir));
+        (await tv.Http.GetAsync("dlna/live", HttpCompletionOption.ResponseHeadersRead)).Dispose();
+        await RecordedTo(live, "ch-slow", 4L * mb4);
+
+        // a set asks for all of it, takes the first few KB, and stops reading
+        using var set = new TcpClient();
+        await set.ConnectAsync(IPAddress.Loopback, tv.Port);
+        var net = set.GetStream();
+        await net.WriteAsync(System.Text.Encoding.ASCII.GetBytes(
+            $"GET /dlna/live HTTP/1.1\r\nHost: 127.0.0.1:{tv.Port}\r\nRange: bytes=0-\r\nConnection: keep-alive\r\n\r\n"));
+        var buffer = new byte[64 * 1024];
+        long got = await net.ReadAsync(buffer);
+
+        // the channel moves on past everything the set was being sent
+        for (var i = 5; i <= 9; i++) Segment(i);            // 4-8 recorded: 36 MB, of which 16 kept
+        await RecordedTo(live, "ch-slow", 9L * mb4);
+        Assert.True(live.KeptSizeFor("ch-slow") <= 4L * mb4, "precondition: the front was not trimmed");
+
+        // and now it reads on
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        using var patience = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        try
+        {
+            while (true)
+            {
+                var n = await net.ReadAsync(buffer, patience.Token);
+                if (n == 0) break;
+                got += n;
+            }
+        }
+        catch (IOException) { /* the connection dropped: what this wants */ }
+        catch (OperationCanceledException)
+        {
+            throw new Xunit.Sdk.XunitException(
+                $"a set that fell behind what the recording keeps was left waiting for the rest of its answer "
+                + $"({got:N0} bytes of 16 MB after {clock.Elapsed.TotalSeconds:0} s)");
+        }
+        Assert.True(got < 4L * mb4, $"the set was sent {got:N0} bytes - all of it, from a part that had been trimmed");
+    }
+
     // ------------------------------------------------------- shared e2e bits
 
     /// <summary>Adds settings to a test server's server.json before it starts.</summary>
@@ -596,7 +877,7 @@ public class AuditDlnaTests
         (await tv.Http.GetAsync("dlna/live", HttpCompletionOption.ResponseHeadersRead)).Dispose();
         var deadline = DateTime.UtcNow.AddSeconds(10);
         while (live.CurrentSizeFor("ch-test") < 24L * 1024 * 1024 && DateTime.UtcNow < deadline) await Task.Delay(50);
-        var recording = Path.Combine(live.BufferFolderOf("ch-test")!, "dlna.ts");
+        var recording = live.BufferFolderOf("ch-test")!;   // the recording's folder, pieces and all
 
         // A set that asks for the recording and then stops reading: the
         // server is part way through the body, with the file open.
@@ -610,7 +891,7 @@ public class AuditDlnaTests
 
         live.Dispose();
 
-        Assert.False(File.Exists(recording) || Directory.Exists(Path.Combine(dir.Path, ".dlnalive")),
+        Assert.False(Directory.Exists(recording) || Directory.Exists(Path.Combine(dir.Path, ".dlnalive")),
                      "the recording a set was part way through was left behind when the buffers were taken down");
     }
 
@@ -656,13 +937,13 @@ public class AuditDlnaTests
 
             await Tune();   // a set tunes in again
             var second = live.BufferFolderOf("ch-late")!;
-            var recording = Path.Combine(second, "dlna.ts");
-            Assert.True(File.Exists(recording), "precondition: the new buffer has no recording");
+            bool Recorded() => Directory.Exists(second) && Directory.EnumerateFiles(second, "*.ts").Any();
+            Assert.True(Recorded(), "precondition: the new buffer has no recording");
 
             // the first buffer's delete, arriving late
             try { Directory.Delete(first, recursive: true); } catch (DirectoryNotFoundException) { }
 
-            Assert.True(File.Exists(recording),
+            Assert.True(Recorded(),
                         "the first buffer's late clean-up deleted the recording of the buffer that replaced it");
         }
         finally { live.Dispose(); }

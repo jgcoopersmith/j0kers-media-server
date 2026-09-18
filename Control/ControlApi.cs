@@ -213,8 +213,8 @@ public sealed partial class ControlApi : IDisposable
                 .Select(c => (c.def.Name, c.stream))
                 .ToList();
         };
-        _dlnaLive ??= new Dlna.DlnaLive(MediaRootPath());
-        dlna.LiveSizeOf = s => _dlnaLive?.CurrentSizeFor(s) ?? 0;
+        _dlnaLive ??= new Dlna.DlnaLive(MediaRootPath(), () => _serverConfig.Discovery.DlnaLiveMaxBytes);
+        dlna.LiveSizeOf = s => _dlnaLive?.KeptSizeFor(s) ?? 0;   // what a set tuning in is served
         return dlna;
     }
 

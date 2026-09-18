@@ -3908,3 +3908,172 @@ read-only against the live install: both select the installed server (pid
 Live system: read only — the live logs (counted, as above) and the process list.
 
 477 tests pass (475 before this change).
+
+---
+
+## v2.0.316 — a limit on DLNA live-TV recordings; three high-rated audit leads
+
+### DLNA live TV: the recording is kept to a limit you set ([76])
+
+A television watching a live channel over DLNA plays a recording of it: every
+segment the channel produces is appended to one growing file, which the set reads
+by byte offset. It was kept whole for as long as anyone watched — a few GB an
+hour — so a set left on a channel overnight filled the drive conversions write
+to. v2.0.313 could only correct the comment: trimming the front would have left a
+second set, which asks for byte 0 when it tunes in, with nothing to play.
+
+**Change.**
+
+- New setting `discovery.dlnaLiveMaxGb` in server.json: how much of each
+  channel's recording is kept, in GB — how far back a set can rewind. Default 4
+  (one to two hours of an ordinary channel); anything below 0.25 is taken as
+  0.25. Read each time a segment is added. Documented in config/server.json and
+  the installer's default server.json; the startup summary says the limit.
+- The recording is kept as a run of files (at most 64 MB each, and at most an
+  eighth of the limit), and the oldest are deleted as it grows, so what is kept
+  stays within the limit. A set part way through a deleted file reads on to its
+  end.
+- Each set gets a starting offset of its own. A request for bytes the recording
+  no longer keeps is served from the oldest it does, and that set's offsets move
+  to match, so its next request — for where the last one ended — carries on from
+  there. Nobody else's offsets change. Logged when it happens.
+- A set that falls so far behind that the part it is being sent is deleted
+  under it has its connection dropped, and asks again at once. Closing the
+  answer short left it waiting for the promised bytes until its own timeout.
+
+**Proved**, each with its part reverted in place and restored from a hashed
+backup:
+
+- Kept within the limit: twenty 100 KB segments against 500 KB kept 500,000
+  bytes on disk. Red with trimming off: 2,000,000.
+- A set tuning in after trimming: asked for byte 0, it was answered 206
+  `bytes 0-499999/500000` with the oldest kept (segments 15–19), and its next
+  request carried on with segment 20. Red with trimming off: it got segment 0
+  onward, the whole 2,000,000. Red with the offset remap removed: nothing came,
+  and the answer hung until the client's 120-second timeout.
+- A set falling behind: it stopped reading 4 KB into a 16 MB answer, the channel
+  moved on 20 MB, then it read on. The connection ended at once. Red, closing
+  the answer short: still waiting after 20 s, 4,194,658 bytes in.
+- The existing DLNA tests pass; two that looked for the recording by its old file
+  name look at its folder instead.
+
+This install has DLNA live TV off, so nothing it does today changes.
+
+### The tray menu stopped working after background mode was turned off and on (lead U05)
+
+Found by the audit's finders, not checked until now; verified before fixing, and
+worse than reported.
+
+The tray's hidden window class was registered by each tray icon with that icon's
+own window procedure. Every registration after the first failed, and the failure
+was ignored as harmless. It was not: Windows keeps the procedure the class was
+first registered with. After unticking and re-ticking "Minimize to the system
+tray", the new icon's clicks went to the old, disposed icon, so right-click showed
+no menu and Exit (the documented way to stop a background-mode server) was gone
+until a restart. If memory had been cleaned up in between, the delegate the class
+still pointed at had been collected, and re-ticking the box crashed the server:
+"A callback was made on a garbage collected delegate" (reproduced with a small
+program against the old build).
+
+**Change.** One window class per process, with one window procedure that stays
+alive for the life of the process and hands each message to the icon that owns
+the window. A failed registration is logged and turns the tray off, instead of
+leaving a dead icon. Exit still runs the same shutdown.
+
+**Proved.** Two tests post the icon's own click messages to its window (a test
+hook stands in for the person at the menu, so no menu appears on screen). Red on
+the old code: "a right-click then Exit on the 'second' icon's window was handled
+by the TrayIcon 'first' - disposed - instead". Green, including five off/on cycles
+with a garbage collection between each, and each disposed icon collected.
+
+### Films and channels with an accented letter in the name could not be played (lead U02)
+
+Verified first. Stream names keep every letter: "Amélie (2001)" converts as
+`vod-amélie-2001-…`, a channel named "Télé Info" is `ch-télé-info`. A browser has
+to percent-encode those in an address, and the media port routed on the address
+as sent (`Url.AbsolutePath` is still encoded - checked against a real listener),
+so it looked for a folder named `vod-am%C3%A9lie-…`. From the dashboard: 404
+"unknown stream". From a share link, which is signed over the real name: 401.
+Only the HLS server was affected; the rest already use the decoded name.
+
+**Change.** The path is split on "/" first and each piece decoded exactly once,
+so an encoded "/" or "\" stays inside its piece (and is refused), and "%252E"
+stays the text "%2E", never ".". The existing containment checks are unchanged
+behind it. Decoding opened one new gap, closed in the same change: a name of
+only spaces ("%20") normalised to the media root itself and would have served
+its loose files; the stream-folder check now accepts only a folder inside the
+root. Checked in review: an encoded NUL never reaches the server - Windows'
+HTTP layer answers it 400 itself.
+
+**Proved.** Red on the old code: the dashboard's all-streams token 404, a share
+link 401, a non-ASCII channel 404, the watch page 404, and the "%20" case
+resolving to the media root. Green after. 37 encoded-traversal requests (encoded
+"..", "%2f", "%5c", double encoding, rooted and drive-relative paths, the
+sibling "media-old", the dot-folders, subtitles), with the widest token and with
+a one-stream share link: none reaches anything outside its stream, before or
+after (pins).
+
+### A failed start-up request left the dashboard without its live link (lead U09)
+
+Verified first. The page opened its live link - how the server knows a page is
+open - only after `/api/auth/state` had answered, and treated a failed request as
+"signed out" and gave up. One Wi-Fi blip on loading left the page polling with no
+link; a server set to stop on close then stopped about five seconds later with
+the page still open, which went on saying "server unreachable". (It needs a page
+to have been open since the server started - the server's "a dashboard was seen"
+mark.)
+
+**Change.** The page opens its live link first; it needs nothing that answer
+carries (the cookie goes by itself, and the token is settled before). No answer
+is now not "signed out": it asks again every poll until it gets one, then fetches
+the media token and starts. And a link the browser closes for good after an error
+answer (a 503 during a restart) is reopened a second later - the browser retries
+a dropped link by itself, but not that one.
+
+**Proved** in the built-in browser: the real dashboard from the repository,
+served on 127.0.0.1 with a stub in front that fails the first `auth/state`, and
+the rest passed through to a real test server (127.0.0.1, shutdown-on-close on,
+nothing announced). Old code: no link after the failure; the server stopped
+about 4.8 s later. Fixed: link open at 13 ms, `auth/state` answered on the retry
+at 2 s, the server still up 20 s later. A link answered 503 once: old code, the
+server stopped; fixed, a new link at 1 s. Closing the tab still stopped the server
+(about 5.5 s). Reverted in place and restored from hashed backups.
+
+### Review
+
+An independent review read the combined change. The tray, HLS and dashboard
+changes came back clean. It found three defects in the DLNA limit, all confirmed
+in the code and fixed, each shown red with its fix reverted in place:
+
+- **The listing still said the whole recorded size.** A set tuning in after
+  trimming is served only what is kept; one that believed the listing and seeked
+  near its end would ask past it, wait a minute and be refused. The listing now
+  says the kept size. Red: listed 2,000,000 bytes, served 500,000.
+- **A set's own offset could be moved by the wrong request.** Any request below
+  the kept part moved it - a HEAD included, which takes nothing - so a set
+  playing at the live edge that probed byte 0 had its offsets moved out from
+  under its playback. And offsets were kept by address alone, so a second player
+  on the same address tuning in moved the first. Now a HEAD never moves them,
+  they are kept by address and User-Agent, and the decision is made under one
+  hold of the lock. Red, both: the playing set's next request left waiting.
+- **A piece trimmed between being looked up and being opened** threw on the open,
+  which the dropped-connection path never saw - the answer was closed short and
+  the set waited out its timeout. The failed open now takes that path. Red (a
+  piece's file deleted by hand before asking): left waiting.
+
+It also doubted the HLS comment that each piece of the path is decoded exactly
+once, suspecting Windows' HTTP layer decodes it first. Measured: a folder named
+`pct%41x` is reached as `/pct%2541x/` and `/pctAx/` reaches nothing - decoded
+exactly once (kept as a pin). It noted one older, unrelated tray gap (an icon
+left behind if the tray takes over five seconds to start); not changed.
+
+### How it was done
+
+Three agents, each in its own git worktree, took the three leads; the DLNA limit
+was done here. Each agent's diff was read here before merging, and the merged
+tree's full suite run. Test servers bound 127.0.0.1 only, discovery off; the
+installed server and its files were not touched. The browser checks used the
+app's built-in browser against loopback servers holding no accounts; nothing was
+typed into a page.
+
+550 tests pass (477 before this change).
