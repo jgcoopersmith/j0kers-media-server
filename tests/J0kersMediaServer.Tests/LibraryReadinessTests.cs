@@ -52,6 +52,118 @@ public class LibraryReadinessTests
         Assert.Null(dlna.ResolvePath(DlnaService.Encode(elsewhere)));
     }
 
+    /// <summary>A ContentDirectory Browse, as a television sends it.</summary>
+    private static async Task<string> Browse(ShutdownOnCloseTests.TestServer server, string objectId)
+    {
+        var body = "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
+                 + "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body>"
+                 + "<u:Browse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\">"
+                 + $"<ObjectID>{objectId}</ObjectID><BrowseFlag>BrowseDirectChildren</BrowseFlag><Filter>*</Filter>"
+                 + "<StartingIndex>0</StartingIndex><RequestedCount>0</RequestedCount><SortCriteria></SortCriteria>"
+                 + "</u:Browse></s:Body></s:Envelope>";
+        using var request = new HttpRequestMessage(HttpMethod.Post, "dlna/control")
+        {
+            Content = new StringContent(body, System.Text.Encoding.UTF8, "text/xml"),
+        };
+        request.Headers.TryAddWithoutValidation("SOAPACTION", "\"urn:schemas-upnp-org:service:ContentDirectory:1#Browse\"");
+        using var r = await server.Http.SendAsync(request);
+        var text = await r.Content.ReadAsStringAsync();
+        Assert.True(r.IsSuccessStatusCode, $"Browse failed: {(int)r.StatusCode} {text}");
+        return text;
+    }
+
+    private static int Count(string text, string what) =>
+        (text.Length - text.Replace(what, "").Length) / what.Length;
+
+    /// <summary>
+    /// A television browsing the library over DLNA saw films and nothing else.
+    /// Every file had to have its codecs read before it was listed, and music
+    /// and pictures were never read - the sweep and the browse only ever read
+    /// video files - so they stayed "not read yet", and hidden, for good. And a
+    /// song that was read was judged by its picture: none, so "leave it alone",
+    /// whatever its sound was; with an album cover, the cover was taken for
+    /// the picture - a PNG, which no television plays.
+    /// </summary>
+    [Fact]
+    public async Task A_television_is_shown_the_music_and_pictures_in_the_library()
+    {
+        var ffmpeg = TestFfmpeg.Require();
+        using var server = await ShutdownOnCloseTests.TestServer.Start(openDashboardOnStart: false, backgroundMode: true,
+                                                                       ffmpegPath: ffmpeg, dlna: true);
+        var library = System.IO.Path.Combine(server.Dir, "library");
+        Directory.CreateDirectory(library);
+        TestFfmpeg.PlayableClip(ffmpeg, System.IO.Path.Combine(library, "film.mp4"));
+        var cover = System.IO.Path.Combine(server.Dir, "cover.png");
+        TestFfmpeg.Run(ffmpeg, "-f", "lavfi", "-i", "testsrc2=size=300x300", "-frames:v", "1", cover);
+        TestFfmpeg.Run(ffmpeg, "-f", "lavfi", "-i", "sine=sample_rate=44100", "-i", cover, "-t", "5",
+                       "-map", "0:a", "-map", "1:v", "-c:a", "libmp3lame", "-c:v", "png",
+                       "-disposition:v", "attached_pic", "-id3v2_version", "3",
+                       System.IO.Path.Combine(library, "song-with-its-cover.mp3"));
+        TestFfmpeg.Run(ffmpeg, "-f", "lavfi", "-i", "sine=sample_rate=44100", "-t", "5", "-c:a", "libmp3lame",
+                       System.IO.Path.Combine(library, "song.mp3"));
+        // and one a television does not play: listed, it would be a song that errors
+        TestFfmpeg.Run(ffmpeg, "-f", "lavfi", "-i", "sine=sample_rate=44100", "-t", "5", "-c:a", "wmav2",
+                       System.IO.Path.Combine(library, "song.wma"));
+        TestFfmpeg.Run(ffmpeg, "-f", "lavfi", "-i", "testsrc2=size=640x360", "-frames:v", "1",
+                       System.IO.Path.Combine(library, "photo.jpg"));
+
+        using (var add = await server.Http.PostAsync("api/library", ShutdownOnCloseTests.TestServer.Json(new { folder = library })))
+            Assert.True(add.IsSuccessStatusCode, $"could not add the library folder: {(int)add.StatusCode}");
+
+        // Adding the folder, and browsing it, have its files read; give that
+        // a moment, then ask as a television would.
+        var id = DlnaService.Encode(library);
+        var deadline = DateTime.UtcNow.AddSeconds(60);
+        string listing;
+        while (true)
+        {
+            listing = await Browse(server, id);
+            var done = Count(listing, "object.item.videoItem") >= 1
+                    && Count(listing, "object.item.audioItem.musicTrack") >= 2
+                    && Count(listing, "object.item.imageItem.photo") >= 1;
+            if (done || DateTime.UtcNow > deadline) break;
+            await Task.Delay(500);
+        }
+        Assert.True(Count(listing, "object.item.videoItem") == 1, "precondition: the film is listed");
+        Assert.True(Count(listing, "object.item.imageItem.photo") == 1, "a television was not shown the photo");
+        Assert.True(Count(listing, "object.item.audioItem.musicTrack") >= 2,
+                    $"a television was shown {Count(listing, "object.item.audioItem.musicTrack")} of the 2 songs it can play");
+
+        // Everything has been read by now; the WMA must still be left out.
+        await Task.Delay(2000);
+        listing = await Browse(server, id);
+        Assert.True(Count(listing, "object.item.audioItem.musicTrack") == 2,
+                    "a WMA, which a television does not play, was listed alongside the songs");
+    }
+
+    /// <summary>
+    /// A song is listed for what its sound is: an MP3 plays on a television, a
+    /// WMA does not, so the WMA is left out - the same promise films get.
+    /// And its album cover is not recorded as a picture.
+    /// </summary>
+    [Fact]
+    public void A_song_is_judged_by_its_sound_and_its_cover_is_not_a_picture()
+    {
+        using var dir = new Scratch();
+        var ffmpeg = TestFfmpeg.Require();
+        var cover = System.IO.Path.Combine(dir.Path, "cover.png");
+        TestFfmpeg.Run(ffmpeg, "-f", "lavfi", "-i", "testsrc2=size=300x300", "-frames:v", "1", cover);
+        var song = System.IO.Path.Combine(dir.Path, "song.mp3");
+        TestFfmpeg.Run(ffmpeg, "-f", "lavfi", "-i", "sine=sample_rate=44100", "-i", cover, "-t", "3",
+                       "-map", "0:a", "-map", "1:v", "-c:a", "libmp3lame", "-c:v", "png",
+                       "-disposition:v", "attached_pic", "-id3v2_version", "3", song);
+        var wma = System.IO.Path.Combine(dir.Path, "song.wma");
+        TestFfmpeg.Run(ffmpeg, "-f", "lavfi", "-i", "sine=sample_rate=44100", "-t", "3", "-c:a", "wmav2", wma);
+        var tv = new TvCodecs(dir.Path, Ffprobe());
+
+        var details = tv.Details(song);
+        Assert.True(details.video is null, $"the song's album cover was recorded as its picture ({details.video})");
+        Assert.Equal("mp3", details.audio);
+        Assert.True(tv.TvPlaysSoundOf(song) == true);
+        tv.Details(wma);
+        Assert.True(tv.TvPlaysSoundOf(wma) == false, "a WMA was taken for something a television plays");
+    }
+
     private static string Clip(string dir, string name, string pixFmt)
     {
         var path = System.IO.Path.Combine(dir, name);

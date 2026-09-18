@@ -1681,6 +1681,31 @@ public sealed class FfmpegManager : IDisposable
         catch { return null; }
     }
 
+    /// <summary>
+    /// Deletes the segments a seek job started at <paramref name="start"/>
+    /// wrote but did not finish: those its own playlist does not list. (One
+    /// it finished but had not listed yet goes too; it is made again when
+    /// asked for, which costs a moment and serves nothing short.)
+    /// </summary>
+    private static void RemoveUnfinishedSeekSegments(string dir, int start, string segExt)
+    {
+        try
+        {
+            var listed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var playlist = Path.Combine(dir, $"seek_{start:D5}.m3u8");
+            if (File.Exists(playlist))
+                foreach (var line in File.ReadAllLines(playlist))
+                {
+                    var l = line.Trim();
+                    if (l.Length > 0 && l[0] != '#') listed.Add(Path.GetFileName(l));
+                }
+            foreach (var f in Directory.EnumerateFiles(dir, $"seg_*.seek{start:D5}.{segExt}"))
+                if (!listed.Contains(Path.GetFileName(f)))
+                    try { File.Delete(f); } catch { /* still held; the next seek there remakes it */ }
+        }
+        catch { /* best effort: a left-over part is what happened before this existed */ }
+    }
+
     /// <summary>The height a conversion recorded for itself in height.txt (0 = source height), or null without one.</summary>
     private static int? RecordedHeight(string dir)
     {
@@ -1863,6 +1888,13 @@ public sealed class FfmpegManager : IDisposable
                     lock (_lock)
                         if (_seekJobs.TryGetValue(stream, out var list))
                             list.RemoveAll(j => ReferenceEquals(j.Process, p));
+                    // A job stopped part way - overtaken, capped, cancelled -
+                    // can leave the segment it was writing under its finished
+                    // name: seen in a test, 0.27 s of a 6-second segment. Found
+                    // later, it was taken as made ("already there") and served
+                    // cut short. Its own playlist lists only the segments it
+                    // finished, so anything of its not in that list goes.
+                    RemoveUnfinishedSeekSegments(dir, index, segExt);
                 });
             jobs.Add(new SeekJob(index, proc));
             return true;

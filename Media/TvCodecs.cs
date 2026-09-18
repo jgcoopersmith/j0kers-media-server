@@ -340,6 +340,19 @@ public sealed class TvCodecs
         lock (_lock) return _cache.TryGetValue(key, out var hit) && !NeedsPixelFormat(hit);
     }
 
+    /// <summary>
+    /// Whether a television plays this file's sound as it stands: null when
+    /// the file has not been read yet. For music, where the picture question
+    /// (NeedsConversion) does not apply - and answered "no picture, so leave it
+    /// alone" for every song, whatever its sound was.
+    /// </summary>
+    public bool? TvPlaysSoundOf(string file)
+    {
+        var known = CodecsCached(file);
+        if (known is null) return null;
+        return known.Value.audio is string audio && PlayableAudio.Contains(audio);
+    }
+
     /// <summary>Reads a file again whatever the cache says - the sweep's answer to IsSettled.</summary>
     public (string? video, string? audio, string? pixFmt) Refresh(string file) => Details(file, refresh: true);
 
@@ -545,7 +558,8 @@ public sealed class TvCodecs
             };
             // JSON, not csv: the pixel format is a video field only, and csv
             // drops the names that would say which value on a line is which.
-            foreach (var a in new[] { "-v", "error", "-show_entries", "stream=codec_type,codec_name,pix_fmt",
+            foreach (var a in new[] { "-v", "error",
+                                      "-show_entries", "stream=codec_type,codec_name,pix_fmt:stream_disposition=attached_pic",
                                       "-of", "json", file })
                 psi.ArgumentList.Add(a);
             // Both pipes drained together, with a timeout that can actually
@@ -568,6 +582,13 @@ public sealed class TvCodecs
                 {
                     var type = st.TryGetProperty("codec_type", out var t) ? t.GetString() : null;
                     var name = st.TryGetProperty("codec_name", out var n) ? n.GetString() : null;
+                    // An album cover attached to a song is not a picture to
+                    // decode: recorded as the song's "video", it made every MP3
+                    // with art a PNG that no television plays.
+                    if (type == "video" && st.TryGetProperty("disposition", out var disp)
+                        && disp.TryGetProperty("attached_pic", out var ap)
+                        && ap.ValueKind == JsonValueKind.Number && ap.GetInt32() == 1)
+                        continue;
                     if (type == "video" && video is null)
                     {
                         video = name;

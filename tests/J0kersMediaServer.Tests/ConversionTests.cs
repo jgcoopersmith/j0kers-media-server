@@ -730,13 +730,19 @@ public class ConversionTests
     }
 
     /// <summary>
-    /// A PIN, not a fix: the review of this work said a seek job stopped part
-    /// way leaves the segment it was writing under its finished name, to be
-    /// found later as "already made" and served cut short. Measured on ffmpeg
-    /// 8.1.2, TS and fMP4 alike: the HLS muxer creates a segment's file only
-    /// once the segment is complete, so a job killed at any point leaves
-    /// nothing its own playlist does not list. No change was needed; this
-    /// stays so that an ffmpeg that behaves otherwise is noticed.
+    /// A seek job stopped part way - overtaken, capped, cancelled - can leave
+    /// the segment it was writing under its finished name, to be found later
+    /// as "already made" and served cut short. Seen in this test: 0.27 s of a
+    /// 6-second segment. (An earlier version of this work concluded from three
+    /// sample kills that ffmpeg never leaves one. Measured properly: ffmpeg
+    /// holds a segment in memory and writes it out in one burst when it is
+    /// complete, before listing it - a job stopped inside that burst of a few
+    /// milliseconds leaves a part, unlisted. Three kills missed it.)
+    ///
+    /// A window of milliseconds cannot be hit on purpose, so the part is put
+    /// where that burst would leave it - a segment file of this job's that its
+    /// playlist does not list - and the job's own exit must clear it away,
+    /// while leaving every segment it finished.
     /// </summary>
     [Fact]
     public async Task A_seek_job_stopped_part_way_leaves_no_partial_segment()
@@ -745,26 +751,56 @@ public class ConversionTests
         var source = TestFfmpeg.SlowSource(rig.Ffmpeg, Path.Combine(rig.Dir, "slow.mpg"));
         var stream = PartConversion(rig, "vod-film-0000000a", source, 0);
         var dir = Path.Combine(rig.Media, stream);
+        var torn = Path.Combine(dir, "seg_00099.seek00010.ts");   // far past anything this job reaches
+        File.WriteAllBytes(torn, new byte[4096]);
         Assert.True(rig.Manager.EnsureVodSegment(stream, 10));
 
-        // wait until it is writing its second segment, then stop it mid-way
-        var deadline = DateTime.UtcNow.AddSeconds(60);
-        while (Directory.EnumerateFiles(dir, "seg_*.seek00010.*").Count() < 2)
+        HashSet<string> Listed()
         {
-            Assert.True(DateTime.UtcNow < deadline, "the seek job never got going");
-            await Task.Delay(50);
+            try
+            {
+                return File.ReadAllLines(Path.Combine(dir, "seek_00010.m3u8"))
+                           .Select(l => l.Trim()).Where(l => l.Length > 0 && l[0] != '#').ToHashSet();
+            }
+            catch { return new HashSet<string>(); }
+        }
+
+        // Once it has finished a segment, stop it.
+        var deadline = DateTime.UtcNow.AddSeconds(90);
+        while (Listed().Count < 1)
+        {
+            Assert.True(DateTime.UtcNow < deadline, "the seek job never finished a segment in 90 s");
+            await Task.Delay(20);
         }
         rig.Manager.CancelVod(stream);
-        deadline = DateTime.UtcNow.AddSeconds(20);
-        while (rig.Manager.SeekJobCountFor(stream) > 0) { Assert.True(DateTime.UtcNow < deadline); await Task.Delay(50); }
-        await Task.Delay(1000);   // the exit handler runs on its own thread
+        deadline = DateTime.UtcNow.AddSeconds(30);
+        while (rig.Manager.SeekJobCountFor(stream) > 0)
+        {
+            Assert.True(DateTime.UtcNow < deadline, "the cancelled seek job was still running 30 s later");
+            await Task.Delay(50);
+        }
 
-        var listed = File.Exists(Path.Combine(dir, "seek_00010.m3u8"))
-            ? File.ReadAllLines(Path.Combine(dir, "seek_00010.m3u8")).Where(l => !l.StartsWith('#')).Select(l => l.Trim()).ToHashSet()
-            : new HashSet<string>();
-        var unfinished = Directory.EnumerateFiles(dir, "seg_*.seek00010.*").Select(Path.GetFileName)
-                                  .Where(f => !listed.Contains(f!)).ToList();
-        Assert.True(unfinished.Count == 0, "a stopped seek job left a partial segment behind: " + string.Join(", ", unfinished));
+        // The exit handler runs on a thread of its own; give it until the
+        // deadline to clear up, then everything left has to be whole - six
+        // seconds of film, this job being far from the film's end.
+        string? shortOne = null;
+        deadline = DateTime.UtcNow.AddSeconds(10);
+        do
+        {
+            shortOne = null;
+            foreach (var f in Directory.EnumerateFiles(dir, "seg_*.seek00010.*"))
+            {
+                var text = Probe(rig, f, "format=duration");
+                if (!double.TryParse(text, System.Globalization.NumberStyles.Float,
+                                     System.Globalization.CultureInfo.InvariantCulture, out var seconds) || seconds < 5.5)
+                    shortOne = $"{Path.GetFileName(f)} ({text} s)";
+            }
+            if (shortOne is null) break;
+            await Task.Delay(250);
+        } while (DateTime.UtcNow < deadline);
+        Assert.True(shortOne is null, "a stopped seek job left a partial segment behind: " + shortOne);
+        Assert.True(Listed().Count >= 1 && Listed().All(f => File.Exists(Path.Combine(dir, f))),
+                    "the segments the job did finish were cleared away with the part");
     }
 
     /// <summary>

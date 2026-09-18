@@ -3342,11 +3342,11 @@ other findings are fixed below too, or measured and shown not to apply.
 
 ### Measured, and needed no change
 
-- The review said a seek job stopped part way leaves a half-written segment that
-  is later served. Measured on ffmpeg 8.1.2, TS and fMP4: the HLS muxer creates a
-  segment's file only when the segment is complete, so a job killed at any point
-  leaves nothing its playlist does not list. A pin test stays in case an ffmpeg
-  behaves otherwise.
+- **WRONG — corrected in v2.0.312.** The review said a seek job stopped part way
+  leaves a half-written segment that is later served. Measured on ffmpeg 8.1.2, TS
+  and fMP4: the HLS muxer creates a segment's file only when the segment is
+  complete, so a job killed at any point leaves nothing its playlist does not
+  list. A pin test stays in case an ffmpeg behaves otherwise.
 
 ### Cannot be fixed
 
@@ -3373,3 +3373,61 @@ other findings are fixed below too, or measured and shown not to apply.
   deleted; nothing else was written outside the scratchpad.
 
 367 tests pass (345 before this work).
+
+---
+
+## v2.0.312 — DLNA listed films only: music and pictures were never shown
+
+Found by the review of v2.0.311, confirmed in the code, then reproduced: a
+television browsing a library folder over DLNA was shown the film and never the
+songs or the photo, with ffmpeg installed (and it always is here).
+
+**Why.** Every file in a DLNA listing had to pass `DlnaShouldList`, which asks
+the probe cache whether a television can play it and leaves out anything not
+read yet. Nothing ever read music or pictures — the library sweep and the
+reading a browse asks for both took video extensions only — so they were "not
+read yet" for good. And a song that had been read would have been judged by the
+film rule: no picture, so "leave it alone" whatever its sound; with an album
+cover, the cover was recorded as its picture, a PNG no set plays.
+
+**Changes.**
+
+- Pictures are listed as they are: "can the set decode this" is not a question
+  about a JPEG.
+- Songs are listed once read, when a television plays their sound as it stands
+  (MP3, AAC, FLAC and the rest of TvCodecs' list); a WMA is left out, as a film a
+  set cannot play is. Forced substitution stays a rule about films — there is no
+  converted copy of a song to hand over.
+- The sweep, and the reading a browse asks for, read music files too.
+- The probe no longer records an attached album cover as a file's picture.
+
+**Proved.** End to end, against a real server with DLNA on (loopback, discovery
+off): a SOAP `Browse` of a library folder holding a film, an MP3, an MP3 with its
+cover, a WMA and a JPEG. Before: the film only, after 60 s. After: the film, the
+photo and both MP3s, and not the WMA. Each of the four changes was reverted in
+place and the tests seen to fail for its own reason (photo missing; songs never
+read; WMA listed under the film rule; cover recorded as `png`), then restored
+from hashed backups.
+
+This install has DLNA switched off, so nothing it shows today changes. The first
+start of this version reads any music in the library once, in the background.
+
+### Correction to v2.0.311: stopped seek jobs *do* leave partial segments
+
+v2.0.311 removed a clean-up for this, on the strength of three sample kills that
+each found only whole segments. That was too little evidence, and it was wrong.
+The pin test kept for it failed in this version's pre-commit run (the hook refused
+the commit), and a duration check then caught one directly:
+`seg_00012.seek00010.ts`, 0.27 s of a 6-second segment. Sampled every 10 ms,
+ffmpeg holds a segment in memory and writes it in one burst of a few milliseconds
+when it is complete, and only then lists it — a job stopped inside that burst
+leaves a part, unlisted, which was later taken as "already made" and served cut
+short. v2.0.311 shipped with that.
+
+The clean-up is back: when a seek job exits, any file of its that its playlist
+does not list is deleted. The test no longer tries to hit a window of
+milliseconds; it puts an unlisted part where that burst would leave it and
+requires the job's exit to clear it and keep every finished segment. Red twice
+with the clean-up removed, green five times of five with it.
+
+369 tests pass (367 before this work).

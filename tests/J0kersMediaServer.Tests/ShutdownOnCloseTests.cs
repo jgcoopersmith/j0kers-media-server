@@ -720,8 +720,14 @@ public class ShutdownOnCloseTests
             _http.DefaultRequestHeaders.Add("X-J0kers-CSRF", "1");
         }
 
+        /// <param name="dlna">
+        /// DLNA on (discovery.dlna) - served on the control port, loopback
+        /// only like everything else here. Discovery itself stays off: nothing
+        /// is announced on the network.
+        /// </param>
         public static async Task<TestServer> Start(bool openDashboardOnStart, bool backgroundMode,
-                                                  string? selfToken = null, string? ffmpegPath = null)
+                                                  string? selfToken = null, string? ffmpegPath = null,
+                                                  bool dlna = false)
         {
             var exe = Path.Combine(AppContext.BaseDirectory,
                                    OperatingSystem.IsWindows() ? "j0kers-media-server.exe"
@@ -745,7 +751,7 @@ public class ShutdownOnCloseTests
               "minimizeToTray": {{(backgroundMode ? "true" : "false")}},
               "rtsp":      { "enabled": false },
               "hls":       { "enabled": false },
-              "discovery": { "enabled": false },
+              "discovery": { "enabled": false, "dlna": {{(dlna ? "true" : "false")}} },
               "services":  { "dlna": false },
               "control": {
                 "enabled": true,

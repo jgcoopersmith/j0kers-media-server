@@ -249,6 +249,12 @@ public sealed class DlnaService
     private static bool IsMedia(string path) =>
         ClassFor(path).Length > 0;
 
+    /// <summary>A music file, by the extensions this server lists as music tracks.</summary>
+    internal static bool IsAudio(string path) => Audio.Contains(Path.GetExtension(path));
+
+    /// <summary>A picture, by the extensions this server lists as photos.</summary>
+    internal static bool IsImage(string path) => Image.Contains(Path.GetExtension(path));
+
     // ---- SOAP: ContentDirectory ------------------------------------------
 
     private sealed record BrowseResult(string Didl, int Returned, int Total);

@@ -334,9 +334,24 @@ public sealed partial class ControlApi : IDisposable
     /// </summary>
     private bool DlnaShouldList(string file)
     {
+        // A picture is shown as it is. "Can the set decode this?" is a
+        // question about films; it was asked of photos too, and since nothing
+        // ever read a photo's codecs the answer stayed "not read yet" - so no
+        // picture was ever listed to a television while ffmpeg was installed.
+        if (Dlna.DlnaService.IsImage(file)) return true;
+
         // No codec knowledge at all (no ffmpeg): behave as this always did
         // and offer everything, rather than hiding a whole library.
         if (_tvCodecs is null) return true;
+
+        // A song is judged by its sound. The rule below judges a picture, and
+        // a song has none: once read it counted as "leave it alone", whatever
+        // it was - and it was never read, because the sweep read video files
+        // only, so every song stayed hidden. Listed once read, when a set
+        // plays its sound as it stands: MP3, AAC, FLAC and the rest of
+        // TvCodecs' list yes, a WMA no. Forced substitution is about pictures;
+        // there is no converted copy of a song to hand over instead.
+        if (Dlna.DlnaService.IsAudio(file)) return _tvCodecs.TvPlaysSoundOf(file) == true;
 
         // Forced substitution: the only thing worth listing is a conversion.
         if (_serverConfig.Discovery.DlnaUseTranscode)
@@ -5831,7 +5846,10 @@ public sealed partial class ControlApi : IDisposable
 
                 foreach (var file in files)
                 {
-                    if (!TranscodableExt.Contains(Path.GetExtension(file))) continue;
+                    // Films, and music too: a song is only listed to a
+                    // television once its sound is known (see DlnaShouldList),
+                    // and nothing else ever reads it.
+                    if (!TranscodableExt.Contains(Path.GetExtension(file)) && !Dlna.DlnaService.IsAudio(file)) continue;
                     // Unread, or read before the pixel format was recorded -
                     // see TvCodecs.IsSettled. The second kind keeps answering as
                     // it did until this reaches it; nothing is hidden meanwhile.
