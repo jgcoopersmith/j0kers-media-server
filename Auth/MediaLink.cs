@@ -116,6 +116,20 @@ public sealed class MediaLink
     public bool VerifyUrl(string target, string? sig)
     {
         if (string.IsNullOrEmpty(sig)) return false;
+        // A forged relay target always contained a newline - "{target}#\n{exp}",
+        // from a stream token minted over a crafted scope - and proxy
+        // signatures never expire, so every forgery minted before the signing
+        // changed would otherwise keep working for ever. Refusing that one
+        // character retires them all without changing a byte of what SignUrl
+        // produces, so pinned channels, saved with its signature, keep working.
+        //
+        // The newline and nothing wider. A first version refused every
+        // control character, and review found real channels it broke: an M3U
+        // provider's tvg-id can carry a tab, or a Latin-1 byte decoded as a C1
+        // control, and those pinned restreams would have answered 401 after
+        // the upgrade. An M3U id can never contain a newline - the playlist is
+        // split on them - and a Pluto id is hex.
+        if (target.Contains('\n')) return false;
         var expected = Encoding.ASCII.GetBytes(SignUrl(target));
         var actual = Encoding.ASCII.GetBytes(sig);
         return expected.Length == actual.Length && CryptographicOperations.FixedTimeEquals(expected, actual);
@@ -123,14 +137,50 @@ public sealed class MediaLink
 
     private bool Matches(string scope, long exp, string presented)
     {
-        var expected = Encoding.ASCII.GetBytes(Signature(scope, exp));
         var actual = Encoding.ASCII.GetBytes(presented);
-        return expected.Length == actual.Length && CryptographicOperations.FixedTimeEquals(expected, actual);
+        return Same(Signature(scope, exp), actual)
+            // Tokens minted before the signing gained its "stream\n" prefix:
+            // share links, a PVR's M3U playlist, a player tab left open across
+            // the upgrade. Refusing them would break every one at once, and
+            // gains nothing - the forgery needed the ability to MINT this form
+            // over a chosen scope, and nothing mints it any more. They expire
+            // on their own schedule like any other token.
+            || Same(LegacySignature(scope, exp), actual);
+
+        static bool Same(string expectedSig, byte[] actual)
+        {
+            var expected = Encoding.ASCII.GetBytes(expectedSig);
+            return expected.Length == actual.Length && CryptographicOperations.FixedTimeEquals(expected, actual);
+        }
     }
 
+    /// <summary>The form every token had before the prefix. Verified, never minted.</summary>
+    private string LegacySignature(string scope, long exp) =>
+        UserStore.Base64Url(HMACSHA256.HashData(_secret, Encoding.UTF8.GetBytes($"{scope}\n{exp}")));
+
+    /// <summary>
+    /// A stream token's MAC. Prefixed with "stream\n" so that no scope, however
+    /// it is spelled, can produce the same bytes as a proxy signature, which
+    /// is prefixed "url\n" (see <see cref="SignUrl"/>). Both come from the same
+    /// key, so the prefixes are the only thing keeping them apart.
+    ///
+    /// They used not to be apart. This hashed "{scope}\n{exp}" and SignUrl
+    /// hashes "url\n{target}", so a scope of "url\n{X}" produced exactly the
+    /// proxy signature for "{X}\n{exp}" - and GET /api/media/token signs any
+    /// scope a read account asks for. With a '#' at the end of X the tail lands
+    /// in the URL fragment and is never sent, so the forged target fetches
+    /// cleanly, and proxy signatures never expire: a read account could mint a
+    /// permanent, anonymous open relay through this server.
+    ///
+    /// SignUrl is the half that stays as it was. Pinned channels are saved with
+    /// its signature in their URL, and changing it would break every one of
+    /// them; stream tokens are short-lived and simply re-minted. The cost of
+    /// this change is that tokens and share links minted before it stop
+    /// working and have to be issued again.
+    /// </summary>
     private string Signature(string scope, long exp)
     {
-        var mac = HMACSHA256.HashData(_secret, Encoding.UTF8.GetBytes($"{scope}\n{exp}"));
+        var mac = HMACSHA256.HashData(_secret, Encoding.UTF8.GetBytes($"stream\n{scope}\n{exp}"));
         return UserStore.Base64Url(mac);
     }
 }

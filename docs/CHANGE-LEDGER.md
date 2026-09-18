@@ -3056,3 +3056,111 @@ raised on the desktop closed with `WM_CLOSE` and confirmed gone.
 The logon entry was deliberately deleted to verify #3's normal path — that an
 absent approval record still reads as Enabled and still restores — and the
 restart below is that verification, not a side effect.
+
+---
+
+## v2.0.309 — the three audited highs, and the shutdown logic
+
+From the 2026-09-17 audit (`Code audit 2026-09-17.txt` on the desktop). Every
+fix below has a test that was run against the code *before* the fix and seen
+to fail for the stated reason, then pass after it. Where a test was written
+after its fix, the fix was temporarily reverted to watch the test fail; the
+three tests that could not fail that way are named as pins, not proof.
+
+The highs took three rounds. Each round was attacked by independent
+reviewers before shipping; round one had 19 confirmed holes, round two 19
+(several introduced by round two itself), round three 2. That record is kept
+here because it is the honest measure of how right the first version was.
+
+### High 1 — read and edit accounts could not play the library
+
+`POST /api/play` was never named in `RequiredLevel`, and the fail-closed
+default made it Admin. Every library click by a viewer was a 403. It is Read
+again, and the viewer's reach is bounded, which the first version did not do:
+
+- **One stream per file, not one per spelling.** A conversion is named by a
+  hash of the path *as given*, and sharing ignores case, so every respelling
+  of a film was a fresh encode. `SharedSpelling` puts a viewer's path back into
+  the library's own spelling (stored root + on-disk names), so what a viewer
+  normally plays keeps its existing conversion.
+- **A ceiling on concurrent viewer conversions** — the same "how many at a
+  time" the batch queue uses. Running or *finished* conversions always play; a
+  half-finished one counts as new work, because the server re-encodes it.
+- Wildcards and alternate-data-stream names refused from viewers (Windows only;
+  those characters are legal in names elsewhere).
+- Drive-root library folders (`E:\`) were unshared for viewers — the prefix
+  test built `E:\\`, a separator doubled onto a root that already ends in
+  one, which no path starts with. Fixed in `IsUnder`.
+- A viewer's GPU-refused play is no longer pushed into the administrator's
+  batch queue, and no longer lowers the ceiling that queue runs at.
+- `AccessLevelTests` lists every write route, prefix routes included, with the
+  level it is meant to have. A new route fails there until someone decides.
+
+### High 2 — a sleeping laptop killed running conversions
+
+The sweep could not tell the owner closing the page (a decision) from a
+browser going quiet (a guess): both look like a link that did not come back,
+and a write to a dead socket neither reliably fails nor returns. It treated
+every guess as a decision and stopped the server mid-encode.
+
+Each live link now gets a random id, sent to the page; the page names it in
+its close beacon. The close counts as a decision only if it is signed in (or
+from the server's own window, via its per-launch cookie) and names **the
+link whose ending brought the count to zero**. Anything else is a guess, and a
+guess waits for work in progress. Measured before and after on the same
+procedure: before, the server was gone 6s into a conversion; after, it was
+still converting at 46%.
+
+One gap no design here can close: a browser that closes without sending the
+beacon at all looks exactly like one that went to sleep. That case now waits
+for its work instead of killing it — the right way round to be wrong.
+
+### High 3 — a read account could mint a permanent open relay
+
+Stream tokens and TV-proxy signatures used the same key over inputs of the
+same shape, so a crafted stream scope produced a valid, never-expiring proxy
+signature. Stream tokens are now `HMAC("stream\n…")`; proxy signatures are
+unchanged so pinned channels keep working; tokens minted before the upgrade
+still verify (nothing mints that form any more); and a proxy target containing
+a newline is refused, which retires every forgery minted before the upgrade.
+A first attempt refused *every* control character and would have broken M3U
+channels whose ids contain a tab — caught by review, narrowed to the newline.
+
+### Shutdown logic
+
+- **The `/player` tab held nothing.** Closing the dashboard stopped the server
+  mid-film. The player page now holds the live link and names it on close.
+- **Anyone on the network could stop the server** by opening and dropping
+  `/api/server/session` (curl sends no Origin, so the cross-site check let it
+  through). Only a signed-in link — or the server's own window — now arms
+  close-shutdown or counts as "somebody else". Anonymous links still hold the
+  server open, which is the harmless direction.
+- **A status check armed a headless server**, which then stopped 3s later —
+  including this test suite's own startup probe. Only the live link arms it.
+- **KeepAwake** made and released Windows' sleep request on different
+  thread-pool threads; the request belongs to the calling thread, so the
+  release did nothing, and a retired thread took the request with it
+  mid-encode. One owning thread now makes every call.
+- A close recorded in background mode no longer survives into foreground mode
+  (turning background mode off used to stop the server at once, mid-encode).
+- A successful sign-in no longer announces a close on its way to the dashboard.
+
+### Proved in a real browser
+
+The raw-socket harness does not run page JavaScript, so the two page-script
+changes were checked against a loopback scratch server in a browser: a real
+`EventSource` receives a 32-hex link id on both the sign-in page and the
+player; the player tab kept the server up after the other page closed (*"a
+page closed, but 1 still open — staying up"*); closing the player tab then
+stopped it; a sign-in sends `"bye"`. Scratch server and files removed after.
+
+### Known and left
+
+- Seek-ahead encoders can take a viewer past the conversion ceiling. This was
+  there before; not worsened.
+- Edit and admin plays that the GPU refuses are still requeued into the batch
+  queue, as they always were.
+- `DlnaService` keeps its own drive-root comparison with the old bug (DLNA
+  browsing of a whole-drive library). A separate, pre-existing audit finding.
+
+293 tests pass (256 before this work).

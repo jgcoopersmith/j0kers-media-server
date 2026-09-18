@@ -918,7 +918,18 @@ public sealed class FfmpegManager : IDisposable
         }
     }
 
-    public (string stream, bool ready) StartVod(string file, int height = 0, bool keep = false)
+    /// <param name="requeueOnGpuRefusal">
+    /// Whether a job the GPU refuses an encoder session is put back on the
+    /// batch queue. True for everything the server's administrator starts -
+    /// the queue itself, their plays, a retranscode - which is how it always
+    /// behaved. False only for a viewer account's play: the batch queue is the
+    /// administrator's, and a viewer being able to fill it (and lower the
+    /// ceiling it runs at) is what this is for. It used to key on
+    /// <paramref name="keep"/>, which is also false for a retranscode, so the
+    /// owner's rebuilt conversion could be lost.
+    /// </param>
+    public (string stream, bool ready) StartVod(string file, int height = 0, bool keep = false,
+                                                bool requeueOnGpuRefusal = true)
     {
         if (!Available) throw new InvalidOperationException("ffmpeg is not available");
         var info = new FileInfo(file);
@@ -1128,7 +1139,22 @@ public sealed class FfmpegManager : IDisposable
                     var refused = false;
                     try { refused = !superseded && p.ExitCode != 0 && IsGpuSessionExhausted(tail); }
                     catch { /* reaped already */ }
-                    if (refused)
+                    // A viewer account's play is not requeued and does not
+                    // teach the ceiling. It used to go the same way as the
+                    // queue's own jobs: pushed into the batch queue as a
+                    // full-resolution, permanently kept conversion, and
+                    // allowed to lower the ceiling the owner's queue runs at
+                    // until the next restart. That queue is the server
+                    // administrator's; once a read account could press play,
+                    // it could fill it. See requeueOnGpuRefusal.
+                    if (refused && !requeueOnGpuRefusal)
+                    {
+                        _nvencRefusals++;
+                        Log.Warn("ffmpeg", $"the GPU refused an encoder session for {info.Name} - a viewer's play, "
+                                         + "so it has not been added to the conversion queue; it can be played "
+                                         + "again once the card is less busy");
+                    }
+                    else if (refused)
                     {
                         _nvencRefusals++;
                         // Whatever was running when the card said no is one
@@ -1575,6 +1601,34 @@ public sealed class FfmpegManager : IDisposable
     public bool IsVodReady(string stream) =>
         File.Exists(Path.Combine(_mediaRoot, stream, "index.m3u8"));
 
+    /// <summary>
+    /// Finished, as opposed to <see cref="IsVodReady"/>'s "has a playlist".
+    /// A conversion stopped part way has a playlist too, and StartVod treats
+    /// that as new work - it clears the directory and encodes from the top -
+    /// so anything deciding whether a request costs an encode has to ask this.
+    /// </summary>
+    public bool IsVodComplete(string stream)
+    {
+        try
+        {
+            var playlist = Path.Combine(_mediaRoot, stream, "index.m3u8");
+            return File.Exists(playlist)
+                && File.ReadAllText(playlist).Contains("#EXT-X-ENDLIST", StringComparison.Ordinal);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// True while the queue pump is between taking a file off the queue and
+    /// that file's job being registered as running. Setting a conversion up
+    /// can take tens of seconds - clearing a partial directory off an archive
+    /// disk has been measured at 26 to 35 - and in that gap the file is
+    /// neither queued nor running. Anything asking "is there work in
+    /// progress" must count this, or it sees nothing at exactly the wrong time.
+    /// </summary>
+    public bool VodStarting => Volatile.Read(ref _pumping) > 0;
+    private int _pumping;
+
     /// <summary>Streams whose conversion is currently running.</summary>
     private readonly object _progressLock = new();
 
@@ -1951,6 +2005,7 @@ public sealed class FfmpegManager : IDisposable
             // saving only on a successful start would leave it listed on disk
             // for ever, restored and skipped again on every restart.
             var dequeued = false;
+            Interlocked.Increment(ref _pumping);
             try
             {
             while (ActiveVodStreams.Count < EffectiveMaxConcurrentVod && !_vodQueue.IsEmpty)
@@ -2031,6 +2086,7 @@ public sealed class FfmpegManager : IDisposable
             }
             finally
             {
+                Interlocked.Decrement(ref _pumping);
                 // Once per pass, and on every way out of it — including the
                 // stagger's early return — so what is on disk matches what is
                 // actually still owed.

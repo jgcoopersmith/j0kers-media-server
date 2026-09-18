@@ -19,10 +19,17 @@ namespace J0kersMediaServer.Tests;
 /// </summary>
 public class UrlCredentialWarningTests
 {
-    /// The one client with no choice.
+    /// A client with no choice.
     [Fact]
     public void TheEventSourceLinkIsNotWarnedAbout()
         => Assert.False(AuthService.CanSendAHeader("/api/server/session"));
+
+    /// The other one: sendBeacon cannot set a header either, and a dashboard
+    /// signed in with a device key signs its close beacon in the URL. Every
+    /// closed or refreshed tab would otherwise have logged a warning.
+    [Fact]
+    public void TheCloseBeaconIsNotWarnedAbout()
+        => Assert.False(AuthService.CanSendAHeader("/api/server/closing"));
 
     [Fact]
     public void TheExemptionIsCaseInsensitive()

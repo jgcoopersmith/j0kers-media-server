@@ -108,6 +108,20 @@
   v.addEventListener("pause", reportPosition);
   window.addEventListener("pagehide", reportPosition);
 
+  /* Hold the server open while this tab is. It is a page like the dashboard,
+     and it held nothing: the server counts only pages that keep its live link,
+     so closing the dashboard and carrying on watching here stopped the server
+     three seconds later, film and all. Same link, same close beacon naming it.
+     Served from the media port there is no such route - the request is a 404,
+     EventSource gives up on it, and nothing else changes. */
+  let linkId = null;
+  try {
+    new EventSource("/api/server/session").addEventListener("link", e => { linkId = e.data; });
+  } catch (e) { /* no EventSource: the silence watch still covers it */ }
+  window.addEventListener("pagehide", () => {
+    try { navigator.sendBeacon("/api/server/closing", linkId || "bye"); } catch (e) { }
+  });
+
   /* Seek once, when there is enough loaded to seek within. Doing it before
      the media is ready is silently ignored, which is how a resume turns into
      "it started from the beginning again". */

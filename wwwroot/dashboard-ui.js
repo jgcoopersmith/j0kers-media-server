@@ -357,6 +357,11 @@ for (const id of ["acct-overlay", "users-overlay"])
    navigation reopens this without anything here noticing; the server allows
    for that with a grace period before it acts. */
 let liveLink = null;
+/* The id the server gave the link this page holds. Sent back in the close
+   beacon, which is how the server tells the owner closing the page from a
+   laptop going to sleep - the two look identical from the socket. It changes
+   every time the link is remade, which is every twenty seconds. */
+let liveLinkId = null;
 function openLiveLink() {
   if (liveLink) return;
   try {
@@ -366,6 +371,7 @@ function openLiveLink() {
     // never writes to the log.
     liveLink = new EventSource("/api/server/session"
       + (token ? "?token=" + encodeURIComponent(token) : ""));
+    liveLink.addEventListener("link", e => { liveLinkId = e.data; });
   } catch {
     liveLink = null;   // no EventSource: the beacon and the silence watch stand
   }
@@ -377,9 +383,15 @@ function openLiveLink() {
    The body is not decoration. sendBeacon with nothing to send posts without
    a Content-Length, and the Windows HTTP stack answers that with 411 Length
    Required before the server ever sees it. A few bytes give the request a
-   length and it arrives. */
+   length and it arrives - and the few bytes are now the link's id, which
+   makes this close count as the owner's decision rather than a guess.
+
+   Signed in the same way the link was: a cookie goes by itself, and a
+   key/token sign-in rides in the query string, because sendBeacon cannot
+   set headers. An unsigned close is never taken as the owner's. */
 window.addEventListener("pagehide", () => {
-  navigator.sendBeacon("/api/server/closing", "bye");
+  navigator.sendBeacon("/api/server/closing" + (token ? "?token=" + encodeURIComponent(token) : ""),
+                       liveLinkId || "bye");
 });
 
 /* Establish who we are before the first poll, so the page never briefly

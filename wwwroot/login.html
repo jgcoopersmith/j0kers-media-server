@@ -311,11 +311,27 @@ let setup = false;
    exists, so an unlabelled link from here looked like somebody connecting
    from another machine — and that made the server stop counting its own
    dashboard, then shut down while one was open. */
-try { new EventSource("/api/server/session?stage=login"); } catch { }
+/* The link's id, sent back in the close beacon. Nobody is signed in here, so
+   the server only takes this close as the owner's decision when it comes from
+   the window the server opened on its own console (it holds a cookie minted
+   for that launch); from anywhere else it stays a guess, and a guess waits for
+   any conversion in progress to finish rather than killing it. */
+let loginLinkId = null;
+try {
+  new EventSource("/api/server/session?stage=login")
+    .addEventListener("link", e => { loginLinkId = e.data; });
+} catch { }
+
+/* Set just before a successful sign-in moves on to the dashboard. That is
+   this page leaving, not the owner closing anything: the dashboard is about to
+   open its own link. Announcing it as a close made every sign-in look like the
+   owner stopping the server, so a dashboard slower than the grace to open its
+   link stopped the server - conversions and all - on the way in. */
+let signingIn = false;
 
 /* Still sent, for the beat before the socket drops. */
 window.addEventListener("pagehide", () => {
-  try { navigator.sendBeacon("/api/server/closing", "bye"); } catch { }
+  try { navigator.sendBeacon("/api/server/closing", (!signingIn && loginLinkId) || "bye"); } catch { }
 });
 
 /* 👁 reveals what's typed — a password you can't see is a password you
@@ -343,7 +359,7 @@ async function tryRememberedKey() {
       method: "POST",
       headers: { "Authorization": "Bearer " + key, "X-J0kers-CSRF": "1" },
     });
-    if (r.ok) { location.replace("/"); return true; }
+    if (r.ok) { signingIn = true; location.replace("/"); return true; }
     if (r.status === 401) localStorage.removeItem("j0kers-key");
   } catch { /* offline — fall through to the form */ }
   return false;
@@ -406,6 +422,7 @@ $("form").addEventListener("submit", async e => {
     // "remember this device" hands back a key; the dashboard reads it from
     // here on later visits, so this browser never sees this page again
     if (data.key) localStorage.setItem("j0kers-key", data.key);
+    signingIn = true;
     location.replace("/");
   } catch (err) {
     msg.textContent = "could not reach the server: " + err.message;

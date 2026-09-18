@@ -637,8 +637,20 @@ public sealed partial class ControlApi : IDisposable
         // before the guard existed.
         if (!_ffmpeg.Available) return null;
 
-        var active = _ffmpeg.ActiveVodStreams.Count;
+        // Read in the order work moves through them - queued, then starting,
+        // then running - so a job that moves on between two reads is still
+        // seen in the later one. Read the other way round, a file could leave
+        // the queue after "running" was read and finish starting before
+        // "starting" was, and not be counted anywhere.
         var queued = _ffmpeg.VodQueueDepth;
+        var starting = _ffmpeg.VodStarting;
+        var active = _ffmpeg.ActiveVodStreams.Count;
+        // Between the queue giving a file up and its job registering there is
+        // a stretch - tens of seconds when a partial directory has to be
+        // cleared first - where it is neither queued nor running. A shutdown
+        // decision taken in that stretch saw nothing and stopped the server
+        // with the queue's last file half set up.
+        if (active == 0 && queued == 0 && starting) return "a conversion starting";
         return active > 0 || queued > 0
             ? $"{active} conversion(s) running, {queued} queued"
             : null;
@@ -687,12 +699,53 @@ public sealed partial class ControlApi : IDisposable
     /// is the whole reason the notice cannot be gated on the count), so the
     /// sender is in <see cref="_openPages"/>. A stranger is not.
     /// </param>
-    private void MarkPageClosing(string? fromAddress)
+    /// <param name="auth">Who sent it. Only a signed-in close can be the owner's decision.</param>
+    /// <param name="linkId">
+    /// The id of the live link this page is closing, which the server sent it
+    /// when the link opened. Absent from a page too old to know it.
+    /// </param>
+    /// <param name="fromSelfWindow">
+    /// Whether the beacon carried the cookie only the window this server opened
+    /// on its own console holds - a secret minted fresh at every launch. Such a
+    /// close is the owner's even when that window is showing the sign-in page,
+    /// which is where an expired session or a sign-out leaves it.
+    /// </param>
+    private void MarkPageClosing(string? fromAddress, AuthResult auth, string? linkId, bool fromSelfWindow)
     {
         var known = fromAddress is { Length: > 0 }
                     && _openPages.Values.Contains(fromAddress, StringComparer.Ordinal);
         lock (_shutdownLock)
         {
+            // Whether this close was the owner's decision - the one thing
+            // that separates closing the page from a laptop going to sleep,
+            // which look identical from the socket. See the sweep.
+            //
+            // It has to name the link it is closing, and be signed in. A
+            // first version stamped "a close happened" with a time window and
+            // no idea whose, and review found three ways that went wrong: a
+            // different tab's close made a later sleep look like a decision,
+            // a beacon that arrived just after its own socket had gone was
+            // thrown away, and anything on the network could post one. Naming
+            // the link answers all three exactly; signing in answers the last.
+            if (linkId is { Length: 32 } && (auth.Level > AccessLevel.None || fromSelfWindow))
+            {
+                if (_openPages.ContainsKey(linkId))
+                    _announcedLinks[linkId] = 0;          // still open: noted for when it ends
+                else if (linkId == _zeroLink && _zeroSinceUtc is not null)
+                {
+                    // Already gone: it was the last one. The grace starts over
+                    // from here, because a late announcement is not always a
+                    // close. Wake a laptop that has been asleep: the page still
+                    // holds the id of a link the server ended long ago, and
+                    // pressing F5 sends that id on its way out. Without a fresh
+                    // grace the very next tick took it as a decision and ended
+                    // the conversions the server had stayed up for - before the
+                    // refreshed page had a chance to reconnect and cancel it.
+                    _zeroAnnounced = true;
+                    _zeroSinceUtc = DateTime.UtcNow;
+                }
+            }
+
             // The shutdown mark, unchanged: it only means anything when
             // nothing is holding the server open.
             if (PagesHolding() <= 0) _zeroSinceUtc ??= DateTime.UtcNow;
@@ -821,7 +874,22 @@ public sealed partial class ControlApi : IDisposable
                 // out took the return with it for a moment, and
                 // Background_mode_survives_the_last_page_closing failed
                 // immediately, which is exactly what that test is for.
-                if (!_config.ShutdownOnClose) return;
+                //
+                // And while it returns, nothing about a stretch with no pages
+                // is kept. A close recorded now decides nothing, and it used to
+                // be kept anyway: the owner closed their page in background
+                // mode, the server rightly stayed up, and hours later unticking
+                // "Minimize to the system tray" put it into the mode where that
+                // stale close counted. The next tick stopped the server,
+                // killing a conversion in the very window the owner had just
+                // saved the setting from.
+                if (!_config.ShutdownOnClose)
+                {
+                    lock (_shutdownLock) ClearZero();
+                    _saidCloseDeferred = false;
+                    _guessIdleTicks = 0;
+                    return;
+                }
 
                 // The mark is maintained here rather than only where links
                 // begin and end. PagesHolding can change without either
@@ -831,7 +899,9 @@ public sealed partial class ControlApi : IDisposable
                 DateTime? since;
                 if (PagesHolding() > 0)
                 {
-                    lock (_shutdownLock) _zeroSinceUtc = null;
+                    lock (_shutdownLock) ClearZero();
+                    _saidCloseDeferred = false;
+                    _guessIdleTicks = 0;
                     return;
                 }
                 lock (_shutdownLock)
@@ -878,11 +948,74 @@ public sealed partial class ControlApi : IDisposable
                 // and guessing wrong must not end an overnight run. Deciding
                 // is what happens here; guessing is what happens there.
 
+                // Deciding, or guessing?
+                //
+                // Everything above was written for the first: the owner closed
+                // the page, and nothing this server is doing outranks that. But
+                // the sweep cannot tell that apart from a laptop going to sleep,
+                // a phone being locked, or the network dropping. The server ends
+                // every live link itself after LinkLifetime and counts a page as
+                // present only if it comes back within the grace - and a
+                // suspended browser cannot come back. So a closed lid arrived
+                // here as a decision, and ended every conversion in flight about
+                // three seconds after the page went quiet. The silence watch,
+                // which exists precisely for that case and guards it, waits
+                // thirty seconds, and never got the chance.
+                //
+                // The difference is whether the page said so. A closing tab
+                // sends the pagehide beacon on its way out; a sleeping one sends
+                // nothing. The beacon names its link, and the link that brought
+                // the count to zero knows whether it was announced (see the
+                // live-link handler and MarkPageClosing). That is a decision.
+                // Anything else is a guess, and a guess gets the silence path's
+                // guard: work in progress keeps the server up, and the stop
+                // comes once that work is done.
+                //
+                // Only work in progress changes anything. With nothing running,
+                // a guess and a decision end the same way, as they always did.
+                //
+                // One honest gap remains, and no design here can close it: a
+                // browser that closes without sending the beacon at all is
+                // indistinguishable from one that went to sleep. That case now
+                // waits for its work instead of killing it - which is the right
+                // way round to be wrong, and what the log line below says.
+                bool announced;
                 lock (_shutdownLock)
                 {
                     if (_zeroSinceUtc is null) return;   // something reconnected
-                    _zeroSinceUtc = null;
+                    announced = _zeroAnnounced;
                 }
+                if (!announced)
+                {
+                    if (SilenceShutdownBlockedBy() is string busy)
+                    {
+                        _guessIdleTicks = 0;
+                        if (!_saidCloseDeferred)
+                        {
+                            _saidCloseDeferred = true;
+                            Log.Info("control", $"no page has been open for {CloseGraceMs / 1000}s, but none was closed - "
+                                                + $"staying up while {busy} (a sleeping laptop, a locked phone or a "
+                                                + "dropped network looks like this); it stops once that is done");
+                        }
+                        return;
+                    }
+                    // Nothing running - but only believe it twice in a row.
+                    // Between one conversion ending and the queue's next one
+                    // registering there is a moment when nothing is counted,
+                    // and a single look at that moment stopped the server with
+                    // the queue's last file half set up.
+                    if (++_guessIdleTicks < 2) return;
+                }
+
+                lock (_shutdownLock)
+                {
+                    if (_zeroSinceUtc is null) return;   // something reconnected
+                    ClearZero();
+                }
+                if (_saidCloseDeferred)
+                    Log.Info("control", announced
+                        ? "the page it had been waiting on was closed by its owner - shutting down"
+                        : "the work it stayed up for is done, and no page came back - shutting down");
                 _linkSweepTimer?.Dispose();
                 _linkSweepTimer = null;
                 // Say what the stop cost, where it cost anything. The stop is
@@ -1004,7 +1137,7 @@ public sealed partial class ControlApi : IDisposable
     /// still there. That distinction is why the silence watch had to wait
     /// thirty seconds and then second-guess itself.
     /// </summary>
-    private async Task ServeDashboardSession(HttpListenerContext ctx)
+    private async Task ServeDashboardSession(HttpListenerContext ctx, AuthResult auth)
     {
         var res = ctx.Response;
         res.StatusCode = 200;
@@ -1014,10 +1147,6 @@ public sealed partial class ControlApi : IDisposable
         res.SendChunked = true;
 
         var open = Interlocked.Increment(ref _liveDashboards);
-        // A browser that can open a link is a browser that exists. This is the
-        // only proof of life the server accepts now, and unlike a successful
-        // write it cannot be produced by a socket nobody is holding.
-        lock (_shutdownLock) _zeroSinceUtc = null;
         _lastSeenUtc = DateTime.UtcNow;
         // Who is holding it, so the log can name them when a close does not
         // stop the server. A page on another machine keeping it alive is
@@ -1050,8 +1179,36 @@ public sealed partial class ControlApi : IDisposable
         // another machine, where the window on its own console belongs to
         // nobody. A sign-in page on the way to that very window is the
         // opposite of that, and says nothing about anyone being elsewhere.
-        else if (!IsSignInPage(ctx)) _elsewhereSeen = true;
-        _sawDashboard = true;
+        // Only somebody signed in - or the server's own window, which holds a
+        // secret minted for this launch - is "somebody else" or a dashboard.
+        //
+        // This route is outside the auth gate so the sign-in page can hold the
+        // server open, and anything on the network could open it: curl sends
+        // no Origin and no Sec-Fetch-Site, so the cross-site check lets it
+        // through. It used to count fully. Opening one armed close-shutdown on
+        // a server nobody was using, and marked "somebody else has been" for
+        // good - after which the owner's own window stopped counting, so
+        // dropping the stranger's socket stopped the server under them.
+        //
+        // An anonymous link still holds the server open while it lasts. That
+        // is the harmless direction; deciding anything is not.
+        var signedIn = auth.Level > AccessLevel.None || isSelf;
+        if (!isSelf && signedIn && !IsSignInPage(ctx)) _elsewhereSeen = true;
+        // A browser that can open a link is a browser that exists. This is the
+        // only proof of life the server accepts now, and unlike a successful
+        // write it cannot be produced by a socket nobody is holding.
+        //
+        // But only a link that COUNTS ends a stretch with no pages - worked
+        // out after isSelf and _elsewhereSeen, by the rule PagesHolding uses.
+        // The server's own window, once somebody else has been, holds nothing
+        // open; its link rotating every twenty seconds used to clear the zero
+        // mark anyway, and with it an announced close that had just been
+        // recorded, so the owner closing their page read as a guess about a
+        // fifth of the time. The sweep still clears the mark whenever a page
+        // that counts is present.
+        if (!isSelf || !_elsewhereSeen)
+            lock (_shutdownLock) ClearZero();
+        if (signedIn) _sawDashboard = true;
         NoteActivity();
         Log.Info("control", $"page opened from {_openPages[holder]}"
                             + (isSelf ? " (the window this server opened for itself)" : "")
@@ -1089,6 +1246,11 @@ public sealed partial class ControlApi : IDisposable
         try
         {
             await res.OutputStream.WriteAsync(hello, tok);
+            // This link's name, so the page can say which link it is closing
+            // when it goes - see MarkPageClosing. Random, and only ever sent to
+            // the page holding the link, so nobody else can speak for it.
+            await res.OutputStream.WriteAsync(
+                System.Text.Encoding.ASCII.GetBytes($"event: link\ndata: {holder}\n\n"), tok);
             await res.OutputStream.FlushAsync(tok);
             while (!tok.IsCancellationRequested)
             {
@@ -1103,20 +1265,42 @@ public sealed partial class ControlApi : IDisposable
         }
         finally
         {
+            // Whether this link was one of the pages holding the server open,
+            // judged before it goes - by the same rule PagesHolding uses. The
+            // server's own window stops counting once somebody else has been,
+            // and a link that was not counted must never become the link
+            // that "brought the count to zero": refreshing that window while
+            // the server waits out a sleeping laptop would otherwise read as
+            // the owner deciding to stop.
+            var counted = !isSelf || !_elsewhereSeen;
             var left = Interlocked.Decrement(ref _liveDashboards);
             if (isSelf) Interlocked.Decrement(ref _liveSelfPages);
-            _openPages.TryRemove(holder, out _);
-            var holding = PagesHolding();
-            // Note the moment the last one went, and let the sweep below
-            // decide. Deciding here cannot work any more: a link that ends
-            // because its lifetime ran out looks exactly like one that ended
-            // because the browser closed, and the difference is only knowable
-            // a moment later, by whether anything reconnected.
-            if (holding <= 0 && !_cts.IsCancellationRequested)
+            int holding;
+            // One lock section for all of it, the one MarkPageClosing takes.
+            // A beacon naming this link then lands either before it is removed
+            // (noted in _announcedLinks) or after the zero is recorded
+            // (matched through _zeroLink) - never in a gap between the two,
+            // which is where the first version of this, in two sections, let
+            // a late beacon fall through and the owner's close be lost.
+            //
+            // Note the moment the last one went, and let the sweep decide.
+            // Deciding here cannot work any more: a link that ends because its
+            // lifetime ran out looks exactly like one that ended because the
+            // browser closed, and the difference is only knowable a moment
+            // later, by whether anything reconnected.
+            lock (_shutdownLock)
             {
-                lock (_shutdownLock)
+                _openPages.TryRemove(holder, out _);
+                var announcedThis = _announcedLinks.TryRemove(holder, out _);
+                holding = PagesHolding();
+                if (holding <= 0 && !_cts.IsCancellationRequested)
                 {
                     _zeroSinceUtc ??= DateTime.UtcNow;
+                    if (counted)
+                    {
+                        _zeroLink = holder;
+                        _zeroAnnounced = announcedThis;
+                    }
                     // The reliable half of the close signal. The beacon is
                     // earlier but this file has already caught it not arriving
                     // at all; a link ending always happens. Rotation makes it
@@ -1126,7 +1310,7 @@ public sealed partial class ControlApi : IDisposable
                     ArmClosedNotice();
                 }
             }
-            else if (!_cts.IsCancellationRequested)
+            if (holding > 0 && !_cts.IsCancellationRequested)
             {
                 // The line that was missing, and it cost a day.
                 //
@@ -1156,6 +1340,35 @@ public sealed partial class ControlApi : IDisposable
     /// a machine that is busy.
     /// </summary>
     private const int CloseGraceMs = 3000;
+
+    /// <summary>
+    /// Live links whose page has announced, signed in, that it is closing -
+    /// noted while the link is still open, and consumed when it ends.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _announcedLinks = new();
+
+    /// <summary>
+    /// The link whose ending brought the count of holding pages to zero, and
+    /// whether that ending was announced. Together these are the difference
+    /// between the owner closing the page and a browser going quiet. Guarded
+    /// by <see cref="_shutdownLock"/>, as <see cref="_zeroSinceUtc"/> is.
+    /// </summary>
+    private string? _zeroLink;
+    private bool _zeroAnnounced;
+
+    /// <summary>A page is back, or the stretch with none is over. Caller holds <see cref="_shutdownLock"/>.</summary>
+    private void ClearZero()
+    {
+        _zeroSinceUtc = null;
+        _zeroLink = null;
+        _zeroAnnounced = false;
+    }
+
+    /// <summary>Whether the "staying up, nobody closed it" line has been said for this stretch.</summary>
+    private bool _saidCloseDeferred;
+
+    /// <summary>Consecutive sweep ticks that saw nothing running while guessing; see the sweep.</summary>
+    private int _guessIdleTicks;
 
     /// <summary>
     /// How long one live link is allowed to last before the server closes it
@@ -1414,7 +1627,7 @@ public sealed partial class ControlApi : IDisposable
     /// filesystem picker those need to name a path. Read is everything
     /// left — listing and watching, which any signed-in account may do.
     /// </summary>
-    private static AccessLevel RequiredLevel(string method, string path)
+    internal static AccessLevel RequiredLevel(string method, string path)
     {
         // accounts are the administrator's alone, including creating them
         if (path.StartsWith("/api/users", StringComparison.Ordinal)) return AccessLevel.Admin;
@@ -1469,6 +1682,26 @@ public sealed partial class ControlApi : IDisposable
             // stop recording where anyone had got to.
             case "/api/history":
             case "/api/history/position":
+            // Playing a library file. It starts a conversion when the file
+            // needs one, which is how a read account watches anything that is
+            // not already browser-playable - so it is watching, not editing.
+            //
+            // Safe at Read because PlayFile bounds it in two ways, and it took
+            // both. DenyUnshared confines a viewer to what has been shared -
+            // WHICH files. That alone does not bound HOW MUCH: every
+            // respelling of a path was its own conversion, and interactive
+            // plays had no ceiling at all. A first version of this fix said
+            // DenyUnshared was enough, and review showed a read account could
+            // then start encodes without limit. See SharedSpelling and the
+            // viewer ceiling in PlayFile.
+            //
+            // This was never meant to be anything else: it fell through to
+            // Read until the fall-through was made to refuse unclassified
+            // writes, and then it silently became Admin-only. Every read and
+            // edit account lost library playback with a 403, and nothing
+            // noticed, because nothing listed it. AccessLevelTests now lists
+            // every write route, so the next one cannot go the same way.
+            case "/api/play":
             // An account's own dashboard settings. Read, because every
             // signed-in account has them and they are nobody else's
             // business - the handlers below only ever touch the caller's.
@@ -1553,19 +1786,94 @@ public sealed partial class ControlApi : IDisposable
     /// </summary>
     private bool IsShared(string full)
     {
-        static bool Under(string root, string candidate)
-        {
-            if (root.Length == 0) return false;
-            var r = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
-            return candidate.Equals(r, StringComparison.OrdinalIgnoreCase)
-                || candidate.StartsWith(r + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
-        }
-
         var target = Path.TrimEndingDirectorySeparator(full);
-        return _library.All.Any(f => Under(f, target))
-            || _favorites.All.Any(f => Under(f.Path, target))
-            || _playlists.All.Any(p => Under(p.Folder, target));
+        return _library.All.Any(f => IsUnder(f, target))
+            || _favorites.All.Any(f => IsUnder(f.Path, target))
+            || _playlists.All.Any(p => IsUnder(p.Folder, target));
     }
+
+    /// <summary>
+    /// Whether <paramref name="candidate"/> is <paramref name="root"/> or inside it.
+    ///
+    /// The separator is added only when the root does not already end in one.
+    /// It always used to be added, and TrimEndingDirectorySeparator never trims
+    /// a root, so a library folder that was a whole drive - "D:\" - was tested
+    /// as "D:\\", which no path starts with. A read account was refused every
+    /// file on it while the folder listing showed them all.
+    /// </summary>
+    internal static bool IsUnder(string root, string candidate)
+    {
+        if (root.Length == 0) return false;
+        var r = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        if (candidate.Equals(r, StringComparison.OrdinalIgnoreCase)) return true;
+        var prefix = Path.EndsInDirectorySeparator(r) ? r : r + Path.DirectorySeparatorChar;
+        return candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// A shared path, spelled the way the library itself spells it: the
+    /// library folder (or favorite, or playlist folder) exactly as it was
+    /// added, and every name below it as it is on disk.
+    ///
+    /// A conversion is named by a hash of the path as given, and the sharing
+    /// check ignores case - so every respelling of one film passed the check
+    /// and hashed to a different conversion. "D:\Media\Film.mkv",
+    /// "d:\mediailm.mkv", "D:\MEDIA\FILM.MKV": each a fresh encode and a
+    /// full copy on disk, and a ten-letter path has a thousand spellings.
+    ///
+    /// The result is exactly what the library listing hands a viewer, so what
+    /// a viewer normally plays is unchanged, conversions already made keep
+    /// their names, and only the respellings collapse. Used for viewer
+    /// accounts only: Edit and above name paths anywhere on the machine, and
+    /// changing how their paths are spelled would rename conversions they
+    /// already have.
+    /// </summary>
+    private string SharedSpelling(string full)
+    {
+        string? root = null;
+        foreach (var candidate in _library.All
+                     .Concat(_favorites.All.Select(f => f.Path))
+                     .Concat(_playlists.All.Select(p => p.Folder)))
+        {
+            if (candidate.Length == 0 || !IsUnder(candidate, full)) continue;
+            var r = Path.TrimEndingDirectorySeparator(Path.GetFullPath(candidate));
+            if (root is null || r.Length > root.Length) root = r;   // the most specific one
+        }
+        if (root is null) return full;
+
+        var built = root;
+        var rest = full.Length > root.Length ? full[root.Length..] : "";
+        var onDisk = true;
+        foreach (var segment in rest.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+        {
+            string? name = null;
+            // A segment the enumeration would read as a search pattern is
+            // taken literally instead - it can only be a real name on a
+            // system where these characters are allowed in one.
+            if (onDisk && segment.IndexOfAny(['*', '?']) >= 0) onDisk = false;
+            if (onDisk)
+            {
+                try
+                {
+                    // The exact name when there is one. A folder made case
+                    // sensitive (from WSL, say) can hold Film.mkv and film.mkv
+                    // side by side, and the case-insensitive match is only for
+                    // collapsing respellings of a name that exists once.
+                    var matches = new DirectoryInfo(built).EnumerateFileSystemInfos(segment).Select(e => e.Name).ToList();
+                    name = matches.FirstOrDefault(n => n == segment) ?? matches.FirstOrDefault();
+                }
+                catch { /* unreadable: keep the caller's spelling from here on */ }
+            }
+            onDisk = name is not null;
+            built = Path.Combine(built, name ?? segment);
+        }
+        return built;
+    }
+
+    private readonly object _viewerCapLock = new();
+
+    /// <summary>Conversions a viewer account started that may still be running; see PlayFile.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _viewerConversions = new();
 
     /// <summary>Refuses a read-only account's request for a path outside the shared library.</summary>
     private bool DenyUnshared(HttpListenerContext ctx, AuthResult auth, string full)
@@ -1843,7 +2151,7 @@ public sealed partial class ControlApi : IDisposable
             if (method == "GET" && path == "/api/server/session")
             {
                 if (IsCrossSite(ctx)) { res.StatusCode = 403; res.Close(); return; }
-                await ServeDashboardSession(ctx);
+                await ServeDashboardSession(ctx, auth);
                 return;
             }
 
@@ -1862,7 +2170,19 @@ public sealed partial class ControlApi : IDisposable
                 // the beacon as well — a third mechanism disabled by the same
                 // stale entry. Marking zero is the sweep's job; all this has
                 // to do is be heard.
-                MarkPageClosing(ctx.Request.RemoteEndPoint?.Address.ToString());
+                // The body is the id of the link the page is closing, or "bye"
+                // from a page too old to know it. Read defensively: this route
+                // is open to anyone, so nothing longer than an id is looked at.
+                string? linkId = null;
+                try
+                {
+                    var said = ReadBody(ctx).Trim();
+                    if (said.Length == 32 && said.All(Uri.IsHexDigit)) linkId = said.ToLowerInvariant();
+                }
+                catch { /* an unreadable beacon still marks the moment */ }
+                var fromSelfWindow = _selfOpenToken is { Length: > 0 } self
+                                     && ctx.Request.Cookies[SelfPageCookie]?.Value == self;
+                MarkPageClosing(ctx.Request.RemoteEndPoint?.Address.ToString(), auth, linkId, fromSelfWindow);
                 WriteJson(res, 200, new { noted = true });
                 return;
             }
@@ -1898,7 +2218,13 @@ public sealed partial class ControlApi : IDisposable
             // up. Only the last page leaving counts, so shutting one of two
             // tabs is not a close.
 
-            if (method == "GET" && path == "/api/status") { _sawDashboard = true; NoteActivity(); }
+            // Not _sawDashboard. A status check is what a health probe, a
+            // script and the dashboard's poll all send, and only the last is a
+            // page. Counting it armed close-shutdown on a server nobody had
+            // opened, found no page holding it, and stopped it three seconds
+            // later - a monitoring probe could take a headless server down.
+            // The live link is the page's own signal, and it alone arms that.
+            if (method == "GET" && path == "/api/status") NoteActivity();
 
             // Everything past this point is a plain route. The table maps
             // one exact method-and-path pair to the code that answers it,
@@ -1962,6 +2288,16 @@ public sealed partial class ControlApi : IDisposable
     /// </summary>
     private static Route Sync(Action<ControlApi, HttpListenerContext, AuthResult> handler) =>
         (api, ctx, auth) => { handler(api, ctx, auth); return Task.CompletedTask; };
+
+    /// <summary>
+    /// Every dispatched route, for the test that checks each one is classified
+    /// in <see cref="RequiredLevel"/> on purpose rather than by the
+    /// fall-through. Prefix routes are included, spelled with their trailing
+    /// "/": they reach the same fall-through, and a new one would fail closed
+    /// exactly as POST /api/play did.
+    /// </summary>
+    internal static IEnumerable<(string Method, string Path)> RouteKeys =>
+        Routes.Keys.Concat(PrefixRoutes.Select(p => (p.Method, p.Prefix)));
 
     /// <summary>
     /// Every route that is one exact method and path, with the code that
@@ -2334,6 +2670,16 @@ public sealed partial class ControlApi : IDisposable
         var res = ctx.Response;
         var stream = ctx.Request.QueryString["stream"];
         var scope = string.IsNullOrWhiteSpace(stream) ? Auth.MediaLink.AllStreams : stream.Trim();
+        // No stream name contains a control character, and a newline in a
+        // scope is exactly what the proxy-signature forgery needed (see
+        // MediaLink.Signature). The signing change alone closes that; this
+        // refuses the shape of the attack outright, so a future change to the
+        // signing cannot quietly reopen it.
+        if (scope.Any(char.IsControl))
+        {
+            BadRequest(res, "a stream name cannot contain control characters");
+            return;
+        }
         var hours = _serverConfig.Hls.LinkLifetimeHours;
         var minted = _mediaLinks.Sign(scope, TimeSpan.FromHours(hours));
         // also split out, because JSON escapes the '&' in `token`
@@ -3784,6 +4130,31 @@ public sealed partial class ControlApi : IDisposable
             }
             if (DenyUnshared(ctx, auth, file)) return;
 
+            // A viewer account - below Edit - can start conversions now, and
+            // two things about that were unbounded while only an administrator
+            // could: see SharedSpelling and the ceiling below.
+            var viewer = auth.Level < AccessLevel.Edit;
+            if (viewer)
+            {
+                // Two spellings that name a file without being its name: a
+                // wildcard, which the lookup below would read as a search and
+                // resolve to whatever sibling matched first, and an alternate
+                // data stream ("Film.mkv::$DATA"), which is the same bytes
+                // under a name that hashes to a separate conversion. A viewer
+                // has no use for either - the library hands them real paths.
+                //
+                // Windows only: there, neither can appear in a real file name.
+                // On Linux and macOS ':' '*' and '?' are all legal in names,
+                // and refusing them there would refuse real library files.
+                var afterDrive = file.Length > 2 ? file[2..] : file;
+                if (OperatingSystem.IsWindows() && (file.IndexOfAny(['*', '?']) >= 0 || afterDrive.Contains(':')))
+                {
+                    BadRequest(res, "that is not the name of a file in the library");
+                    return;
+                }
+                file = SharedSpelling(file);
+            }
+
             // Already playable, at the resolution asked for: hand it over
             // rather than converting it. This is the whole point — a file in a
             // container and codecs a player opens is *finished*, and encoding
@@ -3802,7 +4173,53 @@ public sealed partial class ControlApi : IDisposable
                 return;
             }
 
-            var (stream, ready) = _ffmpeg.StartVod(file, height);
+            // How many conversions a viewer account can have running at once.
+            //
+            // The batch queue runs "how many at a time" and no more, but an
+            // interactive play went straight to ffmpeg with no limit at all -
+            // harmless while only an administrator could start one, and a way
+            // for any read account to start as many full encodes as it liked
+            // once it could. So viewers share the same ceiling the queue uses.
+            // Anything already running or already finished still plays: the
+            // ceiling is on starting new work, never on watching.
+            //
+            // Held across StartVod so two requests cannot both see room for one.
+            string stream;
+            bool ready;
+            if (viewer)
+            {
+                lock (_viewerCapLock)
+                {
+                    var active = _ffmpeg.ActiveVodStreams;
+                    foreach (var k in _viewerConversions.Keys)
+                        if (!active.Contains(k)) _viewerConversions.TryRemove(k, out _);
+                    var name = _ffmpeg.VodStreamName(file, height);
+                    // Running, or finished - never merely "has a playlist". A
+                    // conversion stopped part way has one, and StartVod clears
+                    // it and encodes from the top, so counting it as existing
+                    // let a viewer start encodes past the ceiling by replaying
+                    // the partials any stop leaves behind.
+                    var existing = name is not null && (active.Contains(name) || _ffmpeg.IsVodComplete(name));
+                    var ceiling = Math.Max(1, _ffmpeg.MaxConcurrentVod);
+                    if (!existing && _viewerConversions.Count >= ceiling)
+                    {
+                        Log.Info("control", $"{auth.Name} asked for another conversion with {_viewerConversions.Count} of "
+                                            + $"theirs running (ceiling {ceiling}) - refused: {Path.GetFileName(file)}");
+                        WriteJson(res, 429, new
+                        {
+                            error = $"{_viewerConversions.Count} conversions are already running for viewer accounts - "
+                                  + "try again when one of them finishes",
+                        });
+                        return;
+                    }
+                    (stream, ready) = _ffmpeg.StartVod(file, height, requeueOnGpuRefusal: false);
+                    if (!ready) _viewerConversions[stream] = 0;
+                }
+            }
+            else
+            {
+                (stream, ready) = _ffmpeg.StartVod(file, height);
+            }
             // Playing it is what re-links it. An unlinked conversion is still
             // on disk, so asking for this media again brings the row back
             // with the work already done — no separate "restore" to find.

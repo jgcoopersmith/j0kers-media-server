@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -292,6 +292,12 @@ public sealed class AuthService
     private static readonly HashSet<string> HeaderlessClients = new(StringComparer.OrdinalIgnoreCase)
     {
         "/api/server/session",
+        // The close beacon, for the same reason: sendBeacon cannot set a
+        // header, so a dashboard signed in with a device key has to put the
+        // key in the URL to sign its close - which is what makes that close
+        // count as the owner's decision. Without this, every closed or
+        // refreshed tab tripped the "credentials are arriving in URLs" warning.
+        "/api/server/closing",
     };
 
     /// <summary>Whether a caller on this path had the option of a header.</summary>
