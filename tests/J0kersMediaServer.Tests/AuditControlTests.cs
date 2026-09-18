@@ -7,6 +7,7 @@ using J0kersMediaServer.Auth;
 using J0kersMediaServer.Config;
 using J0kersMediaServer.Control;
 using J0kersMediaServer.Discovery;
+using J0kersMediaServer.Logging;
 using Xunit;
 using Page = J0kersMediaServer.Tests.ShutdownOnCloseTests.Page;
 using TestServer = J0kersMediaServer.Tests.ShutdownOnCloseTests.TestServer;
@@ -205,6 +206,66 @@ public class AuditControlTests
         again.Dispose();
         await Task.Delay(5000);
         Assert.True(server.Notices == 1, $"the owner closing their dashboard raised {server.Notices} notice(s), not one");
+    }
+
+    /// <summary>
+    /// The live link is remade every twenty seconds on purpose (LinkLifetime),
+    /// and every remake wrote "page opened" - and, with another page open, "a
+    /// page closed, but ... still open" - so a dashboard left open filled the
+    /// log with them: 4,212 of one day's 4,217 lines. A page is announced once
+    /// when it opens, and once when it has really gone; remakes say nothing.
+    /// Two tabs are emulated the way a browser holds them: open a link, let
+    /// the server end it, open the next.
+    /// </summary>
+    [Fact]
+    public async Task A_link_remade_on_its_timer_is_not_logged_as_a_page_opening_or_closing()
+    {
+        using var server = await InProcessServer.Start(backgroundMode: true);
+        var owner = await server.ClaimAndSignIn();
+        server.Api.LinkLifetime = TimeSpan.FromSeconds(1);
+
+        async Task Tab(CancellationToken closed)
+        {
+            while (!closed.IsCancellationRequested)
+            {
+                var link = await Page.Open(server.Port, owner);
+                try { await Task.Delay(1300, closed); }       // the server ends it at 1 s
+                catch (OperationCanceledException) { }
+                finally { link.Dispose(); }
+                if (!closed.IsCancellationRequested) await Task.Delay(300);   // the browser's retry, and margin
+            }
+        }
+        List<string> ControlLines(long since)
+        {
+            var (entries, _, missed) = Log.Since(since);
+            Assert.False(missed, "the log ring wrapped during the test");
+            return entries.Where(e => e.Area == "control").Select(e => e.Message).ToList();
+        }
+
+        var start = Log.Since(0, 1).Last;
+        using var closeA = new CancellationTokenSource();
+        using var closeB = new CancellationTokenSource();
+        var a = Tab(closeA.Token);
+        var b = Tab(closeB.Token);
+        await Task.Delay(6000);                             // about four remakes each
+
+        var both = ControlLines(start);
+        var opened = both.Count(m => m.StartsWith("page opened", StringComparison.Ordinal));
+        var closedWhileBoth = both.Count(m => m.Contains("closed, but", StringComparison.Ordinal));
+        Assert.True(opened == 2 && closedWhileBoth == 0,
+                    $"two tabs open for six seconds, their links remade about every 1.6 s, logged {opened} "
+                    + $"'page opened' and {closedWhileBoth} 'a page closed' line(s) - it should be 2 and 0");
+
+        // tab A really closes; B carries on
+        var mid = Log.Since(0, 1).Last;
+        closeA.Cancel();
+        await a;
+        await Task.Delay(8000);                             // past RemadeWithin, with B turning over
+        var closes = ControlLines(mid).Count(m => m.Contains("closed, but", StringComparison.Ordinal));
+        Assert.True(closes == 1, $"a tab that closed while another stayed open was logged as closing {closes} time(s), not once");
+
+        closeB.Cancel();
+        await b;
     }
 
     /// <summary>

@@ -3787,3 +3787,46 @@ queue, and the DLNA port and media root staying put until a restart.
   under way, and the logon entry started the installed server again (v2.0.312).
 
 474 tests pass (369 before this work).
+
+---
+
+## v2.0.314 — the dashboard link no longer fills the log
+
+The owner asked why the log showed "page opened" about every 20 seconds. By
+design: the server ends each dashboard's live link after 20 seconds
+(`LinkLifetime`) and the page opens another half a second later. That is how a
+closed browser is told from a socket that never reports closing — a closed
+browser cannot reconnect. The connection behaviour is unchanged.
+
+What changed is what is written about it. Every remake logged "page opened", and,
+with a second page open, "a page closed, but … still open" as well. With the
+dashboard left open that was nearly the whole log: on 2026-09-17, 4,212 of 4,217
+lines. This install logs at `trace`, so lowering the line's level would not have
+quieted it.
+
+- A new link from the same client (address, and whether it is the server's own
+  window or the sign-in page) within 5 seconds of that client's last link ending
+  is the same page, remade: nothing is logged.
+- A page opening is logged once, as before.
+- A page that has gone — its link ended and nothing remade it within 5 seconds —
+  is logged as "a page from … closed, but N still open — staying up. Still held
+  from: …", when other pages remain. The old line said this on every remake, so it
+  never really meant a page had closed. When none remain, closing is the sweep's to
+  report, as before.
+- Only the log changed: nothing that decides whether the server stays up or shuts
+  down reads this.
+- The comment that said the design "costs one request a minute per open page" is
+  corrected: three a minute.
+
+**Proved** with two tabs emulated against a server running in the test process,
+their links remade about every 1.6 s (the lifetime shortened to 1 s for the
+test), then one tab closed. Red, with every link logged as before: 8 "page
+opened" lines for 2 tabs in 6 seconds. Red, with a remake taking the *oldest*
+recorded end (the first draft of this change): the tab that closed was never
+reported, because the other tab's turnover kept its record fresh. Green: 2
+opened, 0 closed while both were open, 1 closed after one tab went. Passed three
+runs of three alone, and in the full suite.
+
+Live system: read only — the live log (counted) and settings.json (the log level).
+
+475 tests pass (474 before this change).

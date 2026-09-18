@@ -1298,9 +1298,13 @@ public sealed partial class ControlApi : IDisposable
             lock (_shutdownLock) ClearZero();
         if (signedIn) _sawDashboard = true;
         NoteActivity();
-        Log.Info("control", $"page opened from {_openPages[holder]}"
-                            + (isSelf ? " (the window this server opened for itself)" : "")
-                            + $" ({open} now open, {PagesHolding()} holding)");
+        // Said once per page, not once per link: a link remade on its timer
+        // (see LinkLifetime) is the same page still there. See IsRemade.
+        var client = LinkClient(_openPages[holder], isSelf, IsSignInPage(ctx));
+        if (!IsRemade(client))
+            Log.Info("control", $"page opened from {_openPages[holder]}"
+                                + (isSelf ? " (the window this server opened for itself)" : "")
+                                + $" ({open} now open, {PagesHolding()} holding)");
 
         // "retry" is what the browser waits before reopening. Half a second,
         // which matters more than it looks: this link is deliberately closed
@@ -1361,7 +1365,7 @@ public sealed partial class ControlApi : IDisposable
             // the server waits out a sleeping laptop would otherwise read as
             // the owner deciding to stop.
             var counted = !isSelf || !_elsewhereSeen;
-            var left = Interlocked.Decrement(ref _liveDashboards);
+            Interlocked.Decrement(ref _liveDashboards);
             if (isSelf) Interlocked.Decrement(ref _liveSelfPages);
             int holding;
             // One lock section for all of it, the one MarkPageClosing takes.
@@ -1408,20 +1412,13 @@ public sealed partial class ControlApi : IDisposable
                     if (signedIn) ArmClosedNotice();
                 }
             }
-            if (holding > 0 && !_cts.IsCancellationRequested)
-            {
-                // The line that was missing, and it cost a day.
-                //
-                // A page closing while others are still open is correct and
-                // does nothing — but at DEBUG it said nothing either, so a
-                // server that would not stop looked like a broken shutdown
-                // rather than what it was: a forgotten tab somewhere else on
-                // the network, on another machine, quietly holding it open.
-                // The client address is here because "which page" is the only
-                // useful thing to know at that point.
-                Log.Info("control", $"a page closed, but {left} still open — staying up. " +
-                                    $"Still held from: {string.Join(", ", OpenPageClients())}");
-            }
+            // The line that was missing once, and it cost a day: a page closing
+            // while others are still open is correct and does nothing, and
+            // saying nothing made a server that would not stop look like a
+            // broken shutdown rather than what it was - a forgotten tab on
+            // another machine quietly holding it open. It is said when the
+            // page has gone, not when a link ends: see ReportPagesGone.
+            NoteLinkEnded(client);
         }
     }
 
@@ -1490,12 +1487,100 @@ public sealed partial class ControlApi : IDisposable
     /// So liveness is no longer something the server tells itself. The link is
     /// closed on a timer and a living browser proves it is living by opening
     /// another — which a closed one cannot do, whatever the socket says. It
-    /// costs one request a minute per open page.
-    /// </summary>
+    /// costs three requests a minute per open page (a link every twenty
+    /// seconds, remade half a second later). None of them is logged: see
+    /// IsRemade.
+    ///
     /// Deliberately well inside DashboardGoneAfter below: every reconnect is
     /// also what refreshes the timestamp that watch reads, so a link must be
     /// remade comfortably before that watch would give up on the page.
-    private static readonly TimeSpan LinkLifetime = TimeSpan.FromSeconds(20);
+    /// Settable so a test need not wait twenty seconds for each remake.
+    /// </summary>
+    internal TimeSpan LinkLifetime { get; set; } = TimeSpan.FromSeconds(20);
+
+    /// <summary>
+    /// How soon a new link from the same client counts as its last one,
+    /// remade on the timer, rather than a page opening. The browser waits half
+    /// a second before reconnecting (the "retry" each link starts with).
+    /// </summary>
+    private static readonly TimeSpan RemadeWithin = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// When each client's links ended lately, in order - so a link remade
+    /// on the timer is not announced as a page opening, and a page that really
+    /// went is announced as closing. Only the log reads this; nothing about
+    /// shutting down does. Guarded by itself.
+    /// </summary>
+    private readonly Dictionary<string, List<DateTime>> _linkEnds = new(StringComparer.Ordinal);
+
+    /// <summary>Who holds a link, for _linkEnds: the address, and which kind of page it is.</summary>
+    private static string LinkClient(string address, bool isSelf, bool signInPage) =>
+        address + (isSelf ? "|own window" : "") + (signInPage ? "|sign-in" : "");
+
+    /// <summary>A link of this client's ended. See _linkEnds.</summary>
+    private void NoteLinkEnded(string client)
+    {
+        lock (_linkEnds)
+        {
+            if (!_linkEnds.TryGetValue(client, out var ends)) _linkEnds[client] = ends = new List<DateTime>();
+            ends.Add(DateTime.UtcNow);
+        }
+        ReportPagesGone();
+    }
+
+    /// <summary>
+    /// Whether a link just opened is one this client had a moment ago, remade
+    /// on the timer. Every link used to write "page opened" when it opened -
+    /// three lines a minute for every open page, day and night, and on a
+    /// server whose dashboard stays open that was very nearly the whole log
+    /// (4,212 of one day's 4,217 lines), burying everything else in it.
+    /// </summary>
+    private bool IsRemade(string client)
+    {
+        ReportPagesGone();
+        lock (_linkEnds)
+        {
+            if (!_linkEnds.TryGetValue(client, out var ends) || ends.Count == 0) return false;
+            // The newest. Two tabs from one address share a client, and taking
+            // the oldest let one tab's turnover stand in for another tab that
+            // had closed: the closed tab's end kept being taken, a fresh end
+            // took its place, and nothing ever went stale to be reported.
+            ends.RemoveAt(ends.Count - 1);
+            if (ends.Count == 0) _linkEnds.Remove(client);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Says which pages have gone: a link that ended and was not remade within
+    /// RemadeWithin. Asked whenever a link opens or ends, so with other pages
+    /// open - whose links keep turning over - it is said within one lifetime.
+    /// When none is left open, the close is the sweep's to report, as before.
+    ///
+    /// This replaces "a page closed, but N still open", which was written
+    /// whenever any link ended with others open - on every remake, so it said
+    /// nothing about a page actually closing either.
+    /// </summary>
+    private void ReportPagesGone()
+    {
+        List<string>? gone = null;
+        lock (_linkEnds)
+        {
+            var now = DateTime.UtcNow;
+            foreach (var (client, ends) in _linkEnds.ToList())
+            {
+                var stale = ends.RemoveAll(t => now - t > RemadeWithin);
+                for (var i = 0; i < stale; i++) (gone ??= new List<string>()).Add(client.Split('|')[0]);
+                if (ends.Count == 0) _linkEnds.Remove(client);
+            }
+        }
+        if (gone is null || _cts.IsCancellationRequested) return;
+        var open = Volatile.Read(ref _liveDashboards);
+        if (open <= 0) return;
+        foreach (var address in gone)
+            Log.Info("control", $"a page from {address} closed, but {open} still open — staying up. " +
+                                $"Still held from: {string.Join(", ", OpenPageClients())}");
+    }
 
     // CloseShutdownTick and _closeShutdownTimer used to live here: a deferred
     // "the dashboard closed, so stop" that DashboardWentAway armed. Nothing has
