@@ -767,6 +767,14 @@ Console.CancelKeyPress += (_, e) =>
     }
 };
 AppDomain.CurrentDomain.ProcessExit += (_, _) => shutdown.TrySetResult();
+// Another program asking, politely: the post-commit hook replacing the exe
+// (tools/Stop-Server.ps1). The same shutdown as the tray's Exit, so it says
+// goodbye and saves on the way out instead of being killed. See StopSignal.
+using var stopSignal = J0kersMediaServer.Services.StopSignal.Listen(() =>
+{
+    Log.Info("main", "asked to stop by another program on this computer");
+    shutdown.TrySetResult();
+});
 
 // Last, once everything that is going to bind has bound, so the summary
 // reports what is actually being served rather than what was intended.

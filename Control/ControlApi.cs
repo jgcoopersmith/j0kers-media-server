@@ -858,7 +858,7 @@ public sealed partial class ControlApi : IDisposable
             // was it - and a stranger's answer is nobody's. The notice is a
             // window on the server's screen; nobody off the machine gets to
             // put one there.
-            if (known && (auth.Level > AccessLevel.None || fromSelfWindow)) ArmClosedNotice();
+            if (known && (auth.Level > AccessLevel.None || fromSelfWindow)) ArmClosedNotice(announced: true);
         }
     }
 
@@ -882,9 +882,15 @@ public sealed partial class ControlApi : IDisposable
     /// <see cref="NoteActivity"/> cancels it. Re-arming is harmless because
     /// the callback checks its own identity before doing anything.
     ///
+    /// How long it waits depends on whether the close was announced. A page
+    /// that is really closing says so - the pagehide beacon, naming its link -
+    /// and is answered after <see cref="CloseGraceMs"/>, as before. A link
+    /// that ends with nothing said is far more often a page reconnecting late
+    /// than a page gone: see <see cref="UnannouncedNoticeGraceMs"/>.
+    ///
     /// Caller must hold <see cref="_shutdownLock"/>.
     /// </summary>
-    private void ArmClosedNotice()
+    private void ArmClosedNotice(bool announced)
     {
         if (_config.ShutdownOnClose || !_sawDashboard || _shuttingDown || _cts.IsCancellationRequested) return;
 
@@ -913,7 +919,7 @@ public sealed partial class ControlApi : IDisposable
                 // with it, and this one calls out to a UI handler.
                 Log.Warn("control", "close notice failed: " + ex.Message);
             }
-        }, null, CloseGraceMs, Timeout.Infinite);
+        }, null, announced ? CloseGraceMs : UnannouncedNoticeGraceMs, Timeout.Infinite);
 
         _closedNoticeTimer?.Dispose();
         _closedNoticeTimer = mine;
@@ -1409,7 +1415,7 @@ public sealed partial class ControlApi : IDisposable
                     // dismissed. An anonymous link still holds the server open
                     // while it lasts - the harmless direction - but its ending
                     // tells nobody anything.
-                    if (signedIn) ArmClosedNotice();
+                    if (signedIn) ArmClosedNotice(announced: announcedThis);
                 }
             }
             // The line that was missing once, and it cost a day: a page closing
@@ -1435,6 +1441,26 @@ public sealed partial class ControlApi : IDisposable
     /// a machine that is busy.
     /// </summary>
     private const int CloseGraceMs = 3000;
+
+    /// <summary>
+    /// How long the background-mode notice waits after a link ends with no
+    /// close announced for it.
+    ///
+    /// It used to wait CloseGraceMs like everything else, and three seconds is
+    /// not always enough for a page that is still open to come back. A browser
+    /// can take longer to reconnect - a tab in the background, a machine busy
+    /// with something else - and one that did was told "still running in the
+    /// background" with the dashboard in front of it. From this install's log:
+    /// 2026-09-18 15:52, a link ended seven seconds in with no beacon, the page
+    /// reconnected 3.25 s later, and the notice had fired 0.25 s before it;
+    /// 2026-09-16 08:10 the same. The one real close in between, 10:16, sent its
+    /// beacon first and was answered 3.6 s later - so a real close keeps the
+    /// short wait, and only a silent drop gets this one. Across 20,159
+    /// reconnects in the log the middle one took 0.52 s and 99.9% took under
+    /// 13.2 s. A browser that closes without its beacon is told about it this
+    /// much later, which for a notice is the right way round to be late.
+    /// </summary>
+    private const int UnannouncedNoticeGraceMs = 15_000;
 
     /// <summary>
     /// Live links whose page has announced, signed in, that it is closing -

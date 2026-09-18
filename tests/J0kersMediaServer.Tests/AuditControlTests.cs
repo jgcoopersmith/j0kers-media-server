@@ -201,11 +201,104 @@ public class AuditControlTests
                     $"an anonymous client opening and dropping the live link raised the background-mode notice "
                     + $"({server.Notices} time(s))");
 
-        // the real thing still says so
+        // the real thing still says so - the owner's page, closed the way a
+        // browser closes it: the beacon naming its link, then the link going
         var again = await Page.Open(server.Port, owner);
+        await Announce(server, again, owner);
         again.Dispose();
         await Task.Delay(5000);
         Assert.True(server.Notices == 1, $"the owner closing their dashboard raised {server.Notices} notice(s), not one");
+    }
+
+    /// <summary>What a closing dashboard sends on its way out: the pagehide beacon naming its link.</summary>
+    private static async Task Announce(InProcessServer server, Page page, string? cookie = null)
+    {
+        using var beacon = new HttpRequestMessage(HttpMethod.Post, "api/server/closing")
+        {
+            Content = new StringContent(page.LinkId ?? "bye"),
+        };
+        if (cookie is not null) beacon.Headers.Add("Cookie", cookie);
+        using var r = await server.Http.SendAsync(beacon);
+        Assert.True(r.IsSuccessStatusCode, $"the close beacon was refused: {(int)r.StatusCode}");
+    }
+
+    /// <summary>
+    /// A link that drops with nothing said is far more often a page coming
+    /// back late than a page gone: a tab in the background, a busy machine.
+    /// The notice waited three seconds for any link, and a dashboard that took
+    /// longer to reconnect was told "still running in the background" with the
+    /// dashboard in front of it (this install's log: 2026-09-18 15:52, back
+    /// 3.25 s after its link dropped). A close the page announces keeps the
+    /// short wait (the tests above); a silent drop gets a longer one - and a
+    /// page that really goes without a word is still told, later.
+    /// </summary>
+    [Fact]
+    public async Task A_dashboard_that_reconnects_late_is_not_told_it_was_closed()
+    {
+        using var server = await InProcessServer.Start(backgroundMode: true);
+        var owner = await server.ClaimAndSignIn();
+
+        // The link drops, nothing said, and the page is back eight seconds
+        // later. Eight, not the 3.25 seen in the log: the server notices a
+        // dropped socket at its next heartbeats, a second or two after the
+        // drop, and the old three-second wait ran from there.
+        (await Page.Open(server.Port, owner)).Dispose();
+        await Task.Delay(8000);
+        var back = await Page.Open(server.Port, owner);
+        await Task.Delay(10000);                           // past where the longer wait would have ended
+        Assert.True(server.Notices == 0,
+                    $"a dashboard that reconnected eight seconds after its link dropped was told it had been closed "
+                    + $"({server.Notices} notice(s))");
+
+        back.Dispose();                                    // now it really goes, without a word
+        await Task.Delay(17000);
+        Assert.True(server.Notices == 1,
+                    $"a dashboard that closed without its beacon raised {server.Notices} notice(s), not one");
+    }
+
+    /// <summary>
+    /// The post-commit hook stops the installed server to replace its exe, and
+    /// a server minimised to the tray has no window to be asked to close - so
+    /// it was always forced, and a forced stop runs no shutdown. The server
+    /// now listens for a stop signal of its own; tools/Stop-Server.ps1 (what
+    /// the hook runs) sets it. The server here runs in background mode, from
+    /// the real exe, and the script is given its process id alone.
+    /// </summary>
+    [Fact]
+    public async Task The_stop_script_stops_a_tray_server_the_way_its_own_exit_does()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var server = await LaunchedServer.Start(backgroundMode: true);
+
+        var script = AppContext.BaseDirectory;
+        while (script is not null && !File.Exists(Path.Combine(script, "tools", "Stop-Server.ps1")))
+            script = Path.GetDirectoryName(script);
+        Assert.True(script is not null, "tools/Stop-Server.ps1 was not found above the test's folder");
+        script = Path.Combine(script!, "tools", "Stop-Server.ps1");
+
+        var psi = new ProcessStartInfo("powershell")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        foreach (var a in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script,
+                                  "-Id", server.Process.Id.ToString(), "-WaitSeconds", "20" })
+            psi.ArgumentList.Add(a);
+        using var ps = Process.Start(psi)!;
+        var output = await ps.StandardOutput.ReadToEndAsync();
+        var errors = await ps.StandardError.ReadToEndAsync();
+        Assert.True(ps.WaitForExit(60_000), "the stop script did not finish");
+
+        Assert.True(server.Process.WaitForExit(5000), $"the server was still running after the stop script: {output}");
+        var log = File.ReadAllText(Path.Combine(server.Dir, "logs", "j0kers.log"));
+        Assert.True(ps.ExitCode == 0 && output.Contains("stopped cleanly", StringComparison.Ordinal)
+                    && log.Contains("asked to stop by another program", StringComparison.Ordinal)
+                    && log.Contains("[main] bye", StringComparison.Ordinal),
+                    $"the server was not stopped the way its own exit stops it - script said: {output.Trim()} "
+                    + $"{errors.Trim()} (exit {ps.ExitCode}); log ends: "
+                    + string.Join(" | ", log.Split('\n').TakeLast(4).Select(l => l.Trim())));
     }
 
     /// <summary>
@@ -315,12 +408,17 @@ public class AuditControlTests
     {
         using var server = await InProcessServer.Start(backgroundMode: true);
 
-        // it does fire, normally - otherwise the assertion below is empty
-        (await Page.Open(server.Port)).Dispose();
+        // it does fire, normally - otherwise the assertion below is empty.
+        // Closed the way a browser closes it: the beacon, then the link.
+        var first = await Page.Open(server.Port);
+        await Announce(server, first);
+        first.Dispose();
         await Task.Delay(5000);
         Assert.True(server.Notices == 1, $"closing the dashboard raised {server.Notices} notice(s), not one");
 
-        (await Page.Open(server.Port)).Dispose();   // closed again: armed for three seconds from now
+        var second = await Page.Open(server.Port);  // closed again: armed for three seconds from now
+        await Announce(server, second);
+        second.Dispose();
         await Task.Delay(1500);                     // the link has ended; Exit is chosen
         server.Api.BeginShutdown();
 

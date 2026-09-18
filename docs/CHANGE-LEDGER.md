@@ -3830,3 +3830,81 @@ runs of three alone, and in the full suite.
 Live system: read only — the live log (counted) and settings.json (the log level).
 
 475 tests pass (474 before this change).
+
+---
+
+## v2.0.315 — no false "still running in the background"; the hook stops the server properly
+
+### The false background notice
+
+In background mode, closing the dashboard shows "Still running in the
+background". It was armed whenever a dashboard link ended with no page left, and
+fired three seconds later unless a page came back. A page that is still open
+does not always come back that fast.
+
+**From this install's log (read only):**
+
+- 2026-09-18 15:52:24 a link opened; it ended about seven seconds in, with no
+  close beacon; the notice fired at 15:52:34.6 and the page reconnected at
+  15:52:34.8 — 3.25 s after the drop, 0.25 s too late. 2026-09-16 08:10 the same.
+- The one real close in between (2026-09-16 10:16:52) sent its beacon first
+  (`POST /api/server/closing`) and was answered 3.6 s later.
+- Across 20,159 reconnects in the logs, the middle one took 0.52 s; 99.9% took
+  under 13.2 s.
+- (The run of notices every ~41 s from 22:12 on 2026-09-15 to 03:13 on
+  2026-09-16 fired about 0.3 s after a link ended — not a wait running out. That
+  was the build before commit 85658a7 (2026-09-16 08:09, "the close notice
+  belongs on the close, not on a timer"), whose notice ran on a timer of its
+  own; that design was replaced then.)
+
+**Change.** The wait now depends on whether the close was announced. A close
+the page announces — the pagehide beacon naming its link — is answered after
+3 seconds, as before. A link that simply ends gets 15 seconds, so a page that
+comes back late is not told it was closed. A browser that really closes without
+its beacon still gets the notice, 12 seconds later than before. The
+shutdown-on-close timing is not changed.
+
+**Proved.** A server in the test process, background mode: a signed-in page's
+link dropped with nothing said and the page came back 8 s later. Red with every
+close waiting 3 s: one false notice. Green: none, and the same page then closing
+without a word still raised exactly one notice. Three runs of three. Two
+existing tests expected a notice 5 s after a bare drop; they now close their
+pages the way a browser does, beacon first.
+
+### The post-commit hook forced the server to stop
+
+The hook stops the installed server to replace its exe. It asked with
+`CloseMainWindow`, and a server minimised to the tray has no window to close, so
+every publish forced it (`Stop-Process -Force`). A forced stop runs no shutdown:
+no goodbye to the network, no last save of what the once-a-minute saver had not
+written, no "bye" in the log. The hook's own comment counted 113 starts against
+23 goodbyes; the last two publishes were both forced.
+
+**Change.**
+
+- The server listens for a stop signal of its own: a named Windows event per
+  process, `Local\j0kers-media-server-stop-<pid>`. Setting it runs the same
+  shutdown as the tray's Exit. Per process, so a stop meant for one server never
+  reaches another; in the Local namespace, so only programs in the same Windows
+  session can set it.
+- `tools/Stop-Server.ps1` sets it and waits up to 20 s. It falls back to the
+  window close only for a build without the signal, forces only what is still
+  running after that, and says which happened.
+- The hook runs that script for the installed exe only. Its "is the server
+  running" check now looks at the installed exe too; before, any process with the
+  server's name counted, so a test server left running would have been stopped,
+  and the installed server started although it had not been running.
+- The server this release replaces (v2.0.314) has no stop signal, so this one
+  publish is still forced; from the next publish on, the hook stops it cleanly.
+
+**Proved.** The real exe in background mode (tray), stopped by the script with its
+process id alone. Red with the listener removed from Program.cs: "could not be
+asked (a build without the stop signal) - forced", no "bye" in its log. Green:
+"stopped cleanly", and its log ends "asked to stop by another program on this
+computer" … "bye". The hook's new check and the script's path filter were run
+read-only against the live install: both select the installed server (pid
+18268) and nothing else.
+
+Live system: read only — the live logs (counted, as above) and the process list.
+
+477 tests pass (475 before this change).

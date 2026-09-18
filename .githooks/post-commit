@@ -58,8 +58,11 @@ staging="publish/staging"
 was_running=0
 
 if command -v powershell >/dev/null 2>&1; then
+    # The installed server, not any process with its name: a test server or a
+    # copy running from somewhere else is not what this publish replaces, and
+    # counting it made the hook stop it and then "restart" the installed one.
     if powershell -NoProfile -Command \
-        "if (Get-Process j0kers-media-server -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" 2>/dev/null; then
+        "if (Get-Process j0kers-media-server -ErrorAction SilentlyContinue | Where-Object { \$_.Path -eq '$install_win\\j0kers-media-server.exe' }) { exit 0 } else { exit 1 }" 2>/dev/null; then
 
         # Somebody is watching: leave them alone. Killing the server to
         # replace its exe cuts every live channel and every device
@@ -126,33 +129,17 @@ if command -v powershell >/dev/null 2>&1; then
             was_running=1
             echo "post-commit: stopping the idle server so its exe can be replaced"
             # Ask before insisting. A forced kill runs no shutdown path at
-            # all — sign-in expiry, the codec cache and anything else held in
-            # memory are simply lost — and this hook is the single biggest
-            # source of them: 113 starts against 23 goodbyes in the log.
-            # CloseMainWindow is the same thing as closing the window, so the
-            # server saves and exits properly; -Force is the fallback for a
-            # build where it is already wedged.
-            powershell -NoProfile -Command \
-                "\$asked = \$false
-                 foreach (\$x in @(Get-Process j0kers-media-server -ErrorAction SilentlyContinue)) {
-                     if (\$x.MainWindowHandle -ne 0 -and \$x.CloseMainWindow()) { \$asked = \$true }
-                 }
-                 # Only wait if something actually accepted the request. A
-                 # server minimised to the tray has no window to close, and
-                 # waiting ten seconds to discover that on every commit is a
-                 # tax paid for nothing.
-                 if (\$asked) {
-                     \$deadline = 10
-                     while (\$deadline -gt 0 -and (Get-Process j0kers-media-server -ErrorAction SilentlyContinue)) {
-                         Start-Sleep -Milliseconds 250; \$deadline -= 0.25
-                     }
-                 }
-                 \$left = @(Get-Process j0kers-media-server -ErrorAction SilentlyContinue)
-                 if (\$left) {
-                     if (\$asked) { Write-Host 'post-commit: it did not close in 10s - forcing' }
-                     else { Write-Host 'post-commit: no window to close (tray) - stopping it' }
-                     \$left | Stop-Process -Force
-                 } else { Write-Host 'post-commit: closed cleanly, state saved' }" 2>/dev/null
+            # all - no goodbye to the network, no last save of what is held in
+            # memory - and this hook was the single biggest source of them:
+            # 113 starts against 23 goodbyes in the log. It asked with
+            # CloseMainWindow, and a server minimised to the tray has no window
+            # to close, so every publish here ended in a forced stop. The
+            # server now listens for a stop signal of its own, which runs the
+            # same shutdown as the tray's Exit; tools/Stop-Server.ps1 sets it,
+            # waits, and forces only what is still running after that (and
+            # says so). -ExecutionPolicy applies to this one run only.
+            powershell -NoProfile -ExecutionPolicy Bypass -File tools/Stop-Server.ps1 \
+                -Path "$install_win\\j0kers-media-server.exe" 2>/dev/null | tr -d '\r' | sed 's/^/post-commit: /'
             sleep 1
         fi
     fi
