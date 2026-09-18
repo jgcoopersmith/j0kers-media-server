@@ -277,14 +277,16 @@ public sealed partial class ControlApi : IDisposable
 
             // Still verified at the moment of use. The index knows the name,
             // not whether the conversion is finished and whole: a playlist
-            // without EXT-X-ENDLIST is still being written, and a missing
-            // segment would be a stream that stops partway with no
-            // explanation. Either sends the original instead.
+            // without EXT-X-ENDLIST is still being written, one whose input
+            // ran out has a marker over a third of a film (see
+            // FfmpegManager.IsFinished), and a missing segment would be a
+            // stream that stops partway with no explanation. Any of them
+            // sends the original instead.
             var playlist = Path.Combine(dir, "index.m3u8");
             string text;
             try { text = File.ReadAllText(playlist); }
             catch { return null; }
-            if (!text.Contains("#EXT-X-ENDLIST", StringComparison.Ordinal)) return null;
+            if (!Media.FfmpegManager.IsFinished(dir, text)) return null;
 
             var parts = new List<(string, long)>();
             long total = 0;
@@ -1603,18 +1605,63 @@ public sealed partial class ControlApi : IDisposable
     /// Uses Sec-Fetch-Site (sent by every modern browser) and, as a fallback,
     /// an Origin whose host doesn't match ours. curl/VLC/etc. send neither
     /// and are treated as first-party (they can't be a CSRF vector).
+    ///
+    /// Same ORIGIN, not same site. "same-site" ignores the port - to a browser
+    /// every program on this machine, and every device on the LAN served by
+    /// the same address, is one site. It was accepted, so any page another
+    /// program served on another port could post here; on a fresh server,
+    /// before anyone had signed in, that was enough to create the first
+    /// administrator and lock the owner out of their own install. The Origin
+    /// check had the same hole for the same reason: it compared the host and
+    /// not the port.
+    ///
+    /// And the Origin check is not a fallback for old browsers. Browsers send
+    /// Sec-Fetch-Site only to HTTPS and to localhost, so on the plain-HTTP LAN
+    /// address this server is usually reached at, Origin is the whole check.
     /// </summary>
     private static bool IsCrossSite(HttpListenerContext ctx)
     {
         var fetchSite = ctx.Request.Headers["Sec-Fetch-Site"];
         if (fetchSite is not null)
-            return fetchSite is not ("same-origin" or "same-site" or "none");
+            return fetchSite is not ("same-origin" or "none");
 
         var origin = ctx.Request.Headers["Origin"];
         if (!string.IsNullOrEmpty(origin) && Uri.TryCreate(origin, UriKind.Absolute, out var o))
-            return !string.Equals(o.Host, ctx.Request.Url?.Host, StringComparison.OrdinalIgnoreCase);
+            return !SameOriginAsHost(o, ctx.Request.Headers["Host"] ?? ctx.Request.Url?.Authority ?? "",
+                                     ctx.Request.RemoteEndPoint?.Address);
 
         return false;
+    }
+
+    /// <summary>
+    /// Whether an Origin names the place the browser sent this request: the
+    /// same host, and the same port.
+    ///
+    /// The Host header is what the browser addressed, and a browser writes the
+    /// port into it whenever it is not the default for the scheme - so when
+    /// Host carries a port, the two must match exactly. When it carries none,
+    /// either the browser addressed the default port (then Origin's must be
+    /// the default too), or a reverse proxy on this machine rewrote Host and
+    /// dropped the port on the way (nginx's $host does). There the port the
+    /// browser used is simply not known, and matching the host is all there
+    /// is - which is what this always did, so such a setup keeps working.
+    /// </summary>
+    internal static bool SameOriginAsHost(Uri origin, string hostHeader, IPAddress? peer)
+    {
+        var h = hostHeader.Trim();
+        var close = h.LastIndexOf(']');   // an IPv6 literal carries colons of its own
+        var colon = h.LastIndexOf(':');
+        int? port = null;
+        if (colon > close && int.TryParse(h[(colon + 1)..], System.Globalization.NumberStyles.None,
+                                          System.Globalization.CultureInfo.InvariantCulture, out var p))
+        {
+            port = p;
+            h = h[..colon];
+        }
+        if (!string.Equals(origin.Host, h, StringComparison.OrdinalIgnoreCase)) return false;
+        if (port is int explicitPort) return origin.Port == explicitPort;
+        if (peer is not null && IPAddress.IsLoopback(peer)) return true;   // a local proxy dropped it
+        return origin.IsDefaultPort;
     }
 
     /// <summary>
@@ -2575,15 +2622,18 @@ public sealed partial class ControlApi : IDisposable
     private void WriteConfig(HttpListenerContext ctx)
     {
         var res = ctx.Response;
-        // redact by replacing the value before serialization, not
-        // by string-replacing the output (which missed tokens
-        // containing +, ", or non-ASCII once JSON-escaped)
-        var savedToken = _serverConfig.Control.AuthToken;
-        _serverConfig.Control.AuthToken = savedToken.Length > 0 ? "***" : "";
-        JsonElement redacted;
-        try { redacted = JsonSerializer.Deserialize<JsonElement>(_serverConfig.ToJson()); }
-        finally { _serverConfig.Control.AuthToken = savedToken; }
-        WriteJson(res, 200, new { config = redacted, note = "control.authToken redacted" });
+        // Redacted in a COPY, as a parsed value - not by string-replacing the
+        // output (which missed tokens containing +, ", or non-ASCII once
+        // JSON-escaped), and not by writing "***" into the live config and
+        // putting the token back afterwards, which is what this did. The live
+        // value is the one every request is checked against, so for the
+        // length of each read "***" WAS the admin token; and two reads at
+        // once could restore each other's "***", leaving it that way until a
+        // restart with the real token refused.
+        var node = System.Text.Json.Nodes.JsonNode.Parse(_serverConfig.ToJson());
+        if (node?["control"] is System.Text.Json.Nodes.JsonObject control && control.ContainsKey("authToken"))
+            control["authToken"] = _serverConfig.Control.AuthToken.Length > 0 ? "***" : "";
+        WriteJson(res, 200, new { config = node, note = "control.authToken redacted" });
     }
 
     /// <summary>GET /api/mounts - the configured RTSP mounts and the URIs they answer on.</summary>
@@ -3226,11 +3276,68 @@ public sealed partial class ControlApi : IDisposable
             return;
         }
 
-        _ffmpeg?.DiscardVod(stream);
-        var (rebuilt, ready) = _ffmpeg?.StartVod(source) ?? (stream, false);
-        _links.Show(rebuilt);
-        Log.Info("control", $"retranscoding {stream} from {Path.GetFileName(source)}");
-        WriteJson(res, 200, new { stream = rebuilt, ready });
+        // Everything that can refuse is asked BEFORE anything is deleted. This
+        // deleted the conversion first and then found out whether it could be
+        // made again: with ffmpeg unavailable (quarantined, or moved by an
+        // upgrade) the directory went and the answer was a bare 500, hours
+        // of encoding gone to report an error - the very loss the source check
+        // above exists to prevent. CanLaunch, not Available: that is decided
+        // once at startup, and the quarantine that takes ffmpeg away usually
+        // comes later.
+        if (_ffmpeg is null || !_ffmpeg.CanLaunch)
+        {
+            WriteJson(res, 503, new { error = "ffmpeg is not available, so this stream cannot be rebuilt — it has been left as it is" });
+            return;
+        }
+
+        // What to rebuild it AS, read while the directory is still there. It
+        // was rebuilt at full resolution whatever it had been made at, so a
+        // 720p copy made for a phone came back as a second full-size one; and
+        // as disposable, so a conversion the owner asked to keep became one
+        // the cache was free to delete. height.txt is written by every
+        // conversion and backfilled for older ones; without it, full
+        // resolution, which is what this always did - never the height in
+        // the NAME, which StartVod explains cannot be trusted and which would
+        // quietly throw away picture.
+        var height = 0;
+        try
+        {
+            if (int.TryParse(File.ReadAllText(Path.Combine(sdir, "height.txt")).Trim(),
+                             System.Globalization.NumberStyles.Integer,
+                             System.Globalization.CultureInfo.InvariantCulture, out var h) && h > 0)
+                height = h;
+        }
+        catch { /* no record: full resolution */ }
+        var keep = File.Exists(Path.Combine(sdir, Media.FfmpegManager.KeepMarker));
+
+        // If it cannot all be removed - something still has part of it open -
+        // StartVod would find what is left and could call the old conversion
+        // the new one. Say so instead of reporting a rebuild that did not
+        // happen.
+        if (!_ffmpeg.DiscardVod(stream))
+        {
+            WriteJson(res, 409, new
+            {
+                error = "the old conversion could not be removed completely — something still has part of it "
+                      + "open (a player or a TV?). Nothing was rebuilt; try again once it is not playing.",
+            });
+            return;
+        }
+
+        try
+        {
+            var (rebuilt, ready) = _ffmpeg.StartVod(source, height, keep);
+            _links.Show(rebuilt);
+            Log.Info("control", $"retranscoding {stream} from {Path.GetFileName(source)}"
+                                + (height > 0 ? $" at {height}p" : ""));
+            WriteJson(res, 200, new { stream = rebuilt, ready });
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("control", $"retranscode of {stream}: the old conversion was removed but the rebuild "
+                                + $"could not start: {ex.Message}");
+            WriteJson(res, 500, new { error = "the old conversion was removed, but the rebuild could not start: " + ex.Message });
+        }
     }
 
     /// <summary>DELETE /api/sessions/{id} - tear one RTSP session down from the dashboard.</summary>
@@ -6167,8 +6274,16 @@ public sealed partial class ControlApi : IDisposable
     /// connection to an attacker-chosen host, leaking its NTLM credentials —
     /// so those are refused on every path-taking endpoint regardless of who
     /// is calling. Returns false (with full=null) when the path is unsafe.
+    ///
+    /// On Windows the answer has to be a drive path, not merely "does not
+    /// start with two slashes". "\??\UNC\host\share" starts with one: .NET
+    /// passes a \??\ path through GetFullPath untouched, and Windows hands it
+    /// straight to the object manager, where it IS the network share - the
+    /// same outbound SMB connection, reached through a door the old check
+    /// never looked at. Whatever else the device namespace can spell, a real
+    /// local path always resolves to "X:\...", so that is the test.
     /// </summary>
-    private static bool TryLocalPath(string? path, out string full)
+    internal static bool TryLocalPath(string? path, out string full)
     {
         full = "";
         if (string.IsNullOrWhiteSpace(path)) return false;
@@ -6179,6 +6294,10 @@ public sealed partial class ControlApi : IDisposable
         {
             var resolved = Path.GetFullPath(path);
             if (resolved.StartsWith(@"\\", StringComparison.Ordinal)) return false; // e.g. \\?\UNC, mapped
+            if (OperatingSystem.IsWindows()
+                && !(resolved.Length >= 3 && char.IsAsciiLetter(resolved[0])
+                     && resolved[1] == ':' && resolved[2] == '\\'))
+                return false;   // \??\..., and anything else that is not a drive
             full = resolved;
             return true;
         }

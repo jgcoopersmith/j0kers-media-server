@@ -219,8 +219,9 @@ public sealed class Shelf
         if (dir is null) return false;
         try
         {
+            // finished, not merely marked finished: see FfmpegManager.IsFinished
             var text = File.ReadAllText(Path.Combine(dir, "index.m3u8"));
-            return text.Contains("#EXT-X-ENDLIST", StringComparison.Ordinal);
+            return FfmpegManager.IsFinished(dir, text);
         }
         catch { return false; }
     }

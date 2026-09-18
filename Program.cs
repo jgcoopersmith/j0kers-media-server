@@ -322,7 +322,9 @@ catch (Exception ex)
     J0kersMediaServer.Services.ConsoleWindow.Fatal($"Failed to load accounts: {ex.Message}");
     return 1;
 }
-var auth = new J0kersMediaServer.Auth.AuthService(userStore, config.Control.AuthToken, baseDirectory);
+// The token is read live, so a change saved from the settings page applies
+// at once rather than at the next restart. See AuthService._legacyToken.
+var auth = new J0kersMediaServer.Auth.AuthService(userStore, () => config.Control.AuthToken, baseDirectory);
 
 // Media URLs are authorized by signature, not by session: players can't
 // carry a cookie or a header.

@@ -524,6 +524,14 @@ public sealed class UserStore
             if (!stillAdmin && user.IsAdmin && user.Enabled && !_users.Any(u =>
                     u.Id != user.Id && u.Enabled && u.IsAdmin))
                 throw new InvalidOperationException("this is the last enabled administrator");
+            // The same rule one tier up. Counting plain admins let the only
+            // Server Admin step down to Admin whenever another admin existed -
+            // and then nobody could see the log or the transcoder, or make a
+            // Server Admin again, because granting that tier takes one.
+            var stillServerAdmin = newEnabled && LevelOf(newRole) >= AccessLevel.ServerAdmin;
+            if (!stillServerAdmin && user.IsServerAdmin && user.Enabled && !_users.Any(u =>
+                    u.Id != user.Id && u.Enabled && u.IsServerAdmin))
+                throw new InvalidOperationException("this is the last enabled Server Admin — make someone else one first");
 
             if (username is not null)
             {
@@ -545,6 +553,8 @@ public sealed class UserStore
         {
             if (user.Enabled && user.IsAdmin && !_users.Any(u => u.Id != user.Id && u.Enabled && u.IsAdmin))
                 throw new InvalidOperationException("this is the last enabled administrator");
+            if (user.Enabled && user.IsServerAdmin && !_users.Any(u => u.Id != user.Id && u.Enabled && u.IsServerAdmin))
+                throw new InvalidOperationException("this is the last enabled Server Admin — make someone else one first");
             _users.RemoveAll(u => u.Id == user.Id);
             Save();
             Log.Info("auth", $"user removed: {user.Username}");
@@ -579,6 +589,21 @@ public sealed class UserStore
         }
         Log.Info("auth", $"key issued for {user.Username}: {record.Label} ({id})");
         return (full, record);
+    }
+
+    /// <summary>Whether this account still has that key, unexpired.</summary>
+    public bool KeyAlive(UserAccount user, string keyId)
+    {
+        lock (_lock) return user.Keys.Any(k => k.Id == keyId && !k.Expired);
+    }
+
+    /// <summary>The id half of a presented key (jmk_&lt;id&gt;_&lt;secret&gt;), or null if it is not shaped like one.</summary>
+    public static string? KeyIdOf(string? presented)
+    {
+        if (presented is null || !presented.StartsWith(KeyPrefix, StringComparison.Ordinal)) return null;
+        var rest = presented[KeyPrefix.Length..];
+        var split = rest.IndexOf('_');
+        return split > 0 ? rest[..split] : null;
     }
 
     public bool RevokeKey(UserAccount user, string keyId)

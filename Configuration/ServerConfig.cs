@@ -245,7 +245,12 @@ public sealed class ServerConfig
         if (s.RtspPort is int rp) Rtsp.Port = rp;
         if (s.HlsPort is int hp) Hls.Port = hp;
         if (s.ControlPort is int cp) Control.Port = cp;
-        if (!string.IsNullOrWhiteSpace(s.AuthToken)) Control.AuthToken = s.AuthToken;
+        // Empty is a value too: it is how a leaked token is turned off. This
+        // skipped blank values, so saving an empty token was written to
+        // settings.json and ignored - the old token went on working, and
+        // went on working after a restart, which reads the file back the same
+        // way. Absent (null) still leaves server.json's token alone.
+        if (s.AuthToken is not null) Control.AuthToken = s.AuthToken.Trim();
         // Whether the server opens a browser on ITS OWN machine at startup.
         //
         // It had no way in at all — not the Config dialog, not /api/settings —

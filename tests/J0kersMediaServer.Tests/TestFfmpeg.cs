@@ -42,6 +42,34 @@ internal static class TestFfmpeg
         return found!;
     }
 
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode,
+                                              SetLastError = true)]
+    private static extern bool CreateHardLink(string newFile, string existingFile, IntPtr security);
+
+    /// <summary>
+    /// An ffmpeg of the test's own, in <paramref name="dir"/>, that it can
+    /// take away later - what an antivirus quarantine does to a running
+    /// server. A hard link to the real one where the volume allows (it is
+    /// over 200 MB), a copy otherwise. Deleting it leaves the real one alone.
+    /// </summary>
+    public static string Disposable(string dir)
+    {
+        var real = Require();
+        var mine = Path.Combine(dir, OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg");
+        if (!OperatingSystem.IsWindows() || !CreateHardLink(mine, real, IntPtr.Zero)) File.Copy(real, mine);
+        return mine;
+    }
+
+    /// <summary>Deletes a Disposable ffmpeg, waiting out a scanner that is still looking at it.</summary>
+    public static void TakeAway(string path)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try { File.Delete(path); return; }
+            catch when (attempt < 40) { Thread.Sleep(250); }
+        }
+    }
+
     /// <summary>Runs ffmpeg to completion and fails the test if it does not succeed.</summary>
     public static void Run(string ffmpeg, params string[] args)
     {

@@ -80,7 +80,9 @@ public sealed partial class ControlApi
                     WriteJson(res, 401, new { error = "a valid key is required" });
                     return true;
                 }
-                var token = _auth.OpenSession(auth.User, ctx);
+                // tied to the key it was traded for, so revoking that key
+                // signs this browser out as well
+                var token = _auth.OpenSession(auth.User, ctx, auth.KeyId);
                 AuthService.SetSessionCookie(ctx, token);
                 WriteJson(res, 200, new { user = DescribeUser(auth.User, auth) });
                 return true;
@@ -302,7 +304,11 @@ public sealed partial class ControlApi
 
         string? deviceKey = null;
         if (req.remember == true)
-            deviceKey = _auth.Users.CreateKey(admin, DeviceLabel(ctx), AuthService.DeviceKeyLifetime).secret;
+        {
+            var (secret, record) = _auth.Users.CreateKey(admin, DeviceLabel(ctx), AuthService.DeviceKeyLifetime);
+            deviceKey = secret;
+            if (outcome.SessionToken is not null) _auth.BindSessionToKey(outcome.SessionToken, record.Id);
+        }
 
         WriteJson(res, 200, new { user = DescribeUser(admin, null), key = deviceKey });
     }
@@ -333,9 +339,15 @@ public sealed partial class ControlApi
         // "remember this device": a long-lived key the dashboard stores and
         // sends as a bearer token, so this browser (or a player, or a
         // script) never sees the login form again. Shown exactly once.
+        // The session and the key are one device: revoking the key from the
+        // Keys list signs this browser out too, as that list promises.
         string? deviceKey = null;
         if (req.remember == true)
-            deviceKey = _auth.Users.CreateKey(outcome.User, DeviceLabel(ctx), AuthService.DeviceKeyLifetime).secret;
+        {
+            var (secret, record) = _auth.Users.CreateKey(outcome.User, DeviceLabel(ctx), AuthService.DeviceKeyLifetime);
+            deviceKey = secret;
+            _auth.BindSessionToKey(outcome.SessionToken, record.Id);
+        }
 
         WriteJson(res, 200, new { user = DescribeUser(outcome.User, null), key = deviceKey });
     }
@@ -370,10 +382,30 @@ public sealed partial class ControlApi
             WriteJson(res, 400, new { error });
             return;
         }
+        // An account with no password has nothing to prove knowledge of - so
+        // this used to skip the check and let the session set one. That is
+        // the takeover the check exists to stop, handed to exactly the
+        // sessions least entitled to it: a guest who signed in while the
+        // account was passwordless, still holding that session after an
+        // administrator closed it, could give the account a password of their
+        // own choosing. The first password is the administrator's to set.
+        if (!me.HasPassword)
+        {
+            WriteJson(res, 403, new { error = "this account has no password to change — an administrator sets its first one" });
+            return;
+        }
         // proving knowledge of the current password is what stops a borrowed
         // session (an unlocked laptop, a stolen cookie) becoming a permanent
-        // takeover of the account
-        if (me.HasPassword && _auth.Users.VerifyPassword(me.Username, req!.currentPassword) is null)
+        // takeover of the account - and it is throttled like a sign-in, or a
+        // borrowed session could simply keep guessing
+        var check = _auth.VerifyOwnPassword(me, req!.currentPassword, ctx);
+        if (check > 0)
+        {
+            res.Headers["Retry-After"] = check.ToString();
+            WriteJson(res, 429, new { error = "too many failed attempts — try again shortly", retryAfterSeconds = check });
+            return;
+        }
+        if (check < 0)
         {
             WriteJson(res, 403, new { error = "current password is incorrect" });
             return;
@@ -387,9 +419,19 @@ public sealed partial class ControlApi
         _auth.Users.SetPassword(me, req.newPassword!);
         // every other session for this account dies with the old password
         _auth.RevokeSessionsFor(me.Id);
-        var outcome = _auth.Login(me.Username, req.newPassword, ctx);
-        if (outcome is { Ok: true, SessionToken: not null })
-            AuthService.SetSessionCookie(ctx, outcome.SessionToken);
+        // A fresh session for this browser, opened directly. It went through
+        // the sign-in path before, which re-checked the new password and -
+        // with it - the lockouts: so while anyone at all was failing sign-ins
+        // against this account's name, changing the password succeeded, every
+        // session was revoked, and the new one was refused. Signed out with
+        // "password changed", and unable to sign back in. The password has
+        // just been proven, by the check above.
+        //
+        // Still the same device, too: a remembered browser's session is tied
+        // to its key, and so is this one - otherwise, after a password change,
+        // revoking that device no longer signed it out.
+        var token = _auth.OpenSession(me, ctx, auth.KeyId);
+        AuthService.SetSessionCookie(ctx, token);
         Log.Info("auth", $"password changed for {me.Username}");
         WriteJson(res, 200, new { changed = true, note = "other sessions for this account were signed out" });
     }
@@ -492,12 +534,16 @@ public sealed partial class ControlApi
             return;
         }
 
-        // Apply the passwordless change itself. Turning it on drops the
-        // password and ends any live sessions signed in with it.
+        // Apply the passwordless change itself, and end every live session
+        // either way. Turning it on drops the password, so a session signed in
+        // with that password must not outlive it. Turning it OFF is closing
+        // the door - and only ending sessions on the way in left everyone who
+        // had walked through while it was open still inside, in an account
+        // that now had no password at all.
         if (req.passwordless is bool wantGuest && wantGuest != user.Passwordless)
         {
             _auth.Users.SetPasswordless(user, wantGuest);
-            if (wantGuest) _auth.RevokeSessionsFor(user.Id);
+            _auth.RevokeSessionsFor(user.Id);
         }
 
         // A password only makes sense on a normal account; ignore one sent

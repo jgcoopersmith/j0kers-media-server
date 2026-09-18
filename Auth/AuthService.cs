@@ -29,7 +29,11 @@ public enum AccessLevel
 /// <summary>
 /// Who is making this request and how they proved it.
 /// </summary>
-public sealed record AuthResult(AccessLevel Level, UserAccount? User, string Method)
+/// <param name="KeyId">
+/// The key behind the request: the one it presented, or the one its session
+/// came with. Null for a password session and the legacy token.
+/// </param>
+public sealed record AuthResult(AccessLevel Level, UserAccount? User, string Method, string? KeyId = null)
 {
     public static readonly AuthResult Anonymous = new(AccessLevel.None, null, "none");
     public bool IsAdmin => Level >= AccessLevel.Admin;
@@ -67,6 +71,8 @@ public sealed class AuthService
     public static readonly TimeSpan DeviceKeyLifetime = TimeSpan.FromDays(365);
 
     private const int MaxFailuresBeforeLockout = 5;
+    /// <summary>For everyone behind one reverse proxy together. See Login.</summary>
+    private const int MaxFailuresThroughProxy = 50;
 
     private sealed class Session
     {
@@ -78,6 +84,14 @@ public sealed class AuthService
         public DateTime LastSeenUtc { get; set; }
         [System.Text.Json.Serialization.JsonPropertyName("clientHint")]
         public string ClientHint { get; set; } = "";
+        /// <summary>
+        /// The key this session came with, if it came with one: the key minted
+        /// alongside it by "remember this device", or the key a remembered
+        /// browser traded in for it. Revoking or expiring that key ends the
+        /// session too - see LiveUser.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("keyId")]
+        public string? KeyId { get; set; }
     }
 
     private sealed class Throttle
@@ -88,7 +102,13 @@ public sealed class AuthService
     }
 
     private readonly UserStore _users;
-    private readonly string _legacyToken;
+    /// <summary>
+    /// Read on every request, not copied at startup. A copy meant the settings
+    /// page could save a new token while the server went on honouring only
+    /// the one it started with: rotating a leaked token left the leaked one
+    /// working and the new one refused, until somebody thought to restart.
+    /// </summary>
+    private readonly Func<string?> _legacyToken;
     // keyed by SHA-256 of the token, so a memory dump or a stray log of this
     // dictionary still can't be replayed
     private readonly ConcurrentDictionary<string, Session> _sessions = new(StringComparer.Ordinal);
@@ -108,9 +128,12 @@ public sealed class AuthService
     private readonly string _sessionFile;
 
     public AuthService(UserStore users, string legacyToken, string? baseDirectory = null)
+        : this(users, () => legacyToken, baseDirectory) { }
+
+    public AuthService(UserStore users, Func<string?> legacyToken, string? baseDirectory = null)
     {
         _users = users;
-        _legacyToken = legacyToken ?? "";
+        _legacyToken = legacyToken;
         _sessionFile = baseDirectory is null ? "" : Path.Combine(baseDirectory, "sessions.json");
         ClearSessions();
     }
@@ -210,11 +233,12 @@ public sealed class AuthService
         var presented = BearerValue(ctx);
 
         // legacy control.authToken — still honoured, still full rights
-        if (_legacyToken.Length > 0 && presented is not null && FixedTimeEquals(presented, _legacyToken))
+        var legacy = _legacyToken() ?? "";
+        if (legacy.Length > 0 && presented is not null && FixedTimeEquals(presented, legacy))
             return new AuthResult(AccessLevel.Admin, null, "token");
 
         if (presented is not null && _users.VerifyKey(presented) is UserAccount keyUser)
-            return new AuthResult(LevelOf(keyUser), keyUser, "key");
+            return new AuthResult(LevelOf(keyUser), keyUser, "key", UserStore.KeyIdOf(presented));
 
         // A key or token was offered and it is not one of ours. That is a
         // failed sign-in as surely as a wrong password, and it was the one
@@ -229,8 +253,8 @@ public sealed class AuthService
         // Same reasoning as NoteKeyInUrl below, which learned it the hard way.
         if (presented is not null) NoteRejectedCredential(ClientKey(ctx));
 
-        if (ReadSessionCookie(ctx) is string token && ResolveSession(token, ctx) is UserAccount sessionUser)
-            return new AuthResult(LevelOf(sessionUser), sessionUser, "session");
+        if (ReadSessionCookie(ctx) is string token && ResolveSession(token, ctx, out var sessionKey) is UserAccount sessionUser)
+            return new AuthResult(LevelOf(sessionUser), sessionUser, "session", sessionKey);
 
         // No accounts yet: whoever reaches an unclaimed server is its owner,
         // top tier included — otherwise a fresh install would hide the log
@@ -368,21 +392,19 @@ public sealed class AuthService
         return null;
     }
 
-    private UserAccount? ResolveSession(string token, HttpListenerContext ctx)
+    /// <param name="keyId">The key the session came with, if any.</param>
+    private UserAccount? ResolveSession(string token, HttpListenerContext ctx, out string? keyId)
     {
+        keyId = null;
         var id = Digest(token);
         if (!_sessions.TryGetValue(id, out var session)) return null;
+        keyId = session.KeyId;
 
         var now = DateTime.UtcNow;
-        if (now - session.LastSeenUtc > SessionIdle || now - session.CreatedUtc > SessionMax)
+        if (LiveUser(session, now) is not UserAccount user)
         {
-            _sessions.TryRemove(id, out _);
-            return null;
-        }
-        var user = _users.FindById(session.UserId);
-        if (user is null || !user.Enabled)
-        {
-            // account deleted or disabled mid-session — drop it immediately
+            // expired, or the account (or the key it came with) is gone —
+            // drop it immediately
             _sessions.TryRemove(id, out _);
             return null;
         }
@@ -398,6 +420,27 @@ public sealed class AuthService
         // that is already being slid forward, costs nothing and makes the
         // answer true.
         session.ClientHint = ClientKey(ctx);
+        return user;
+    }
+
+    /// <summary>
+    /// The account a session still speaks for, or null once it no longer
+    /// does: idle too long, too old, the account deleted or disabled - or the
+    /// key it came with revoked or expired.
+    ///
+    /// That last one is new. "Remember this device" hands back a session and
+    /// a key together, and the Keys list promises that revoking a key stops
+    /// anything using it at once. The browser was using the session, which
+    /// knew nothing about the key, so it carried on for up to a week after
+    /// the device had been "revoked". The one test, used for a request and
+    /// for the signed-in list alike, so neither shows what the other refuses.
+    /// </summary>
+    private UserAccount? LiveUser(Session session, DateTime now)
+    {
+        if (now - session.LastSeenUtc > SessionIdle || now - session.CreatedUtc > SessionMax) return null;
+        var user = _users.FindById(session.UserId);
+        if (user is null || !user.Enabled) return null;
+        if (session.KeyId is string key && !_users.KeyAlive(user, key)) return null;
         return user;
     }
 
@@ -429,9 +472,19 @@ public sealed class AuthService
 
     public LoginOutcome Login(string? username, string? password, HttpListenerContext ctx)
     {
-        var client = ClientKey(ctx);
+        var (client, proxy) = ClientOf(ctx);
         var nameKey = "user:" + (username?.Trim().ToLowerInvariant() ?? "");
         var addrKey = "addr:" + client;
+        // Everything that came through the proxy, together, at a far higher
+        // limit. The per-address lockout above now keys on the address the
+        // proxy reports - but only a proxy that WRITES X-Forwarded-For makes
+        // that address true. One that passes the client's own header along
+        // (nginx with no proxy_set_header for it, a plain TCP forwarder) lets
+        // a client name a fresh address for every guess, and the address
+        // lockout never fires. This caps that: fifty failures through the
+        // proxy, from anyone, and it locks - far past a household's typos,
+        // well short of a password spray.
+        var proxyKey = proxy is null ? null : "proxy:" + proxy;
 
         // Log the lockout-blocked attempts too, or "any attempt" isn't true:
         // once an account or address is locked, these returned before reaching
@@ -445,6 +498,12 @@ public sealed class AuthService
         {
             Log.Warn("auth", $"login attempt for '{username}' from {client} refused — address locked ({b}s left)");
             return new LoginOutcome(false, null, null, "too many failed attempts — try again shortly", b);
+        }
+        if (proxyKey is not null && LockedFor(proxyKey) is int c && c > 0)
+        {
+            Log.Warn("auth", $"login attempt for '{username}' from {client} refused — too many failures through "
+                             + $"the proxy at {proxy} ({c}s left)");
+            return new LoginOutcome(false, null, null, "too many failed attempts — try again shortly", c);
         }
 
         // A deliberately-open, read-only account signs in on its username alone.
@@ -477,6 +536,10 @@ public sealed class AuthService
         {
             RegisterFailure(nameKey);
             RegisterFailure(addrKey);
+            // Not cleared by a success, unlike the two above: a sign-in that
+            // works says nothing about the other people behind the proxy. It
+            // lapses the way every counter does, an hour after it goes quiet.
+            if (proxyKey is not null) RegisterFailure(proxyKey, MaxFailuresThroughProxy);
             // The reply stays deliberately vague — telling an anonymous caller
             // which half was wrong is how account names get enumerated. The
             // log is a different audience: it is the administrator's, it
@@ -506,11 +569,49 @@ public sealed class AuthService
     }
 
     /// <summary>
+    /// The "current password" check behind changing your own password,
+    /// throttled.
+    ///
+    /// That check is what stops a borrowed session (an unlocked laptop, a
+    /// stolen cookie) becoming a permanent takeover. It was not throttled at
+    /// all, so a borrowed session could simply ask again and again until it
+    /// guessed right, as fast as PBKDF2 would answer.
+    ///
+    /// Counted per ACCOUNT, on a counter of its own - not the sign-in one.
+    /// Anybody can fail sign-ins against a name they know, so sharing that
+    /// counter meant a stranger could keep an account locked and, with it,
+    /// stop its owner - already signed in, holding the right password -
+    /// from changing it. Only a session on this account can move this one.
+    /// Returns 0 when the password is right, -1 when it is wrong, or the
+    /// seconds left on a lockout.
+    /// </summary>
+    public int VerifyOwnPassword(UserAccount user, string? password, HttpListenerContext ctx)
+    {
+        var client = ClientKey(ctx);
+        var key = "pwchange:" + user.Id;
+        if (LockedFor(key) is int locked && locked > 0)
+        {
+            Log.Warn("auth", $"password change for '{user.Username}' from {client} refused — too many wrong "
+                             + $"current passwords ({locked}s left)");
+            return locked;
+        }
+        if (_users.VerifyPassword(user.Username, password) is not null)
+        {
+            _throttles.TryRemove(key, out _);
+            return 0;
+        }
+        RegisterFailure(key);
+        Log.Warn("auth", $"wrong current password for '{user.Username}' from {client} on a password change");
+        return -1;
+    }
+
+    /// <summary>
     /// Starts a session for an already-authenticated user and returns the
     /// token to put in the cookie. Callers must have proved identity first —
     /// by password, or by presenting a valid key.
     /// </summary>
-    public string OpenSession(UserAccount user, HttpListenerContext ctx)
+    /// <param name="keyId">The key this session is traded for, whose revocation should end it too.</param>
+    public string OpenSession(UserAccount user, HttpListenerContext ctx, string? keyId = null)
     {
         var token = UserStore.Base64Url(RandomNumberGenerator.GetBytes(32));
         _sessions[Digest(token)] = new Session
@@ -519,10 +620,22 @@ public sealed class AuthService
             CreatedUtc = DateTime.UtcNow,
             LastSeenUtc = DateTime.UtcNow,
             ClientHint = ClientKey(ctx),
+            KeyId = keyId,
         };
         PruneSessions();
         SaveSessions();
         return token;
+    }
+
+    /// <summary>
+    /// Ties a session opened by a password sign-in to the "remember this
+    /// device" key minted with it, so that revoking the device signs it out.
+    /// The session exists first - the key is only made once the password has
+    /// been accepted - so this is a second step rather than an argument.
+    /// </summary>
+    public void BindSessionToKey(string token, string keyId)
+    {
+        if (_sessions.TryGetValue(Digest(token), out var session)) session.KeyId = keyId;
     }
 
     /// <summary>
@@ -598,7 +711,11 @@ public sealed class AuthService
     }
 
     /// <summary>Number of live sessions for a user (dashboard display).</summary>
-    public int SessionCountFor(string userId) => _sessions.Count(s => s.Value.UserId == userId);
+    public int SessionCountFor(string userId)
+    {
+        var now = DateTime.UtcNow;
+        return _sessions.Count(s => s.Value.UserId == userId && LiveUser(s.Value, now) is not null);
+    }
 
     /// <summary>How many accounts exist on this server, enabled or not.</summary>
     public int AccountCount => _users.All.Count;
@@ -611,8 +728,9 @@ public sealed class AuthService
     /// and a phone are three, whether or not they are the same account.
     ///
     /// The liveness test is the one <see cref="ResolveSession"/> applies when a
-    /// request actually arrives: idle timeout, absolute lifetime, and the
-    /// account still existing and enabled. Reading the raw dictionary instead
+    /// request actually arrives: idle timeout, absolute lifetime, the account
+    /// still existing and enabled, and any key it came with still valid
+    /// (<see cref="LiveUser"/>). Reading the raw dictionary instead
     /// would list sessions that have expired but not yet been swept — sign-ins
     /// that look present while the next request from any of them would be
     /// refused.
@@ -625,9 +743,7 @@ public sealed class AuthService
             var live = new List<SignedIn>();
             foreach (var (_, s) in _sessions)
             {
-                if (now - s.LastSeenUtc > SessionIdle || now - s.CreatedUtc > SessionMax) continue;
-                var user = _users.FindById(s.UserId);
-                if (user is null || !user.Enabled) continue;
+                if (LiveUser(s, now) is not UserAccount user) continue;
                 live.Add(new SignedIn(user.Username, s.ClientHint,
                                       (int)(now - s.LastSeenUtc).TotalSeconds));
             }
@@ -694,17 +810,17 @@ public sealed class AuthService
         return remaining > 0 ? remaining : 0;
     }
 
-    private void RegisterFailure(string key)
+    private void RegisterFailure(string key, int threshold = MaxFailuresBeforeLockout)
     {
         var t = _throttles.GetOrAdd(key, _ => new Throttle());
         lock (t)
         {
             t.Failures++;
             t.LastFailureUtc = DateTime.UtcNow;
-            if (t.Failures >= MaxFailuresBeforeLockout)
+            if (t.Failures >= threshold)
             {
                 // 5th failure → 15 s, doubling to a 15 minute ceiling
-                var steps = Math.Min(t.Failures - MaxFailuresBeforeLockout, 8);
+                var steps = Math.Min(t.Failures - threshold, 8);
                 var seconds = Math.Min(15 * Math.Pow(2, steps), 900);
                 t.LockedUntilUtc = DateTime.UtcNow.AddSeconds(seconds);
             }
@@ -732,8 +848,39 @@ public sealed class AuthService
         }
     }
 
-    private static string ClientKey(HttpListenerContext ctx) =>
-        ctx.Request.RemoteEndPoint?.Address.ToString() ?? "unknown";
+    /// <summary>
+    /// Who is on the other end, for lockouts, the log and "who is signed in".
+    ///
+    /// Behind a reverse proxy on this machine - the way the README says to add
+    /// TLS - every request arrives from 127.0.0.1. That made the whole world
+    /// one client: five wrong guesses from anyone locked the address, and the
+    /// address was everybody's, the owner's included. So from loopback, and
+    /// only from loopback, the proxy's X-Forwarded-For is believed, and only
+    /// its last entry: that is the one the proxy itself wrote, where anything
+    /// to the left of it is whatever the client chose to send. From anywhere
+    /// else the header is ignored, the same rule IsSecureRequest applies to
+    /// X-Forwarded-Proto. A program on this machine can claim any address it
+    /// likes this way - but it is already on the machine, and the per-account
+    /// lockout does not depend on the address at all. So can a client of a
+    /// proxy that forwards the header it was given rather than writing its
+    /// own, which is why Login also counts failures for the proxy as a whole.
+    /// </summary>
+    private static string ClientKey(HttpListenerContext ctx) => ClientOf(ctx).Client;
+
+    /// <summary>
+    /// The client, and the proxy it came through when the address was taken
+    /// from X-Forwarded-For. See ClientKey, and Login for what the proxy is for.
+    /// </summary>
+    private static (string Client, string? Proxy) ClientOf(HttpListenerContext ctx)
+    {
+        var peer = ctx.Request.RemoteEndPoint?.Address;
+        if (peer is null) return ("unknown", null);
+        if (IPAddress.IsLoopback(peer)
+            && ctx.Request.Headers["X-Forwarded-For"] is { Length: > 0 } forwarded
+            && IPAddress.TryParse(forwarded.Split(',')[^1].Trim(), out var client))
+            return (client.ToString(), peer.ToString());
+        return (peer.ToString(), null);
+    }
 
     private void PruneSessions()
     {

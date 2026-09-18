@@ -3164,3 +3164,115 @@ stopped it; a sign-in sends `"bye"`. Scratch server and files removed after.
   browsing of a whole-drive library). A separate, pre-existing audit finding.
 
 293 tests pass (256 before this work).
+
+---
+
+## v2.0.310 — access control and ffmpeg / conversions from the 2026-09-17 audit
+
+The remaining two groups of the audit bullet list: eight access-control
+findings and six ffmpeg findings. Same standard as v2.0.309: every fix has a
+test that was seen to fail with the fix taken out, for the stated reason, and
+pass with it in (the red runs were done by temporarily reverting each fix in
+place, restoring from a hashed backup, and re-checking the hashes).
+
+Three independent review rounds were run against this work. They mattered:
+round one found that the first legacy-token fix had made `Bearer ***` an
+administrator credential; round two found that the first "ended early" rule
+would have re-encoded healthy files on every play; round three found smaller
+holes in the rework. All of them are fixed below, and tested.
+
+### Access control / security
+
+- **Unticking passwordless** now ends the sessions the open account let in, and
+  an account with no password can no longer give itself one (403) — the first
+  password is an administrator's to set.
+- **Revoking a device key** ends the session minted with it at sign-in, the
+  session a remembered browser trades it for, and the session a password change
+  hands back.
+- **The legacy token** is read live, so changing it in settings applies at once;
+  an empty value now turns it off. `GET /api/config` redacts a copy instead of
+  writing `***` into the live config (which, once the token was read live, made
+  `***` the token for the length of each read — and two concurrent reads could
+  leave it that way: 80 of 80 probes accepted in the red run).
+- **`\??\UNC\host\share`** is refused: on Windows a local path must resolve to
+  `X:\…`.
+- **CSRF**: `Sec-Fetch-Site: same-site` (another port) is refused, and the
+  Origin check compares host *and* port. On plain HTTP browsers send no
+  Sec-Fetch-Site, so Origin is the whole check there; a local proxy that drops
+  the port from Host still works as before.
+- **Behind a local reverse proxy** the lockout keys on the right-most
+  X-Forwarded-For, so one client's typos no longer lock everyone out; failures
+  through the proxy are also counted together (50), so a client inventing an
+  address per guess is still stopped.
+- **Current-password guesses** are throttled on a per-account counter only
+  sessions on that account can move (sharing the sign-in counter let a stranger
+  block the owner's password change), and a password change opens its new
+  session directly instead of through sign-in and its lockouts.
+- **The last Server Admin** cannot step down or be deleted.
+
+### ffmpeg / conversions — each decided by measurement on this machine
+
+- **GPU session refusals** (ffmpeg 8.1.2, driver 616.56, RTX 4080 SUPER, 14
+  concurrent h264_nvenc encodes, output discarded): the 13th session is refused
+  with `OpenEncodeSessionEx failed` *first*, then nine more lines; an 8192-wide
+  source prints `No capable devices found` and the same generic lines with no
+  session involved. The eight-line stderr tail had always scrolled the real line
+  away, which is why generic lines were matched. Now only that line counts, only
+  for NVENC, and the tail keeps it. Changing "how many at a time" resets the
+  learned ceiling. (The audit's suggested list would have misread the 8K case,
+  and matching strictly without keeping the line would have missed every real
+  refusal — both shown red.)
+- **Truncated conversions**: a 60 s MP4 or MKV cut at 40% converts with exit 0
+  and the end marker over 24 s. Length alone cannot be trusted (an MP3 with cover
+  art: 0 s of segments against 180 probed; a VBR MP3 without a Xing header: 441 s
+  probed, 180 held), so a conversion is marked ended-early only when the input
+  reported a failure (`[in#…` lines — always present when cut off, never for a
+  whole file) *and* it came up more than max(30 s, 5%) short. Judged once, at
+  exit, written as `ended-early.txt`; nothing already on disk is re-judged. A
+  second attempt that stops in the same place is accepted as the file's own end;
+  a batch file is put back at most twice. TV playback and the Shelf use the same
+  rule.
+- **Queue in an outage**: a file whose drive or share cannot be reached stays
+  queued (re-checked every two minutes, not every tick); a start failure that is
+  everybody's (ffmpeg missing or blocked, transcodes folder unwritable) pauses the
+  queue with nothing dropped; one of the file's own gets three tries, then goes.
+- **Retranscode** checks that ffmpeg can still be launched (not only that it was
+  found at startup), keeps the conversion's height and keep marker, and removes
+  the old one all-or-nothing (measured: Windows refuses to rename a folder while
+  any file inside is open, in any share mode — so it is moved aside first).
+- **Stream copy** only for 8-bit 4:2:0 H.264 (and 4:2:0 HEVC, 10-bit included)
+  and AAC at 44.1/48 kHz; direct play refuses 10-bit H.264.
+- **Codec change**: the lookup reuses a conversion only in the running codec's
+  family, or a *finished* one in the configured codec's (a card that fails its
+  startup check does not hide an HEVC library) or under copy mode.
+
+### Known and left
+
+- The Transcodes panel still shows 10-bit H.264 `.mp4` files as ready to play:
+  its cache holds codec names only. Playing one converts it, correctly.
+- MP3s with cover art convert to a playlist with 0 s of segments — found while
+  measuring, pre-existing, not part of this audit.
+- A clean source whose container states the wrong length and that also reports a
+  demux error could still be judged ended-early once; the second attempt accepts
+  it.
+- `DlnaService`'s drive-root comparison (from v2.0.309's list) is untouched.
+
+### Live-system actions
+
+- **Read only:** live logs, `settings.json`, `server.json`,
+  `transcode-queue.json` (empty), `nvidia-smi` session count (0).
+- **GPU experiment:** 14 concurrent h264_nvenc encodes of a test pattern to
+  `-f null`, run only after confirming the live server's queue was empty and no
+  ffmpeg was running. Nothing written anywhere but a scratch folder.
+- The installed `ffmpeg.exe`/`ffprobe.exe` were used read-only for measurements
+  and tests; one test hard-links it into its own temp folder and deletes the link.
+
+### Test residue and cleanup
+
+All test servers, rigs and hard links live under `%TEMP%\claude` and are removed
+by the tests; one folder left by a run I stopped mid-way was checked (a test
+server's `server.json`) and deleted. Scratch measurement scripts and the hashed
+backups used for the red runs were removed from the session scratchpad. Process
+list checked after every run: only the live server.
+
+345 tests pass (293 before this work).
