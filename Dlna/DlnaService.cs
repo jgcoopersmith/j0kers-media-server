@@ -152,7 +152,7 @@ public sealed class DlnaService
     /// session or id table to keep in step with the disk. Every id is checked
     /// against the library roots before it is used for anything.
     /// </summary>
-    private static string Encode(string path) =>
+    internal static string Encode(string path) =>
         Convert.ToBase64String(Encoding.UTF8.GetBytes(path)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     private static string? Decode(string id)
@@ -182,14 +182,15 @@ public sealed class DlnaService
         catch { return null; }
         if (full.StartsWith(@"\\", StringComparison.Ordinal)) return null;
 
+        // The same test the rest of the server shares by. This had its own
+        // copy of the old one, which built "E:\\" for a library folder that is
+        // a whole drive - a separator doubled onto a root that already ends in
+        // one, which no path starts with. A television could see the drive and
+        // open nothing inside it.
         foreach (var root in Roots())
         {
-            string r;
-            try { r = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root)); }
-            catch { continue; }
-            if (full.Equals(r, StringComparison.OrdinalIgnoreCase)
-                || full.StartsWith(r + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-                return full;
+            try { if (Control.ControlApi.IsUnder(root, full)) return full; }
+            catch { /* an unusable root is skipped, as before */ }
         }
         return null;
     }

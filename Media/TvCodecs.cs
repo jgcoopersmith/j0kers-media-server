@@ -280,30 +280,105 @@ public sealed class TvCodecs
         return (key[..firstOfTwo], size, ticks);
     }
 
-    /// <summary>Codecs of a file, from the cache when its size and date are unchanged.</summary>
-    public (string? video, string? audio) Codecs(string file)
+    /// <summary>
+    /// One cached answer: "video|audio|pixfmt". The pixel format is the
+    /// newer third field.
+    ///
+    /// The codec name alone does not say whether a picture plays: 10-bit
+    /// H.264 ("Hi10P", common in anime releases) and 4:2:2 or 4:4:4 H.264 are
+    /// all "h264", and no browser and hardly a television decodes them. With
+    /// names only, the Transcodes window showed such an .mp4 as ready to play
+    /// as it stands, left it out of Convert, and a television was handed it
+    /// directly.
+    ///
+    /// Entries written before the field existed go on answering exactly as they
+    /// always did - the pixel format unknown, which is judged as before - and
+    /// the H.264 ones, where it matters, are refreshed by the sweep that already
+    /// walks the library (see IsSettled). They are not treated as unread in the
+    /// meantime: that hid every H.264 file from a television, and made opening
+    /// a folder in the Transcodes window probe them one by one inside the
+    /// request, until the sweep got round to them.
+    /// </summary>
+    private static (string? video, string? audio, string? pixFmt) Parse(string hit)
     {
-        // Never the server's own output: see _conversionsRoot.
-        if (IsConversionOutput(file)) return (null, null);
+        var p = hit.Split('|');
+        var video = string.IsNullOrEmpty(p.ElementAtOrDefault(0)) ? null : p[0];
+        var audio = string.IsNullOrEmpty(p.ElementAtOrDefault(1)) ? null : p[1];
+        var pixFmt = string.IsNullOrEmpty(p.ElementAtOrDefault(2)) ? null : p[2];
+        return (video, audio, pixFmt);
+    }
+
+    /// <summary>An answer recorded before the pixel format was, for a codec where it matters.</summary>
+    private static bool NeedsPixelFormat(string hit) => hit.Split('|').Length < 3 && hit.StartsWith("h264|", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Whether an H.264 picture is one a player can decode: 8-bit 4:2:0,
+    /// which is what every encoder here writes (-pix_fmt yuv420p). yuvj420p
+    /// is the same with full-range levels - what phones record - and plays.
+    /// A pixel format nobody knows is judged as it always was, as playable;
+    /// any other codec is not judged by this.
+    /// </summary>
+    public static bool PlayablePicture(string? video, string? pixFmt) =>
+        video is not "h264" || pixFmt is null or "yuv420p" or "yuvj420p";
+
+    /// <summary>
+    /// Whether this file's answer is complete, so the library sweep can pass
+    /// it by: a container a television never plays (decided without a probe),
+    /// or a cached answer that has its pixel format where it needs one.
+    /// </summary>
+    public bool IsSettled(string file)
+    {
+        if (UnplayableContainers.Contains(Path.GetExtension(file))) return true;
         string key;
         try
         {
             var info = new FileInfo(file);
-            if (!info.Exists) return (null, null);
+            if (!info.Exists) return true;   // nothing to read
             key = $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
         }
-        catch { return (null, null); }
+        catch { return true; }
+        lock (_lock) return _cache.TryGetValue(key, out var hit) && !NeedsPixelFormat(hit);
+    }
 
+    /// <summary>Reads a file again whatever the cache says - the sweep's answer to IsSettled.</summary>
+    public (string? video, string? audio, string? pixFmt) Refresh(string file) => Details(file, refresh: true);
+
+    /// <summary>Codecs of a file, from the cache when its size and date are unchanged.</summary>
+    public (string? video, string? audio) Codecs(string file)
+    {
+        var (video, audio, _) = Details(file);
+        return (video, audio);
+    }
+
+    /// <summary>Codecs and pixel format of a file, from the cache when its size and date are unchanged.</summary>
+    /// <param name="refresh">Read it again even when cached (see Refresh). A failed read keeps what was known.</param>
+    public (string? video, string? audio, string? pixFmt) Details(string file, bool refresh = false)
+    {
+        // Never the server's own output: see _conversionsRoot.
+        if (IsConversionOutput(file)) return (null, null, null);
+        string key;
+        try
+        {
+            var info = new FileInfo(file);
+            if (!info.Exists) return (null, null, null);
+            key = $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
+        }
+        catch { return (null, null, null); }
+
+        (string? video, string? audio, string? pixFmt)? known = null;
         lock (_lock)
         {
             if (_cache.TryGetValue(key, out var hit))
             {
-                var p = hit.Split('|');
-                return (Blank(p.ElementAtOrDefault(0)), Blank(p.ElementAtOrDefault(1)));
+                known = Parse(hit);
+                if (!refresh) return known.Value;
             }
         }
 
         var probed = Probe(file);
+        // A refresh that fails - a timeout while encoders have the disk - is
+        // not a reason to lose the answer the file already had.
+        if (probed.video is null && probed.audio is null && known is { } kept) return kept;
 
         // A probe that failed is not an answer, and must not be filed as one.
         //
@@ -335,7 +410,7 @@ public sealed class TvCodecs
         bool flush;
         lock (_lock)
         {
-            _cache[key] = $"{probed.video}|{probed.audio}";
+            _cache[key] = $"{probed.video}|{probed.audio}|{probed.pixFmt}";
             _dirty = true;
             // Write it down every so often rather than only at the end of a
             // scan. Probing this library is an hour of ffprobe launches, and
@@ -348,8 +423,6 @@ public sealed class TvCodecs
         }
         if (flush) Save();
         return probed;
-
-        static string? Blank(string? s) => string.IsNullOrEmpty(s) ? null : s;
     }
 
     /// <summary>
@@ -363,9 +436,18 @@ public sealed class TvCodecs
     {
         if (UnplayableContainers.Contains(Path.GetExtension(file))) return true;
 
-        var (video, audio) = Codecs(file);
+        var (video, audio, pixFmt) = Details(file);
+        return Needs(video, audio, pixFmt);
+    }
+
+    /// <summary>The television's answer from what is known of a file. See NeedsConversion.</summary>
+    private static bool Needs(string? video, string? audio, string? pixFmt)
+    {
         if (video is null) return false;                      // unprobeable: leave it alone
         if (!PlayableVideo.Contains(video)) return true;
+        // h264 by name, and not a picture a set decodes: 10-bit or 4:2:2. An
+        // h264 whose pixel format ffprobe could not name is left as it was.
+        if (pixFmt is not null && !PlayablePicture(video, pixFmt)) return true;
         if (audio is not null && !PlayableAudio.Contains(audio)) return true;
         return false;
     }
@@ -392,18 +474,13 @@ public sealed class TvCodecs
         }
         catch { return null; }
 
-        string? video, audio;
+        (string? video, string? audio, string? pixFmt) known;
         lock (_lock)
         {
             if (!_cache.TryGetValue(key, out var hit)) return null;   // not probed yet
-            var p = hit.Split('|');
-            video = string.IsNullOrEmpty(p.ElementAtOrDefault(0)) ? null : p[0];
-            audio = !string.IsNullOrEmpty(p.ElementAtOrDefault(1)) ? p[1] : null;
+            known = Parse(hit);
         }
-        if (video is null) return false;                 // probed but unreadable: leave alone
-        if (!PlayableVideo.Contains(video)) return true;
-        if (audio is not null && !PlayableAudio.Contains(audio)) return true;
-        return false;
+        return Needs(known.video, known.audio, known.pixFmt);
     }
 
     /// <summary>
@@ -418,7 +495,7 @@ public sealed class TvCodecs
     /// Refresh stopped responding, because the request behind them had become
     /// minutes of probing.
     /// </summary>
-    public (string? video, string? audio)? CodecsCached(string file)
+    public (string? video, string? audio, string? pixFmt)? CodecsCached(string file)
     {
         if (IsConversionOutput(file)) return null;
         string key;
@@ -433,9 +510,7 @@ public sealed class TvCodecs
         lock (_lock)
         {
             if (!_cache.TryGetValue(key, out var hit)) return null;
-            var p = hit.Split('|');
-            return (string.IsNullOrEmpty(p.ElementAtOrDefault(0)) ? null : p[0],
-                    string.IsNullOrEmpty(p.ElementAtOrDefault(1)) ? null : p[1]);
+            return Parse(hit);
         }
     }
 
@@ -457,7 +532,7 @@ public sealed class TvCodecs
         }
     }
 
-    private (string? video, string? audio) Probe(string file)
+    private (string? video, string? audio, string? pixFmt) Probe(string file)
     {
         try
         {
@@ -468,8 +543,10 @@ public sealed class TvCodecs
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
-            foreach (var a in new[] { "-v", "error", "-show_entries", "stream=codec_type,codec_name",
-                                      "-of", "csv=p=0", file })
+            // JSON, not csv: the pixel format is a video field only, and csv
+            // drops the names that would say which value on a line is which.
+            foreach (var a in new[] { "-v", "error", "-show_entries", "stream=codec_type,codec_name,pix_fmt",
+                                      "-of", "json", file })
                 psi.ArgumentList.Add(a);
             // Both pipes drained together, with a timeout that can actually
             // fire - see ProcessJob.Run. ffprobe has a great deal to say on
@@ -477,26 +554,33 @@ public sealed class TvCodecs
             // only stdout wedged this call, and the whole batch queue behind
             // it, against the first such file in the library.
             var run = Services.ProcessJob.Run(psi, 20_000);
-            if (run is null) return (null, null);
+            if (run is null) return (null, null, null);
             if (run.Value.TimedOut)
             {
                 Log.Warn("ffmpeg", $"ffprobe gave up on {Path.GetFileName(file)} after 20s - left unread");
-                return (null, null);
+                return (null, null, null);
             }
-            var output = run.Value.StdOut;
 
-            string? video = null, audio = null;
-            foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-            {
-                var parts = line.Trim().Split(',');
-                if (parts.Length < 2) continue;
-                var name = parts[0];       // csv order follows -show_entries: codec_name,codec_type
-                var type = parts[1];
-                if (type == "video" && video is null) video = name;
-                else if (type == "audio" && audio is null) audio = name;
-            }
-            return (video, audio);
+            string? video = null, audio = null, pixFmt = null;
+            using var doc = JsonDocument.Parse(run.Value.StdOut);
+            if (doc.RootElement.TryGetProperty("streams", out var streams))
+                foreach (var st in streams.EnumerateArray())
+                {
+                    var type = st.TryGetProperty("codec_type", out var t) ? t.GetString() : null;
+                    var name = st.TryGetProperty("codec_name", out var n) ? n.GetString() : null;
+                    if (type == "video" && video is null)
+                    {
+                        video = name;
+                        pixFmt = st.TryGetProperty("pix_fmt", out var pf) ? pf.GetString() : null;
+                    }
+                    else if (type == "audio" && audio is null) audio = name;
+                }
+            // "|" separates the fields in the cache, so a value carrying one
+            // (none does; ffprobe names are identifiers) could not be stored.
+            return (Clean(video), Clean(audio), Clean(pixFmt));
+
+            static string? Clean(string? s) => string.IsNullOrEmpty(s) || s.Contains('|') ? null : s;
         }
-        catch { return (null, null); }
+        catch { return (null, null, null); }
     }
 }

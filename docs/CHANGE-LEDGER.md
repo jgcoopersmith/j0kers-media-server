@@ -3276,3 +3276,100 @@ backups used for the red runs were removed from the session scratchpad. Process
 list checked after every run: only the live server.
 
 345 tests pass (293 before this work).
+
+---
+
+## v2.0.311 — the items v2.0.309 and v2.0.310 left open
+
+Every "known and left" item from the two entries above, each with a test seen
+to fail with its fix reverted in place and pass with it restored (hashed
+backups, re-checked after restoring). One item cannot be fixed and is said so
+below rather than chased.
+
+An independent review of the first version of this found a serious flaw in it:
+judging an early end by *when* the input complained. ffmpeg reports progress
+every half second of wall time, and a remux of a whole film takes about one
+second, so no report had arrived when a cut-off file failed — and the check took
+84 seconds of a 120-second film for a file that had recovered. Shown red with
+that version emulated; replaced by what the input *said* (below). The review's
+other findings are fixed below too, or measured and shown not to apply.
+
+- **DLNA and a whole-drive library folder (`E:\`).** `DlnaService` kept its own
+  copy of the old containment test (`"E:\\"`), so a television could see the
+  drive and open nothing inside it. It now uses the same `IsUnder` as the rest of
+  the server.
+- **10-bit H.264 shown as ready to play.** The probe cache held codec names only
+  (`h264|aac`). It now records the pixel format (`video|audio|pixfmt`), and
+  H.264 that is not 8-bit 4:2:0 is neither "plays as it stands" in the
+  Transcodes window nor handed to a television as-is. Old entries go on
+  answering exactly as before — nothing hidden, nothing probed inside a request —
+  and the sweep that already walks the library refreshes the old H.264 ones:
+  2,346 of this install's 3,666 entries, about a minute of background probing
+  after the first start. A refresh that fails keeps the answer the file had.
+- **MP3s with cover art converted to 0 seconds.** ffmpeg counts an attached
+  cover as a one-frame video; the playlist then listed a whole song as 0 s of
+  segments. A file whose only picture is cover art converts as audio (`-vn`),
+  in the conversion and in seek-ahead alike — decided from the same single probe
+  as the copy decision, and every probe path now ignores attached covers.
+- **A damaged file with an overstated length taken for a cut-off one.** Measured
+  (ffmpeg 8.1.2, 120 s sources, encode and copy): a cut-off MKV says "File ended
+  prematurely", a cut-off MP4 "partial file"; an MKV damaged part way says
+  "invalid as first byte of an EBML number" and converts to its real end, exit
+  0. So an early end now needs the input to say it *ran out* (or a failed read),
+  or ffmpeg itself to fail — an MP4 damaged 30% in and copied stops there, 35 s
+  of 120, exits with an error and still writes the end marker. A complaint that
+  the conversion carries on past no longer counts. (A cut-off AVI says nothing
+  either way and is not caught, as before.)
+- **Seek-ahead encoders outside every limit.** Capped at two per film and not at
+  all across films, and not counted toward the viewer ceiling (a seek is not a
+  conversion). Now no more run at once, in all, than "how many at a time". The
+  skipping film's own earlier skip stops first, then the oldest of anyone else's.
+- **Refused GPU sessions turning plays into batch jobs.** A play is started again
+  as itself 15 s later — same height, not kept — within the existing retry limit,
+  and cancelling or discarding it in the meantime calls the retry off. A
+  conversion to keep goes back to the batch queue, whose entries now carry their
+  height, so a kept 720p conversion comes back as 720p. A viewer's play is only
+  reported, as before. Nothing starts after the manager has been stopped.
+- **Plays carried over a restart as batch jobs.** The queue file saved every
+  running job as owed, so a film being watched at 720p during an upgrade came
+  back as a full-resolution conversion marked never to be evicted. Only
+  conversions to keep are carried over, each at its own height.
+- **Also fixed, same code (audit findings [34] and [1179]):** seek-ahead read the
+  height from the stream name — "… 1080p" names a full-resolution conversion
+  "…-1080p-hash" — and made every stand-in a scaled re-encode among copied
+  neighbours; it reads the recorded `height.txt`. Pressing Convert on a file a
+  play had already converted left it disposable; it is now marked to keep.
+
+### Measured, and needed no change
+
+- The review said a seek job stopped part way leaves a half-written segment that
+  is later served. Measured on ffmpeg 8.1.2, TS and fMP4: the HLS muxer creates a
+  segment's file only when the segment is complete, so a job killed at any point
+  leaves nothing its playlist does not list. A pin test stays in case an ffmpeg
+  behaves otherwise.
+
+### Cannot be fixed
+
+- A browser that closes without sending its close beacon at all looks exactly
+  like one that went to sleep: nothing reaches the server either way. The
+  shutdown logic treats that as a guess and waits for work in progress — the
+  right way round to be wrong. No change here can tell the two apart.
+
+### Found, not fixed
+
+- Noticed by the review, not confirmed: DLNA lists only files whose codecs are
+  known, and the probe sweep reads only video extensions, so music and photos may
+  never be listed to a television while ffmpeg is present. Pre-existing, outside
+  this list.
+
+### Live-system actions
+
+- **Read only:** the live `probe-cache.json` (counted, not changed).
+- Measurements used the installed `ffmpeg.exe`/`ffprobe.exe` read-only, on
+  scratch files in the session scratchpad, removed afterwards.
+- One stray file escaped the scratchpad: the fMP4 measurement named its init
+  segment without a folder, so ffmpeg wrote `init.seek00010.mp4` (829 bytes)
+  into the repository's own folder. Found by `git status` before committing and
+  deleted; nothing else was written outside the scratchpad.
+
+367 tests pass (345 before this work).

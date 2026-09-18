@@ -5492,7 +5492,7 @@ public sealed partial class ControlApi : IDisposable
     {
         var known = _tvCodecs?.CodecsCached(file);
         return known is not null
-               && Media.FfmpegManager.PlayableAsIs(file, known.Value.video, known.Value.audio);
+               && Media.FfmpegManager.PlayableAsIs(file, known.Value.video, known.Value.audio, known.Value.pixFmt);
     }
 
     /// <summary>
@@ -5819,7 +5819,7 @@ public sealed partial class ControlApi : IDisposable
                     if (batch.Count == 0) return;
                     var work = batch.ToArray();
                     batch.Clear();
-                    await Task.WhenAll(work.Select(f => Task.Run(() => _tvCodecs.Codecs(f)))).ConfigureAwait(false);
+                    await Task.WhenAll(work.Select(f => Task.Run(() => _tvCodecs.Refresh(f)))).ConfigureAwait(false);
                     done += work.Length;
                     probed += work.Length;
                     // No Save here. It serialises the entire cache and rewrites
@@ -5832,7 +5832,10 @@ public sealed partial class ControlApi : IDisposable
                 foreach (var file in files)
                 {
                     if (!TranscodableExt.Contains(Path.GetExtension(file))) continue;
-                    if (_tvCodecs.NeedsConversionCached(file) is not null) continue;
+                    // Unread, or read before the pixel format was recorded -
+                    // see TvCodecs.IsSettled. The second kind keeps answering as
+                    // it did until this reaches it; nothing is hidden meanwhile.
+                    if (_tvCodecs.IsSettled(file)) continue;
                     batch.Add(file);
                     if (batch.Count >= probeWidth) await Flush().ConfigureAwait(false);
                 }

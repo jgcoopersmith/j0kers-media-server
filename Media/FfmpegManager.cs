@@ -381,7 +381,7 @@ public sealed class FfmpegManager : IDisposable
     /// the sessions this one needs, and it is bounded — a file that cannot be
     /// converted for some other reason must not circle for ever.
     /// </summary>
-    private void RequeueForGpuSession(string file, string label)
+    private void RequeueForGpuSession(string file, string label, int height = 0)
     {
         var tries = _nvencRetries.AddOrUpdate(file, 1, (_, n) => n + 1);
         if (tries > MaxNvencRetries)
@@ -396,10 +396,80 @@ public sealed class FfmpegManager : IDisposable
         // is drained away and never put back, and SaveQueueState then writes
         // the loss down. ConcurrentQueue makes each operation safe on its own;
         // it cannot make a snapshot-and-refill atomic.
-        lock (_pumpLock) _vodQueue.Enqueue(file);
+        lock (_pumpLock)
+        {
+            if (height > 0) _vodQueueHeights[file] = height;
+            _vodQueue.Enqueue(file);
+        }
         Log.Info("ffmpeg", $"{label}: no free GPU encoder session — put back in the queue "
                          + $"(attempt {tries}). Conversions already running will free one.");
         SaveQueueState();
+    }
+
+    internal enum GpuRefusalRoute { Report, Batch, RetryHere }
+
+    /// <summary>
+    /// Where a conversion the GPU refused a session goes next.
+    ///
+    /// The batch queue starts everything it holds as a conversion to keep, so
+    /// it is the right place only for one that was to be kept already - at
+    /// whatever height, which its entries now carry. A play sent there came
+    /// back as something nobody asked for: a 720p play for a television became
+    /// a conversion marked never to be evicted, and at full resolution, while
+    /// the 720p stream the TV was waiting for never appeared. A play is tried
+    /// again as itself, a little later. A viewer's play is only reported (see
+    /// requeueOnGpuRefusal).
+    /// </summary>
+    internal static GpuRefusalRoute RouteGpuRefusal(bool keep, int height, bool requeueOnGpuRefusal) =>
+        !requeueOnGpuRefusal ? GpuRefusalRoute.Report
+        : keep ? GpuRefusalRoute.Batch
+        : GpuRefusalRoute.RetryHere;
+
+    /// <summary>How long a refused conversion waits before trying again. Shortened by tests only.</summary>
+    internal static TimeSpan GpuRetryDelay = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// Starts a refused conversion again, as the same request - same height,
+    /// same keep - once conversions already running have had a moment to free
+    /// a session. Bounded by the same count as the batch queue's retries.
+    /// </summary>
+    internal void RetryAfterGpuRefusal(string stream, string file, int height, bool keep, string label)
+    {
+        var tries = _nvencRetries.AddOrUpdate(file, 1, (_, n) => n + 1);
+        if (tries > MaxNvencRetries)
+        {
+            Log.Warn("ffmpeg", $"{label}: the GPU would not give it an encoder session after "
+                             + $"{MaxNvencRetries} attempts — giving up on this one.");
+            return;
+        }
+        Log.Info("ffmpeg", $"{label}: no free GPU encoder session — trying again in "
+                         + $"{(int)GpuRetryDelay.TotalSeconds}s as it was asked for"
+                         + (height > 0 ? $" ({height}p)" : "") + $" (attempt {tries})");
+        // Cancellable by the stream's name. In the gap there is no job and no
+        // queue entry, so without this, cancelling or deleting the conversion
+        // meanwhile did nothing - and the retry brought it back, twenty times
+        // over if the card kept saying no.
+        var cts = new CancellationTokenSource();
+        _pendingRetries.AddOrUpdate(stream, cts, (_, old) => { old.Cancel(); return cts; });
+        _ = Task.Delay(GpuRetryDelay, cts.Token).ContinueWith(t =>
+        {
+            _pendingRetries.TryRemove(new KeyValuePair<string, CancellationTokenSource>(stream, cts));
+            if (t.IsCanceled || _disposed) return;
+            try { StartVod(file, height, keep, requeueOnGpuRefusal: true); }
+            catch (Exception ex) { Log.Warn("ffmpeg", $"{label}: could not start the retry: {ex.Message}"); }
+        }, TaskScheduler.Default);
+    }
+
+    /// <summary>Retries waiting to start again after a GPU refusal, by stream. See RetryAfterGpuRefusal.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, CancellationTokenSource> _pendingRetries =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Calls off a retry waiting for this stream, if there is one. True if there was.</summary>
+    private bool CancelPendingRetry(string stream)
+    {
+        if (!_pendingRetries.TryRemove(stream, out var cts)) return false;
+        cts.Cancel();
+        return true;
     }
 
     /// <summary>
@@ -584,9 +654,21 @@ public sealed class FfmpegManager : IDisposable
     /// </summary>
     internal (bool video, bool audio) CopyableStreams(string file, int height)
     {
-        // "copy" as the configured encoder is handled by its own branch.
-        if (VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase)) return (false, false);
+        var (video, audio, _) = CopyDecision(file, height);
+        return (video, audio);
+    }
+
+    /// <summary>
+    /// CopyableStreams, plus whether the only picture is cover art - both from
+    /// one probe. StartVod and seek-ahead run this under the lock that every
+    /// status and playlist request waits on; asking ffprobe the same file
+    /// twice there was a second process launch for nothing.
+    /// </summary>
+    private (bool video, bool audio, bool coverOnly) CopyDecision(string file, int height)
+    {
         var s = ProbeStreamDetails(file);
+        // "copy" as the configured encoder is handled by its own branch.
+        if (VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase)) return (false, false, s.CoverArtOnly);
         // Unreadable means encode, exactly as before — never guess in the
         // direction that hands a player a stream it cannot decode.
         var copyVideo = height <= 0
@@ -596,7 +678,7 @@ public sealed class FfmpegManager : IDisposable
         var copyAudio = s.Audio is not null
                         && CodecFamily(s.Audio) == CodecFamily(AudioEncoder)
                         && SoundCopies(s.Audio, s.SampleRate);
-        return (copyVideo, copyAudio);
+        return (copyVideo, copyAudio, s.CoverArtOnly);
     }
 
     /// <summary>
@@ -633,7 +715,22 @@ public sealed class FfmpegManager : IDisposable
         CodecFamily(codec) != "aac" || sampleRate is 44100 or 48000;
 
     /// <summary>What <see cref="CopyableStreams"/> needs to know about a file, in one probe.</summary>
-    private readonly record struct StreamDetails(string? Video, string? PixFmt, string? Audio, int SampleRate);
+    /// <param name="CoverArtOnly">
+    /// Its only "video" is a picture attached to the audio - an album cover.
+    /// See <see cref="IsCoverArtOnly"/>.
+    /// </param>
+    private readonly record struct StreamDetails(string? Video, string? PixFmt, string? Audio, int SampleRate,
+                                                 bool CoverArtOnly = false);
+
+    /// <summary>
+    /// Whether a file's only picture is cover art: an MP3 or M4A with an album
+    /// cover attached. ffmpeg counts that as a video stream of one frame, and
+    /// without being told otherwise it converted one: the cover became a
+    /// one-frame video, the playlist listed the whole song as 0 seconds of
+    /// segments (measured: 0 against 180), and a player had nothing to seek
+    /// through. Such a file converts as the audio it is.
+    /// </summary>
+    internal bool IsCoverArtOnly(string file) => CopyDecision(file, 0).coverOnly;
 
     /// <summary>
     /// First video stream's codec and pixel format, first audio stream's
@@ -652,7 +749,8 @@ public sealed class FfmpegManager : IDisposable
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
-            foreach (var a in new[] { "-v", "error", "-show_entries", "stream=codec_type,codec_name,pix_fmt,sample_rate",
+            foreach (var a in new[] { "-v", "error",
+                                      "-show_entries", "stream=codec_type,codec_name,pix_fmt,sample_rate:stream_disposition=attached_pic",
                                       "-of", "json", file })
                 psi.ArgumentList.Add(a);
             var run = Services.ProcessJob.Run(psi, 15_000);   // both pipes, real timeout
@@ -660,11 +758,20 @@ public sealed class FfmpegManager : IDisposable
             using var doc = System.Text.Json.JsonDocument.Parse(run.Value.StdOut);
             string? video = null, pixFmt = null, audio = null;
             var rate = 0;
+            var cover = false;
             if (doc.RootElement.TryGetProperty("streams", out var streams))
                 foreach (var st in streams.EnumerateArray())
                 {
                     var type = st.TryGetProperty("codec_type", out var t) ? t.GetString() : null;
                     var name = st.TryGetProperty("codec_name", out var n) ? n.GetString() : null;
+                    // A picture attached to the audio is not the film's picture.
+                    if (type == "video" && st.TryGetProperty("disposition", out var disp)
+                        && disp.TryGetProperty("attached_pic", out var ap)
+                        && ap.ValueKind == System.Text.Json.JsonValueKind.Number && ap.GetInt32() == 1)
+                    {
+                        cover = true;
+                        continue;
+                    }
                     if (type == "video" && video is null)
                     {
                         video = name;
@@ -681,7 +788,7 @@ public sealed class FfmpegManager : IDisposable
                                                System.Globalization.CultureInfo.InvariantCulture, out rate);
                     }
                 }
-            return new StreamDetails(video, pixFmt, audio, rate);
+            return new StreamDetails(video, pixFmt, audio, rate, CoverArtOnly: cover && video is null && audio is not null);
         }
         catch
         {
@@ -757,12 +864,7 @@ public sealed class FfmpegManager : IDisposable
         {
             if (!DirectPlayExt.Contains(Path.GetExtension(file))) return false;
             var s = ProbeStreamDetails(file);
-            // And the picture a browser can actually decode: 10-bit H.264 is
-            // h264 by name and a black rectangle in Chrome. See PictureCopies.
-            // The sound is not checked here - a browser plays AAC at any rate;
-            // it is televisions that do not, and they are not handed this.
-            return PlayableAsIs(file, s.Video, s.Audio)
-                && (CodecFamily(s.Video!) != "h264" || s.PixFmt is "yuv420p" or "yuvj420p");
+            return PlayableAsIs(file, s.Video, s.Audio, s.PixFmt);
         }
         catch { return false; }
     }
@@ -777,52 +879,30 @@ public sealed class FfmpegManager : IDisposable
     /// every time, so opening a folder became thousands of process launches
     /// and the Transcode window's Up and Refresh stopped answering.
     /// </summary>
-    public static bool PlayableAsIs(string file, string? video, string? audio)
+    public static bool PlayableAsIs(string file, string? video, string? audio, string? pixFmt)
     {
         if (!DirectPlayExt.Contains(Path.GetExtension(file))) return false;
         if (video is null || audio is null) return false;   // unread: convert, as before
+        // And a picture a browser can actually decode: 10-bit or 4:2:2 H.264
+        // is h264 by name and a black rectangle in Chrome. The sound is not
+        // held to TvCodecs' rates here - a browser plays AAC at any rate; it
+        // is televisions that do not, and they are not handed this.
         return DirectPlayVideo.Contains(CodecFamily(video))
-            && DirectPlayAudio.Contains(CodecFamily(audio));
+            && DirectPlayAudio.Contains(CodecFamily(audio))
+            && TvCodecs.PlayablePicture(CodecFamily(video), pixFmt);
     }
 
-    /// <summary>First video and audio codec names of a media file, via ffprobe.</summary>
+    /// <summary>
+    /// First video and audio codec names of a media file, via ffprobe - the
+    /// same probe as everything else here, so an attached album cover is never
+    /// taken for the picture. This read its own csv and did take it: with the
+    /// cover listed first, the container decision below judged a PNG while the
+    /// real picture was being copied (see NeedsFmp4).
+    /// </summary>
     private (string? video, string? audio) ProbeCodecs(string file)
     {
-        try
-        {
-            var psi = new ProcessStartInfo(FfprobePath)
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            foreach (var a in new[] { "-v", "error", "-show_entries", "stream=codec_type,codec_name",
-                                      "-of", "csv=p=0", file })
-                psi.ArgumentList.Add(a);
-            // Both pipes read at once - see ProcessJob.Run. Draining only
-            // stdout leaves ffprobe blocked writing a stderr nobody empties,
-            // and this call never returns.
-            var run = Services.ProcessJob.Run(psi, 15_000);
-            if (run is null) return (null, null);
-            var output = run.Value.StdOut;
-            string? video = null, audio = null;
-            foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-            {
-                var parts = line.Trim().Split(',');
-                if (parts.Length < 2) continue;
-                // csv order follows the -show_entries list: codec_name,codec_type
-                var name = parts[0];
-                var type = parts[1];
-                if (type == "video" && video is null) video = name;
-                else if (type == "audio" && audio is null) audio = name;
-            }
-            return (video, audio);
-        }
-        catch
-        {
-            return (null, null);
-        }
+        var s = ProbeStreamDetails(file);
+        return (s.Video, s.Audio);
     }
 
     /// <summary>Length of a media file in seconds, or 0 when it can't be determined.</summary>
@@ -1091,6 +1171,7 @@ public sealed class FfmpegManager : IDisposable
                                                 bool requeueOnGpuRefusal = true)
     {
         if (!Available) throw new InvalidOperationException("ffmpeg is not available");
+        if (_disposed) throw new ObjectDisposedException(nameof(FfmpegManager));
         var info = new FileInfo(file);
         if (!info.Exists) throw new FileNotFoundException("no such file", file);
 
@@ -1103,6 +1184,9 @@ public sealed class FfmpegManager : IDisposable
         string started;
         lock (_lock)
         {
+            // Checked again under the lock Dispose takes to stop everything: a
+            // start that was waiting on it must not launch a job after that.
+            if (_disposed) throw new ObjectDisposedException(nameof(FfmpegManager));
             // Listed at all, exited or not: a job leaves the table once its
             // exit has been judged, and until then its end marker may yet be
             // found not to mean the end. See IsFinished.
@@ -1197,7 +1281,7 @@ public sealed class FfmpegManager : IDisposable
             // repeat the same information over stderr
             // Decided once, before anything is built: the container choice
             // below has to agree with it.
-            var (copyVideo, copyAudio) = CopyableStreams(info.FullName, height);
+            var (copyVideo, copyAudio, coverOnly) = CopyDecision(info.FullName, height);
             if (copyVideo && copyAudio)
                 Log.Info("ffmpeg", $"{info.Name} is already {CodecFamily(VideoEncoder)}/{CodecFamily(AudioEncoder)} - packaging it without re-encoding");
             else if (copyVideo)
@@ -1209,9 +1293,15 @@ public sealed class FfmpegManager : IDisposable
             // before -i, which is where input options belong: ffmpeg refuses
             // -hwaccel after the file it applies to. Copying the picture
             // decodes nothing, so there is no decoder to accelerate.
-            if (!copyVideo) args.AddRange(HardwareDecodeArgs(info.FullName));
+            if (!copyVideo && !coverOnly) args.AddRange(HardwareDecodeArgs(info.FullName));
             args.AddRange(new[] { "-i", info.FullName });
-            if (copyVideo || VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase))
+            if (coverOnly)
+            {
+                // A song with its cover attached: the audio is the whole of
+                // it. See IsCoverArtOnly.
+                args.Add("-vn");
+            }
+            else if (copyVideo || VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase))
             {
                 // The picture already is what is being asked for, so it is
                 // packaged rather than decoded and made again. Re-encoding it
@@ -1287,7 +1377,9 @@ public sealed class FfmpegManager : IDisposable
                     // nothing can read ffmpeg's end marker as "done" without
                     // this verdict beside it. See IsFinished.
                     (double Covered, double Expected)? endedEarly = null;
-                    try { endedEarly = JudgeEndedEarly(dir, info.FullName, tail, produced); }
+                    var exitCode = 0;
+                    try { exitCode = p.ExitCode; } catch { /* reaped already: judged on stderr alone */ }
+                    try { endedEarly = JudgeEndedEarly(dir, info.FullName, tail, produced, exitCode); }
                     catch (Exception ex) { Log.Warn("ffmpeg", $"could not check {stream} for an early end: {ex.Message}"); }
 
                     // keep the job table from accumulating finished processes.
@@ -1349,7 +1441,7 @@ public sealed class FfmpegManager : IDisposable
                     // out loud, and listed with the other problems: it is the
                     // one outcome that looks like success everywhere else.
                     if (!superseded && endedEarly is { } short_)
-                        ReportEndedEarly(info.FullName, short_.Covered, short_.Expected, keep);
+                        ReportEndedEarly(info.FullName, short_.Covered, short_.Expected, keep, height);
 
                     // Refused a GPU session is not the same as failed, and
                     // must not cost the conversion. Asking for more encoder
@@ -1367,7 +1459,8 @@ public sealed class FfmpegManager : IDisposable
                     // until the next restart. That queue is the server
                     // administrator's; once a read account could press play,
                     // it could fill it. See requeueOnGpuRefusal.
-                    if (refused && !requeueOnGpuRefusal)
+                    var route = RouteGpuRefusal(keep, height, requeueOnGpuRefusal);
+                    if (refused && route == GpuRefusalRoute.Report)
                     {
                         _nvencRefusals++;
                         Log.Warn("ffmpeg", $"the GPU refused an encoder session for {info.Name} - a viewer's play, "
@@ -1393,7 +1486,10 @@ public sealed class FfmpegManager : IDisposable
                                              + $"holding conversions at {running} at a time. "
                                              + $"(\"How many at a time\" is set to {MaxConcurrentVod}.)");
                         }
-                        RequeueForGpuSession(info.FullName, $"vod {info.Name}");
+                        if (route == GpuRefusalRoute.Batch)
+                            RequeueForGpuSession(info.FullName, $"vod {info.Name}", height);
+                        else
+                            RetryAfterGpuRefusal(stream, info.FullName, height, keep, $"vod {info.Name}");
                     }
                     else
                     {
@@ -1452,7 +1548,29 @@ public sealed class FfmpegManager : IDisposable
     // what it has done, and stopping it would mean re-encoding all of that.
     private readonly Dictionary<string, List<SeekJob>> _seekJobs = new(StringComparer.OrdinalIgnoreCase);
 
-    private sealed record SeekJob(int StartIndex, Process Process);
+    private sealed record SeekJob(int StartIndex, Process Process)
+    {
+        public DateTime StartedUtc { get; } = DateTime.UtcNow;
+    }
+
+    /// <summary>Seek-ahead encoders running now for one stream. For tests.</summary>
+    internal int SeekJobCountFor(string stream)
+    {
+        lock (_lock)
+            return _seekJobs.TryGetValue(stream, out var list)
+                ? list.Count(j => { try { return !j.Process.HasExited; } catch { return false; } })
+                : 0;
+    }
+
+    /// <summary>Seek-ahead encoders running now, across every stream. For tests and the cap in EnsureVodSegment.</summary>
+    internal int SeekJobCount
+    {
+        get
+        {
+            lock (_lock)
+                return _seekJobs.Values.Sum(list => list.Count(j => { try { return !j.Process.HasExited; } catch { return false; } }));
+        }
+    }
 
     /// <summary>How many seconds of film one segment holds.</summary>
     public static int SegmentSeconds => VodSegmentSeconds;
@@ -1563,6 +1681,19 @@ public sealed class FfmpegManager : IDisposable
         catch { return null; }
     }
 
+    /// <summary>The height a conversion recorded for itself in height.txt (0 = source height), or null without one.</summary>
+    private static int? RecordedHeight(string dir)
+    {
+        try
+        {
+            return int.TryParse(File.ReadAllText(Path.Combine(dir, "height.txt")).Trim(),
+                                System.Globalization.NumberStyles.Integer,
+                                System.Globalization.CultureInfo.InvariantCulture, out var h) && h >= 0
+                ? h : null;
+        }
+        catch { return null; }
+    }
+
     /// <summary>
     /// Makes sure something is producing the segment at <paramref name="index"/>,
     /// starting an encoder at that point in the film if nothing already is.
@@ -1625,6 +1756,32 @@ public sealed class FfmpegManager : IDisposable
                 try { if (!oldest.Process.HasExited) oldest.Process.Kill(true); } catch { }
             }
 
+            // And across every stream: no more than "how many at a time" in
+            // all, the owner's own figure for how many encoders this machine
+            // should run. Two per stream bounded one film, and nothing bounded
+            // the films - skipping around in a few partly converted streams
+            // started encoders outside every limit, the viewer ceiling on
+            // conversions included, because a seek is not a conversion. This
+            // film's own earlier skip goes first - it is the one the person
+            // skipping has just left behind - and only then the oldest of
+            // anybody else's, rather than someone else's that is being watched.
+            var cap = Math.Max(2, MaxConcurrentVod);
+            var running = _seekJobs
+                .SelectMany(kv => kv.Value.Select(j => (Stream: kv.Key, Job: j)))
+                .Where(x => { try { return !x.Job.Process.HasExited; } catch { return false; } })
+                .OrderBy(x => string.Equals(x.Stream, stream, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+                .ThenBy(x => x.Job.StartedUtc)
+                .ToList();
+            while (running.Count >= cap)
+            {
+                var (oldStream, oldJob) = running[0];
+                running.RemoveAt(0);
+                if (_seekJobs.TryGetValue(oldStream, out var theirs)) theirs.Remove(oldJob);
+                try { oldJob.Process.Kill(true); } catch { }
+                Log.Info("ffmpeg", $"seek-ahead: {cap} running across all streams - stopped the oldest, "
+                                 + $"{oldStream}@{oldJob.StartIndex}, for {stream}@{index}");
+            }
+
             var at = (double)index * VodSegmentSeconds;
             var fmp4 = fmp4Check;
             var segExt = extCheck;
@@ -1647,9 +1804,21 @@ public sealed class FfmpegManager : IDisposable
             // height — writing full-resolution stand-ins into a 720p
             // conversion. All three produce segments that do not match their
             // neighbours, and with fMP4 they do not match the init either.
-            var seekHeight = HeightFromStreamName(stream);
-            var (seekCopyV, seekCopyA) = CopyableStreams(source, seekHeight);
-            if (seekCopyV || VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase))
+            // The height the conversion was made at, from its own record - not
+            // from the name, which StartVod explains cannot be trusted: a film
+            // called "Blade Runner (2017) 1080p" names its full-resolution
+            // conversion "...-2017-1080p-<hash>", and reading 1080 off that
+            // made every stand-in segment a scaled re-encode dropped between
+            // copied full-size neighbours. The name is only a fallback for a
+            // conversion made before the record existed (the backfill writes
+            // one for those at startup).
+            var seekHeight = RecordedHeight(dir) ?? HeightFromStreamName(stream);
+            var (seekCopyV, seekCopyA, seekCoverOnly) = CopyDecision(source, seekHeight);
+            if (seekCoverOnly)
+            {
+                args.Add("-vn");   // as the conversion did - see IsCoverArtOnly
+            }
+            else if (seekCopyV || VideoEncoder.Equals("copy", StringComparison.OrdinalIgnoreCase))
             {
                 args.AddRange(new[] { "-c:v", "copy" });
             }
@@ -1900,13 +2069,20 @@ public sealed class FfmpegManager : IDisposable
 
     /// <summary>
     /// Whether the conversion that just exited ran out of input before the
-    /// film did. It takes both halves. The input said it failed
-    /// (StderrTail.InputFailed: measured, every cut-off source says so and a
-    /// whole one says nothing) - which is what keeps the cover-art MP3s, the
-    /// headerless VBR files and the estimated VOBs out of it. AND what was
-    /// produced falls well short of the length the source was probed at: 30
-    /// seconds, or 5% of a long film, so a file missing its last few
-    /// kilobytes is not thrown away over a second.
+    /// film did. It takes both halves.
+    ///
+    /// Evidence that it stopped for want of input: the input said it ran out
+    /// (StderrTail.InputEnded - "File ended prematurely", "partial file", a
+    /// failed read), or ffmpeg itself failed (measured: an MP4 damaged 30% in
+    /// and copied stops there, 35 seconds of 120, and exits with an error while
+    /// still writing the end marker). A whole file gives neither, which is what
+    /// keeps the cover-art MP3s, the headerless VBR files and the estimated
+    /// VOBs out of it - and so does a file with a damaged patch that ffmpeg
+    /// reads past to its real end (a complaint, but not "ended", and exit 0).
+    ///
+    /// AND what was produced falls well short of the length the source was
+    /// probed at: 30 seconds, or 5% of a long film, so a file missing its last
+    /// few kilobytes is not thrown away over a second.
     ///
     /// A source that ends early twice in the same place is the file itself -
     /// damaged, or really that short - and is accepted as it is rather than
@@ -1914,11 +2090,11 @@ public sealed class FfmpegManager : IDisposable
     /// early, or null.
     /// </summary>
     private (double Covered, double Expected)? JudgeEndedEarly(string dir, string source, StderrTail tail,
-                                                              double producedSeconds)
+                                                              double producedSeconds, int exitCode)
     {
-        if (!tail.InputFailed)
+        if (!tail.InputEnded && exitCode == 0)
         {
-            _endedEarlyBefore.TryRemove(source, out _);   // read cleanly: nothing to remember
+            _endedEarlyBefore.TryRemove(source, out _);   // read to its end: nothing to remember
             return null;
         }
         var playlist = Path.Combine(dir, "index.m3u8");
@@ -1941,7 +2117,6 @@ public sealed class FfmpegManager : IDisposable
             _endedEarlyBefore.TryRemove(source, out _);   // whole this time: nothing to remember
             return null;
         }
-
         if (_endedEarlyBefore.TryGetValue(source, out var before)
             && Math.Abs(before - covered) <= Math.Max(2, covered * 0.01))
         {
@@ -2086,9 +2261,10 @@ public sealed class FfmpegManager : IDisposable
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _vodDone =
         new(StringComparer.OrdinalIgnoreCase);
 
-    public VodState VodStatusFor(string file)
+    /// <param name="height">Which conversion: 0 (the default) is full resolution.</param>
+    public VodState VodStatusFor(string file, int height = 0)
     {
-        var stream = VodStreamName(file);
+        var stream = VodStreamName(file, height);
         if (stream is null) return VodState.None;
         // A job in the table comes first, ahead of the cache below: a
         // conversion remembered as done, then deleted by the cache sweep and
@@ -2170,7 +2346,23 @@ public sealed class FfmpegManager : IDisposable
         /// sidecar keeps its settings and simply restores nothing.
         /// </summary>
         public List<string> Waiting { get; set; } = new();
+
+        /// <summary>
+        /// The height to convert a waiting file at, for the few that are not
+        /// full resolution. Absent means full resolution, which is every entry
+        /// written before this existed.
+        /// </summary>
+        public Dictionary<string, int> Heights { get; set; } = new();
     }
+
+    /// <summary>
+    /// Heights for queued files that are not converted at full resolution. See
+    /// QueueSettings.Heights, and RouteGpuRefusal for why the queue needs them.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _vodQueueHeights =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private int QueuedHeight(string file) => _vodQueueHeights.TryGetValue(file, out var h) ? h : 0;
 
     private void LoadQueueSettings()
     {
@@ -2184,6 +2376,8 @@ public sealed class FfmpegManager : IDisposable
 
             foreach (var f in s.Waiting ?? new List<string>())
                 if (!string.IsNullOrWhiteSpace(f)) _vodQueue.Enqueue(f);
+            foreach (var (f, h) in s.Heights ?? new Dictionary<string, int>())
+                if (h > 0) _vodQueueHeights[f] = h;
             if (!_vodQueue.IsEmpty)
                 Log.Info("ffmpeg", $"transcode queue restored: {_vodQueue.Count} file(s) still to convert");
         }
@@ -2238,23 +2432,41 @@ public sealed class FfmpegManager : IDisposable
         try
         {
             var outstanding = new List<string>();
+            var heights = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             foreach (var stream in ActiveVodStreams)
             {
                 try
                 {
-                    var src = File.ReadAllText(Path.Combine(_mediaRoot, stream, "source.txt")).Trim();
-                    if (src.Length > 0) outstanding.Add(src);
+                    // Only conversions somebody asked to keep - what the queue
+                    // itself starts, and what the Transcodes window does -
+                    // each at the height it was being made at. Every running
+                    // job went in, plays included, and a queue entry had no
+                    // height: a film somebody was watching at 720p when the
+                    // server was restarted came back as a full-resolution
+                    // conversion marked never to be evicted. A play is simply
+                    // played again; it is not owed.
+                    var dir = Path.Combine(_mediaRoot, stream);
+                    if (!IsKept(dir)) continue;
+                    var src = File.ReadAllText(Path.Combine(dir, "source.txt")).Trim();
+                    if (src.Length == 0) continue;
+                    outstanding.Add(src);
+                    if (RecordedHeight(dir) is int h and > 0) heights[src] = h;
                 }
                 catch { /* no source.txt: nothing to resume it by */ }
             }
             foreach (var f in _vodQueue.ToArray())
-                if (!outstanding.Contains(f, StringComparer.OrdinalIgnoreCase)) outstanding.Add(f);
+            {
+                if (outstanding.Contains(f, StringComparer.OrdinalIgnoreCase)) continue;
+                outstanding.Add(f);
+                if (QueuedHeight(f) is var h and > 0) heights[f] = h;
+            }
 
             var json = System.Text.Json.JsonSerializer.Serialize(new QueueSettings
             {
                 MaxParallel = MaxConcurrentVod,
                 StaggerSeconds = VodStaggerSeconds,
                 Waiting = outstanding,
+                Heights = heights,
             });
             // Atomic. This file exists so a queue survives a restart, and it
             // was the one write most likely to be interrupted by one: an
@@ -2330,6 +2542,7 @@ public sealed class FfmpegManager : IDisposable
             if (kept.Length == all.Length) return false;   // wasn't waiting
             while (_vodQueue.TryDequeue(out _)) { }
             foreach (var f in kept) _vodQueue.Enqueue(f);
+            _vodQueueHeights.TryRemove(file, out _);
             SaveQueueState();
             return true;
         }
@@ -2342,6 +2555,7 @@ public sealed class FfmpegManager : IDisposable
         {
             var n = 0;
             while (_vodQueue.TryDequeue(out _)) n++;
+            _vodQueueHeights.Clear();
             SaveQueueState();
             return n;
         }
@@ -2357,7 +2571,20 @@ public sealed class FfmpegManager : IDisposable
         var n = 0;
         foreach (var f in files)
         {
-            if (VodStatusFor(f) is VodState.Done or VodState.Converting) continue;
+            if (VodStatusFor(f) is VodState.Done or VodState.Converting)
+            {
+                // Asked for in the Transcodes window, so it is one to keep -
+                // even though there is nothing to queue. Passed over as it
+                // was, a conversion that a play had started stayed disposable:
+                // the cache could evict it, and a restart mid-way would not
+                // carry it over (only kept ones are).
+                if (VodStreamName(f) is string done)
+                {
+                    var dir = Path.Combine(_mediaRoot, done);
+                    if (Directory.Exists(dir)) MarkKept(dir, done);
+                }
+                continue;
+            }
             // Both the duplicate check and the enqueue under the same lock, so
             // a concurrent RemoveFromVodQueue cannot drain this away between
             // them — see the note there.
@@ -2580,10 +2807,12 @@ public sealed class FfmpegManager : IDisposable
                     // done. Twice today that was read as the server throwing
                     // the queue away, and checking it by hand was the only way
                     // to find out otherwise.
-                    var state = VodStatusFor(file);
+                    var queuedHeight = QueuedHeight(file);
+                    var state = VodStatusFor(file, queuedHeight);
                     if (state is VodState.Done or VodState.Converting)
                     {
                         dequeued = true;
+                        _vodQueueHeights.TryRemove(file, out _);
                         Log.Info("ffmpeg", $"skipped: {Path.GetFileName(file)} — "
                             + (state == VodState.Done ? "already converted" : "already converting"));
                         continue;
@@ -2591,6 +2820,7 @@ public sealed class FfmpegManager : IDisposable
                     if (!File.Exists(file))
                     {
                         dequeued = true;
+                        _vodQueueHeights.TryRemove(file, out _);
                         Log.Info("ffmpeg", $"skipped: {Path.GetFileName(file)} — the file is no longer there");
                         continue;
                     }
@@ -2616,8 +2846,9 @@ public sealed class FfmpegManager : IDisposable
                     // longer than that the next follows immediately after,
                     // which is the honest reading of a minimum gap.
                     _lastVodStartUtc = DateTime.UtcNow;
-                    StartVod(file, keep: true);   // registers the job; its exit pumps the queue again
+                    StartVod(file, queuedHeight, keep: true);   // registers the job; its exit pumps the queue again
                     dequeued = true;
+                    _vodQueueHeights.TryRemove(file, out _);
                     _pumpStalledBy = null;
                     _startFailures.TryRemove(file, out _);
                 }
@@ -2633,6 +2864,7 @@ public sealed class FfmpegManager : IDisposable
                     else
                     {
                         dequeued = true;
+                        _vodQueueHeights.TryRemove(file, out _);
                         Log.Info("ffmpeg", $"skipped: {Path.GetFileName(file)} — the file is no longer there");
                     }
                 }
@@ -2674,6 +2906,7 @@ public sealed class FfmpegManager : IDisposable
                     else
                     {
                         _startFailures.TryRemove(file, out _);
+                        _vodQueueHeights.TryRemove(file, out _);
                         dequeued = true;
                         Log.Warn("ffmpeg", $"gave up on queued conversion of {Path.GetFileName(file)} after "
                                          + $"{MaxStartFailures} attempts: {ex.Message}");
@@ -2786,7 +3019,7 @@ public sealed class FfmpegManager : IDisposable
     /// file that keeps stopping in different places - still being copied, a
     /// failing disk - is put back twice at most.
     /// </summary>
-    private void ReportEndedEarly(string source, double covered, double expected, bool batch)
+    private void ReportEndedEarly(string source, double covered, double expected, bool batch, int height)
     {
         var name = Path.GetFileName(source);
         var detail = $"ended early: {Inv(Math.Round(covered))}s of a {Inv(Math.Round(expected))}s film";
@@ -2797,6 +3030,8 @@ public sealed class FfmpegManager : IDisposable
             lock (_pumpLock)
                 if (!_vodQueue.Contains(source, StringComparer.OrdinalIgnoreCase))
                 {
+                    // at the height it was being made at, not full resolution
+                    if (height > 0) _vodQueueHeights[source] = height;
                     _vodQueue.Enqueue(source);
                     requeued = true;
                 }
@@ -3112,6 +3347,7 @@ public sealed class FfmpegManager : IDisposable
     public bool DiscardVod(string stream)
     {
         _vodDone.TryRemove(stream, out _);   // it is about to stop being done
+        CancelPendingRetry(stream);          // and must not be started again behind the discard
         lock (_lock)
         {
             if (_vodJobs.TryGetValue(stream, out var p))
@@ -3167,11 +3403,14 @@ public sealed class FfmpegManager : IDisposable
     /// <summary>Kills a running conversion (e.g. before deleting its stream). True if one was running.</summary>
     public bool CancelVod(string stream)
     {
+        // A retry waiting after a GPU refusal is this conversion too: it has
+        // no job to kill yet, and left alone it would start one.
+        var retry = CancelPendingRetry(stream);
         Process? p;
         lock (_lock)
         {
             StopSeekJobs(stream);
-            if (!_vodJobs.Remove(stream, out p)) return false;
+            if (!_vodJobs.Remove(stream, out p)) return retry;
             RefreshVodJobView();
         }
         // Outside the lock: KillAndRelease waits up to 2s, and PumpVodQueue takes
@@ -4312,25 +4551,27 @@ public sealed class FfmpegManager : IDisposable
     /// anyone read it. That line is kept, and put in front of the tail when it
     /// has fallen out of it.
     ///
-    /// And whether the INPUT failed at any point - see InputFailed.
+    /// And whether the INPUT said it ran out - see InputEnded.
     /// </summary>
     internal sealed class StderrTail
     {
         private const int Lines = 8;
         private readonly Queue<string> _lines = new(Lines);
         private string? _sessionRefusal;
-        private bool _inputFailed;
+        private bool _inputEnded;
 
         /// <summary>
-        /// Whether the reading side reported a failure: a demuxer error (the
-        /// "[in#0/..." lines, which at -loglevel error only ever carry
-        /// errors) or a read that failed outright. Measured: a source cut off
-        /// part way always says so here - "partial file" from MP4, "File
-        /// ended prematurely" from MKV, whether encoded or copied - and a
-        /// whole file says nothing at all. Decoder complaints (a damaged
-        /// frame or two, common in old rips) are deliberately not counted.
+        /// Whether the input said it ran out - not merely that it had a
+        /// problem. Measured on cut-off sources, encoded and copied: MKV says
+        /// "File ended prematurely", MP4 says "partial file"; a failed read says
+        /// "I/O error". A damaged patch part way through says something else
+        /// ("0x00 ... invalid as first byte of an EBML number") and the
+        /// conversion carries on past it to the real end - which is why a
+        /// complaint of any kind is not enough, and when in the conversion it
+        /// came cannot be used either: a remux of a two-hour film takes about a
+        /// second, before ffmpeg has reported its progress even once.
         /// </summary>
-        public bool InputFailed { get { lock (_lines) return _inputFailed; } }
+        public bool InputEnded { get { lock (_lines) return _inputEnded; } }
 
         public void Add(string line)
         {
@@ -4340,11 +4581,12 @@ public sealed class FfmpegManager : IDisposable
                 _lines.Enqueue(line);
                 if (_sessionRefusal is null && line.Contains(NvencSessionRefused, StringComparison.OrdinalIgnoreCase))
                     _sessionRefusal = line;
-                if (line.StartsWith("[in#", StringComparison.Ordinal)
+                if (line.Contains("ended prematurely", StringComparison.OrdinalIgnoreCase)
+                    || line.Contains("partial file", StringComparison.OrdinalIgnoreCase)
                     || line.Contains("Error during demuxing", StringComparison.OrdinalIgnoreCase)
                     || line.Contains("Input/output error", StringComparison.OrdinalIgnoreCase)
                     || line.Contains("I/O error", StringComparison.OrdinalIgnoreCase))
-                    _inputFailed = true;
+                    _inputEnded = true;
             }
         }
 
@@ -4446,7 +4688,7 @@ public sealed class FfmpegManager : IDisposable
             // its pipes have been delivered - only the parameterless
             // WaitForExit waits for those. The lines that arrive last are
             // the ones that matter most here: a source cut off part way says
-            // so moments before ffmpeg exits (see StderrTail.InputFailed), and
+            // so moments before ffmpeg exits (see StderrTail.InputEnded), and
             // judging without that line would take the cut for a whole film.
             try { p.WaitForExit(); } catch { /* already reaped */ }
             try
@@ -4752,6 +4994,7 @@ public sealed class FfmpegManager : IDisposable
     {
         _disposed = true;
         _staggerTimer?.Dispose();
+        foreach (var stream in _pendingRetries.Keys.ToList()) CancelPendingRetry(stream);
         if (!Monitor.TryEnter(_lock, TimeSpan.FromMilliseconds(250)))
         {
             Log.Warn("ffmpeg", "shutdown: a job is still starting — leaving the children to the job object");
