@@ -105,8 +105,17 @@ async function onLogFileChange() {
     return;
   }
   box.innerHTML = '<div style="color:var(--muted)">loading ' + esc(logViewFile) + "…</div>";
+  // Which file this answer is for. Arrowing through the list asks for each
+  // file in turn, and a large one takes longer to read than a small one - so
+  // the answers came back in the wrong order and the last to arrive won: the
+  // box showed the file before the one selected, and Copy handed over its
+  // text. Going back to Live while a file loaded let it overwrite the live
+  // view too. An answer for anything other than what is selected now is
+  // dropped.
+  const want = logViewFile;
   try {
-    const d = await api("/api/log/file?name=" + encodeURIComponent(logViewFile));
+    const d = await api("/api/log/file?name=" + encodeURIComponent(want));
+    if (logViewFile !== want) return;
     logFileText = d.text || "";                // what Copy hands over in this view
     const note = d.truncated
       ? '<div style="color:var(--muted)">… showing the last ' + d.shown + " lines of " + esc(d.name) + "</div>\n"
@@ -115,8 +124,9 @@ async function onLogFileChange() {
       + '<div style="white-space:pre-wrap;word-break:break-word;color:var(--ink-2)">' + esc(d.text) + "</div>";
     logScrollTo(box, box.scrollHeight);   // ours, not the reader's — see the listener
   } catch {
+    if (logViewFile !== want) return;
     logFileText = "";
-    box.innerHTML = '<div style="color:var(--critical)">could not load ' + esc(logViewFile) + "</div>";
+    box.innerHTML = '<div style="color:var(--critical)">could not load ' + esc(want) + "</div>";
   }
 }
 

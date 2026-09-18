@@ -43,20 +43,69 @@ public sealed class MediaLink
     /// </summary>
     private static byte[] LoadOrCreateSecret(string path)
     {
-        try
+        // A new key is written ONLY when the file is genuinely absent or its
+        // contents are unusable — never because it could not be read this time.
+        //
+        // The old code caught every exception while reading and treated it as
+        // "there is no key", then wrote a fresh one over the path. A backup or
+        // an antivirus scan holding the file for a moment at startup — an
+        // IOException that clears a beat later — was enough to rotate the
+        // secret and write the new one to disk. And rotating it is not a
+        // recoverable inconvenience: pinned free-TV channels are saved with a
+        // non-expiring SignUrl signature in the channel list, share links and
+        // M3U links carry one too, and every one of them stops verifying the
+        // moment the key changes. A locked file for one second cost the owner
+        // every pinned channel, silently, on the next run.
+        if (File.Exists(path))
         {
-            if (File.Exists(path))
+            // A transient lock is waited out, briefly, rather than taken as an
+            // empty slot. Only "the file is not there" or "its contents are not
+            // a key" fall through to minting a new one.
+            for (var attempt = 0; ; attempt++)
             {
-                var existing = Convert.FromBase64String(File.ReadAllText(path).Trim());
-                // a key written by an older build inherited the folder's
-                // permissions; tighten it on the way past
-                if (existing.Length >= 32) { Services.SecretFile.Protect(path); return existing; }
-                Log.Warn("media", "signing.key was too short — generating a new one");
+                try
+                {
+                    var text = File.ReadAllText(path).Trim();
+                    byte[] existing;
+                    try { existing = Convert.FromBase64String(text); }
+                    catch (FormatException)
+                    {
+                        // genuinely garbled, not merely unreadable — a new one
+                        // is the only way forward, and there is nothing to lose
+                        // that was not already lost
+                        Log.Warn("media", "signing.key is not valid Base64 — generating a new one");
+                        break;
+                    }
+                    if (existing.Length >= 32)
+                    {
+                        // a key written by an older build inherited the folder's
+                        // permissions; tighten it on the way past
+                        Services.SecretFile.Protect(path);
+                        return existing;
+                    }
+                    Log.Warn("media", "signing.key was too short — generating a new one");
+                    break;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    // Cannot read it right now. It exists, so it is NOT ours to
+                    // replace — a scanner will let go, a permission may be
+                    // fixed. Wait a little and try again; if it is still locked
+                    // after a few tries, run on an in-memory key WITHOUT
+                    // touching the file, so this run's links don't survive a
+                    // restart but every saved one still verifies once the file
+                    // is readable again.
+                    if (attempt >= 4)
+                    {
+                        Log.Error("media", $"signing.key exists but could not be read ({ex.Message}) — " +
+                                           "using a temporary in-memory key WITHOUT overwriting it, so pinned " +
+                                           "channels and share links keep working once it can be read again; " +
+                                           "links minted this run will not survive a restart");
+                        return RandomNumberGenerator.GetBytes(32);
+                    }
+                    Thread.Sleep(200);
+                }
             }
-        }
-        catch (Exception ex)
-        {
-            Log.Warn("media", $"could not read signing.key ({ex.Message}) — generating a new one");
         }
 
         var secret = RandomNumberGenerator.GetBytes(32);
@@ -90,7 +139,15 @@ public sealed class MediaLink
     {
         if (string.IsNullOrEmpty(exp) || string.IsNullOrEmpty(sig)) return false;
         if (!long.TryParse(exp, out var expiry)) return false;
-        if (DateTimeOffset.FromUnixTimeSeconds(expiry) <= DateTimeOffset.UtcNow) return false;
+        // Compared as a plain number of seconds against now, NOT by converting
+        // to a DateTimeOffset first. FromUnixTimeSeconds throws for anything
+        // past the year 9999 or before year 1 (roughly ±2.5e11), and Verify did
+        // not catch it — so a request carrying exp=99999999999999 reached the
+        // handler's generic catch and got a 500, logged as "request failed",
+        // where an ordinary bad token gets a clean 401. An expiry off the
+        // calendar is simply an expiry that has not been reached, no differently
+        // from one a year out; the signature still has to match either way.
+        if (expiry <= DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return false;
 
         return Matches(stream, expiry, sig) || Matches(AllStreams, expiry, sig);
     }

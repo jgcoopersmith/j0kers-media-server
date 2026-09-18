@@ -45,6 +45,13 @@ public sealed class MdnsResponder : IDisposable
     private UdpClient? _socket;
     private bool _disposed;
 
+    /// <summary>
+    /// Whether <see cref="Start"/> got as far as listening. Every way it can
+    /// fail logs, drops the socket and returns, so this is the one place a
+    /// caller can learn that it did - see DiscoveryService.Restart.
+    /// </summary>
+    public bool Running => _socket is not null;
+
     private string HostFqdn => _hostName + ".local";
     private const string ServiceType = "_http._tcp.local";
     private string InstanceFqdn => _instanceName + "." + ServiceType;

@@ -43,6 +43,13 @@ public sealed class UdpProbeResponder : IDisposable
     private UdpClient? _socket;
     private bool _disposed;
 
+    /// <summary>
+    /// Whether <see cref="Start"/> got as far as listening. A failure there is
+    /// logged and swallowed, so this is the one place a caller can learn of
+    /// it - see DiscoveryService.Restart.
+    /// </summary>
+    public bool Running => _socket is not null;
+
     public UdpProbeResponder(string serverName, string uuid, int httpPort, int listenPort)
     {
         _serverName = serverName;
@@ -65,6 +72,10 @@ public sealed class UdpProbeResponder : IDisposable
         catch (Exception ex)
         {
             Log.Warn("probe", $"could not listen on udp/{_listenPort}: {ex.Message}");
+            // Not left half-made: the socket was created before the bind that
+            // failed, and keeping it made this responder look started.
+            try { _socket?.Dispose(); } catch { }
+            _socket = null;
         }
     }
 

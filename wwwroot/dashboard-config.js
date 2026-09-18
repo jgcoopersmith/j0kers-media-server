@@ -149,6 +149,10 @@ async function offerRestart(nowHttps) {
       + "on https:// — your browser will warn about the self-signed certificate the first "
       + "time — everyone signs in again, and DLNA clients will most likely stop seeing the server."
     : "HTTPS stops when the server restarts.\n\nRestart it now? You will come back on http://.";
+  await confirmRestart(what);
+}
+
+async function confirmRestart(what) {
   if (!confirm(what)) return;
 
   let where = null;
@@ -506,6 +510,12 @@ async function saveConfig() {
     // it rather than leaving someone to hunt for the tray icon — and say
     // where they will end up, since the address changes scheme.
     if (data.httpsChanged) await offerRestart(data.httpsEnabled);
+    // DLNA on, but its port open to this computer only: Windows allows it on
+    // the network when the server starts with DLNA on, not before (audit [50])
+    else if (data.dlnaNeedsRestart)
+      await confirmRestart("DLNA is on, but televisions cannot reach it yet: Windows has not allowed "
+        + "its port on the network, and the server asks for that when it starts.\n\n"
+        + "Restart the server now? Windows may ask for administrator once.");
     else if (data.mediaRootChanged)
       alert("Transcodes directory saved. New transcodes and live-channel streams write there after the server restarts.");
     /* What was just saved is now what is loaded. Without this cfgLoaded kept

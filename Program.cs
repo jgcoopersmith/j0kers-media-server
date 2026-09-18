@@ -440,6 +440,14 @@ try
         // the Config dialog calls this, and startup uses it too.
         var svc = services;                                   // for the menu callbacks
 
+        // What server.json said about closing the page, if it said anything -
+        // taken now, before tray mode overwrites the live value with false.
+        // Leaving tray mode has to put back what was configured, not what
+        // happens to be the default.
+        bool? configuredShutdownOnClose = config.Control.ShutdownOnCloseWasSet
+            ? config.Control.ShutdownOnClose
+            : null;
+
         bool ApplyTrayMode(bool on)
         {
             if (on)
@@ -486,7 +494,14 @@ try
             // the next upgrade report stopping a server they thought was gone.
             // Background mode is the deliberate choice to stay running; without
             // it, closing the page shuts the server down.
-            config.Control.ShutdownOnClose = true;
+            //
+            // Unless server.json says otherwise - the same exception startup
+            // makes below. This assigned true unconditionally, so a server
+            // configured with control.shutdownOnClose=false kept that through
+            // startup and lost it the moment somebody unticked "Minimize to
+            // the system tray": closing the dashboard then stopped a server
+            // configured not to stop, until the next restart put it back.
+            config.Control.ShutdownOnClose = configuredShutdownOnClose ?? true;
             Log.Info("main", "background mode off — console restored");
             return false;
         }
@@ -767,9 +782,20 @@ Log.Info("main", tray is not null
     : "ready — press Ctrl+C to stop");
 await shutdown.Task;
 
+// Before anything else goes: no "still running in the background" from here
+// on. The notice is armed by a dashboard closing and fires three seconds
+// later; the teardown below can take longer than that (the tray's Exit runs
+// it on the tray thread, which TrayIcon.Dispose then waits to join), and a
+// notice that fired inside it told the user the server was staying up while
+// it was exiting. See ControlApi.BeginShutdown.
+control?.BeginShutdown();
+
 // take the icon down first: it also restores a hidden console so the
 // shutdown log is visible
 tray?.Dispose();
+// And forget it. OnDashboardClosed decides whether there is an icon to point
+// the user at by whether this is null, and a disposed icon is not one.
+tray = null;
 
 Log.Info("main", "shutting down (Ctrl+C again to force)");
 // watchdog: if any teardown blocks, exit anyway instead of hanging the console

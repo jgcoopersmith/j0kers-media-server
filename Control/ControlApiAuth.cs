@@ -49,6 +49,9 @@ public sealed partial class ControlApi
                     // behaves as it did before accounts existed
                     authRequired = _auth.Enforcing,
                     setupRequired = _auth.SetupRequired,
+                    // setup answers only to control.authToken while one is set
+                    // (see Setup), so the form has to ask for it
+                    setupNeedsToken = _auth.SetupRequired && _auth.LegacyTokenConfigured,
                     authenticated = auth.Level != AccessLevel.None,
                     // a plain-HTTP bind beyond loopback means the password
                     // crosses the wire in the clear; the UI says so
@@ -61,7 +64,7 @@ public sealed partial class ControlApi
                 return true;
 
             case ("POST", "/api/auth/setup"):
-                Setup(ctx);
+                Setup(ctx, auth);
                 return true;
 
             case ("POST", "/api/auth/login"):
@@ -80,6 +83,13 @@ public sealed partial class ControlApi
                     WriteJson(res, 401, new { error = "a valid key is required" });
                     return true;
                 }
+                // Retire the cookie session the caller arrived holding, if any,
+                // rather than mint a fresh row and leave the old one running.
+                // This is how a remembered browser cashes its key in on every
+                // visit, and every visit otherwise added a session that was
+                // never retired — the same unbounded growth a passwordless loop
+                // gave, one key trade at a time.
+                _auth.RetireCookieSession(ctx);
                 // tied to the key it was traded for, so revoking that key
                 // signs this browser out as well
                 var token = _auth.OpenSession(auth.User, ctx, auth.KeyId);
@@ -265,12 +275,23 @@ public sealed partial class ControlApi
     /// POST /api/auth/setup — creates the very first administrator, and
     /// signs them in. Refused once any account exists.
     /// </summary>
-    private void Setup(HttpListenerContext ctx)
+    private void Setup(HttpListenerContext ctx, AuthResult auth)
     {
         var res = ctx.Response;
         if (!_auth.SetupRequired)
         {
             WriteJson(res, 409, new { error = "accounts already exist — sign in instead" });
+            return;
+        }
+        // A configured control.authToken protects an unclaimed server, first-run
+        // setup included: without this, a token set with the server bound to the
+        // network still let anyone on the LAN claim it and lock the owner out,
+        // because setup runs above the authorization gate. Only the token holder
+        // (ServerAdmin, via the token) may claim it while a token is set. With no
+        // token, a fresh install is claimed by whoever reaches it, as before.
+        if (_auth.LegacyTokenConfigured && !auth.IsServerAdmin)
+        {
+            WriteJson(res, 401, new { error = "this server is protected by control.authToken — present it to set up an account" });
             return;
         }
         if (!TryReadJson<LoginRequest>(ctx, out var req, out var error))
@@ -471,6 +492,28 @@ public sealed partial class ControlApi
             return;
         }
 
+        // On an OPEN server (no enabled admin yet), the caller has no account —
+        // they are getting in only because the server is unclaimed. Creating an
+        // enabled administrator flips the server to enforcing on the spot, and
+        // if that administrator has no password, the whole thing locks: the
+        // follow-up "mint it a key" call is now anonymous and 401s, setup is
+        // refused because accounts exist, and the new admin has no credential
+        // at all. The only way out is editing users.json by hand. So on an open
+        // server an enabled admin must be given a password up front. (Once the
+        // server is claimed, a key-only admin is a legitimate thing an existing
+        // admin can make and then hand a key.)
+        if (!_auth.Enforcing && (req.enabled ?? true)
+            && UserStore.LevelOf(req.role) >= AccessLevel.Admin
+            && !passwordless && string.IsNullOrEmpty(req.password))
+        {
+            WriteJson(res, 400, new
+            {
+                error = "an administrator created on an unclaimed server needs a password, or nobody could sign in "
+                        + "and the server would lock",
+            });
+            return;
+        }
+
         try
         {
             var user = _auth.Users.Create(req.username!, req.password, req.role, req.displayName, req.enabled ?? true, passwordless);
@@ -509,10 +552,28 @@ public sealed partial class ControlApi
             return;
         }
 
-        // passwordless is read-only; force the role so Update applies the same
-        // last-admin safety it would for any demotion to Read
+        // passwordless is read-only; the role decision goes to Update as the
+        // FINAL passwordless state (see below), so unticking it and choosing a
+        // role in one save keeps the role.
         var finalGuest = req.passwordless ?? user.Passwordless;
-        var effectiveRole = finalGuest ? UserStore.RoleRead : req.role;
+
+        // Validate the new password FIRST, before anything is written.
+        //
+        // It used to be checked last — after the rename, the role and the
+        // passwordless change had all been saved. So a six-character password
+        // with an otherwise good edit answered 400 while the rename and the
+        // role change were already in force, and if passwordless was being
+        // turned off in the same save, SetPasswordless had already cleared the
+        // account's password and every key: the admin saw "password must be at
+        // least 8 characters", assumed nothing had happened, and had in fact
+        // left the account with no way to sign in at all. Nothing is mutated
+        // until every field has been checked.
+        if (!finalGuest && !string.IsNullOrEmpty(req.password)
+            && UserStore.ValidatePassword(req.password) is string passwordError)
+        {
+            WriteJson(res, 400, new { error = passwordError });
+            return;
+        }
 
         // Granting the top tier, or taking it away, is a server admin's
         // alone — including demoting one, which an ordinary admin doing it
@@ -526,7 +587,13 @@ public sealed partial class ControlApi
 
         try
         {
-            _auth.Users.Update(user, req.username, req.displayName, effectiveRole, req.enabled);
+            // The final passwordless state is passed in so Update pins the role
+            // to Read only when the account will actually STAY open. Before
+            // this, Update read user.Passwordless — still true at this point,
+            // because the flag change is applied just below — so unticking
+            // passwordless and picking 'edit' together forced the role back to
+            // Read, and a second save was needed to make it Edit.
+            _auth.Users.Update(user, req.username, req.displayName, req.role, req.enabled, finalGuest);
         }
         catch (InvalidOperationException ex)
         {
@@ -547,14 +614,9 @@ public sealed partial class ControlApi
         }
 
         // A password only makes sense on a normal account; ignore one sent
-        // alongside a passwordless account.
+        // alongside a passwordless account. Already validated above.
         if (!finalGuest && !string.IsNullOrEmpty(req.password))
         {
-            if (UserStore.ValidatePassword(req.password) is string passwordError)
-            {
-                WriteJson(res, 400, new { error = passwordError });
-                return;
-            }
             _auth.Users.SetPassword(user, req.password);
             _auth.RevokeSessionsFor(user.Id);
             Log.Info("auth", $"password reset for {user.Username} by an administrator");

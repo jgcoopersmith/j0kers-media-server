@@ -158,7 +158,39 @@ let tcAbort = null;
    whether a click got in first. */
 let tcUserBusy = 0;
 
+/* One background refresh at a time, and the latest ask kept for when it answers.
+
+   The heartbeat asks for one every six seconds while anything converts, and
+   did not wait for the last: it stamped the time when the request went out,
+   never awaited it, and a quiet refresh is never aborted. Each is a recursive
+   walk of every folder in the listing on the server, and opened at a drive
+   root that walk took longer than six seconds - so they piled up on the
+   server, several at once, and since they all read the same generation an
+   older, slower answer could land after a newer one and paint stale pills.
+
+   So a background refresh asked for while one is out is not sent; it is
+   remembered, and one more is made when the one out answers - which keeps the
+   refresh the busy-to-idle edge asks for (the one that shows the last
+   conversion finishing) instead of dropping it. With never more than one out,
+   no older answer can arrive after a newer one. A person navigating is not
+   affected: that path claims its own generation and aborts, as before. */
+let tcQuietOut = false, tcQuietNext = null;
+
 async function tcReload(path, quiet) {
+  if (!quiet) return tcReloadNow(path, false);
+  if (tcQuietOut) { tcQuietNext = path; return; }
+  tcQuietOut = true;
+  try { await tcReloadNow(path, true); }
+  finally {
+    tcQuietOut = false;
+    const next = tcQuietNext;
+    tcQuietNext = null;
+    // only if the panel is still on that folder; a click since owns it
+    if (next !== null && next === tcState.path) tcReload(next, true);
+  }
+}
+
+async function tcReloadNow(path, quiet) {
   /* Nothing to show and the root are different things, and treating them as
      one is why Up did not work.
 
@@ -552,6 +584,12 @@ function tcOutstanding(s) {
 }
 
 function tcFolderPills(s) {
+  /* Counting stops part way through a very large folder (see the last badge
+     below), and it can stop before it has met a single video - a drive's
+     Windows folder, say. "no media" would be a guess presented as a finding. */
+  if (s && !s.media && s.capped)
+    return '<span class="tc-badge b-unknown" title="Too large to count while this list waits - '
+         + 'no videos in the first 20000 files">not counted</span>';
   if (!s || !s.media)
     return '<span class="tc-badge b-unknown" title="Nothing in here a TV could play or convert">no media</span>';
 
@@ -587,7 +625,8 @@ function tcFolderPills(s) {
            + ' file(s) whose codecs have not been read yet. The counts beside this are still settling.">'
            + unknown + ' checking…</span>';
   }
-  if (s.capped) out += '<span class="tc-badge b-unknown" title="Stopped counting at 4000 files">4000+</span>';
+  if (s.capped) out += '<span class="tc-badge b-unknown" title="Stopped counting part way: '
+                     + 'at 4000 videos, or 20000 files of any kind">more…</span>';
   return out;
 }
 

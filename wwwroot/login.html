@@ -277,6 +277,15 @@
     </div>
   </div>
 
+  <!-- only when server.json sets control.authToken: setup answers to it alone -->
+  <div id="token-row" hidden>
+    <label for="token">Control token <span style="font-weight:400;opacity:.6;font-size:.85em">· control.authToken in server.json</span></label>
+    <div class="pw">
+      <input id="token" type="password" autocomplete="off" spellcheck="false">
+      <button type="button" class="pw-eye" data-pw="token" title="Show password" aria-label="Show password">👁</button>
+    </div>
+  </div>
+
   <label class="chk"><input id="remember" type="checkbox" checked>
     <span>Remember this device</span></label>
 
@@ -289,7 +298,7 @@
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
-let setup = false;
+let setup = false, needsToken = false;
 
 /* ---- the live link, exactly as the dashboard holds it ----
 
@@ -380,6 +389,11 @@ async function tryRememberedKey() {
     ? "No administrator account exists yet. Create one to protect this server's configuration."
     : "Sign in to reach the dashboard.";
   $("confirm-row").hidden = !setup;
+  // A server with control.authToken set can be claimed only by whoever holds
+  // it; the setup request carries it the way a script would.
+  needsToken = setup && !!state.setupNeedsToken;
+  $("token-row").hidden = !needsToken;
+  $("token").required = needsToken;
   $("pass").setAttribute("autocomplete", setup ? "new-password" : "current-password");
   if (setup) { $("pass").required = true; $("pass2").required = true; }
   // signing in (not setup): a passwordless account leaves this blank
@@ -411,9 +425,11 @@ $("form").addEventListener("submit", async e => {
 
   $("go").disabled = true;
   try {
+    const sendHeaders = { "Content-Type": "application/json", "X-J0kers-CSRF": "1" };
+    if (setup && needsToken) sendHeaders["Authorization"] = "Bearer " + $("token").value.trim();
     const r = await fetch(setup ? "/api/auth/setup" : "/api/auth/login", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-J0kers-CSRF": "1" },
+      headers: sendHeaders,
       body: JSON.stringify({ username, password, remember: $("remember").checked }),
     });
     let data = {};

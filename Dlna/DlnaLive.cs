@@ -34,10 +34,22 @@ public sealed class DlnaLive : IDisposable
     // Public so the DLNA listing advertises the very same size it is served.
     public const long AdvertisedBytes = 32L * 1024 * 1024 * 1024;
 
-    // Keep this much already-played history readable behind the slowest active
-    // viewer, so a short rewind works and a brief pause never lands on a gap.
-    // Past it, played segments are deleted to keep the buffer bounded.
-    private const long RewindBytes = 512L * 1024 * 1024;
+    // How much of a recording is kept: all of it, for as long as anyone is
+    // watching.
+    //
+    // A constant stood here, RewindBytes, whose comment said played segments
+    // more than 512 MB behind the slowest viewer were deleted to keep the
+    // buffer bounded. Nothing ever did that - nothing even read it - and it
+    // cannot simply be made true. The recording is served as one file from
+    // byte 0, and a second set tuning to a channel another has been watching
+    // for an hour asks for byte 0: with the front trimmed it would be answered
+    // 416 and would not play at all. A cap would instead end a long evening's
+    // viewing part way. So the file grows at the channel's bitrate - roughly
+    // 1-3 GB an hour - until the last viewer has been gone for IdleGrace, the
+    // server stops (Dispose), or the next start clears what a server that was
+    // killed left behind (RemoveLeftovers). Bounding it for real means giving
+    // each set a starting offset of its own, which is a different design, not
+    // a number.
 
     // No new segment for this long, with a viewer already at the live edge,
     // means the channel is gone rather than slow — end the response so the set
@@ -62,18 +74,36 @@ public sealed class DlnaLive : IDisposable
 
     public DlnaLive(string mediaRoot)
     {
-        _bufferRoot = Path.Combine(mediaRoot, ".dlnalive");
+        _bufferRoot = BufferRootFor(mediaRoot);
         // A buffer left behind by a previous run is stale by definition — its
         // offsets belong to a stream that has moved on. Clear the lot on start.
-        try
-        {
-            if (Directory.Exists(_bufferRoot)) Directory.Delete(_bufferRoot, recursive: true);
-        }
-        catch { /* best effort; a locked leftover is swept next time */ }
+        RemoveLeftovers(mediaRoot);
         try { Directory.CreateDirectory(_bufferRoot); } catch { }
 
         _janitor = new System.Threading.Timer(_ => Sweep(), null,
             SweepInterval, SweepInterval);
+    }
+
+    private static string BufferRootFor(string mediaRoot) => Path.Combine(mediaRoot, ".dlnalive");
+
+    /// <summary>
+    /// Deletes whatever recordings an earlier run left under this media root.
+    ///
+    /// Public because the constructor is not the only place that has to ask.
+    /// The constructor runs only when DLNA is on, so a server that was killed
+    /// mid-programme and then started with DLNA off left the recording - often
+    /// gigabytes - in the media root with nothing that would ever look at it
+    /// again. The server calls this at startup when it is not going to build
+    /// one of these.
+    /// </summary>
+    public static void RemoveLeftovers(string mediaRoot)
+    {
+        var root = BufferRootFor(mediaRoot);
+        try
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+        catch { /* best effort; a locked leftover is swept next time */ }
     }
 
     /// <summary>
@@ -90,7 +120,15 @@ public sealed class DlnaLive : IDisposable
             if (_disposed) { ctx.Response.StatusCode = 503; ctx.Response.Close(); return; }
             if (!_buffers.TryGetValue(stream, out buf!))
             {
-                buf = new Buffer(stream, channelDir, Path.Combine(_bufferRoot, stream));
+                // A folder of its own, not one named after the channel alone.
+                // A swept buffer deletes its folder after waiting up to two
+                // seconds for its recorder, and a set tuning the same channel
+                // in that time starts the next buffer. Sharing the folder, that
+                // late delete took the new recording with it - the delete
+                // sharing its files allow (see Serve) made it succeed - and the
+                // channel went dead to every set until they all gave up.
+                buf = new Buffer(stream, channelDir,
+                                 Path.Combine(_bufferRoot, stream + "." + Guid.NewGuid().ToString("N")[..8]));
                 _buffers[stream] = buf;
                 buf.Start();
             }
@@ -104,13 +142,22 @@ public sealed class DlnaLive : IDisposable
         lock (_lock) return _buffers.TryGetValue(stream, out var b) ? b.CurrentSize : 0;
     }
 
-    private void Sweep()
+    /// <summary>The folder the channel's current buffer records into, if it has one. For the tests.</summary>
+    internal string? BufferFolderOf(string stream)
+    {
+        lock (_lock) return _buffers.TryGetValue(stream, out var b) ? b.Folder : null;
+    }
+
+    private void Sweep() => SweepIdle(IdleGrace);
+
+    /// <summary>Takes down every buffer idle for longer than <paramref name="grace"/>. Internal for the tests.</summary>
+    internal void SweepIdle(TimeSpan grace)
     {
         List<Buffer> dead = new();
         lock (_lock)
         {
             foreach (var (stream, buf) in _buffers.ToList())
-                if (buf.IdleFor > IdleGrace)
+                if (buf.IdleFor > grace)
                 {
                     _buffers.Remove(stream);
                     dead.Add(buf);
@@ -170,6 +217,8 @@ public sealed class DlnaLive : IDisposable
 
         public TimeSpan IdleFor => _refs > 0 ? TimeSpan.Zero : DateTime.UtcNow - _idleSince;
 
+        public string Folder => _bufDir;
+
         public void Start()
         {
             try { Directory.CreateDirectory(_bufDir); } catch { }
@@ -219,9 +268,44 @@ public sealed class DlnaLive : IDisposable
             lock (_gate)
             {
                 if (!_seeded) { _lastSrc = onDisk[0].idx - 1; _seeded = true; }
+                // The channel was started afresh, and its numbering with it.
+                //
+                // Within one run the newest segment on disk is always past the
+                // last one recorded - only indices below the newest are ever
+                // taken, and a restart that continues the playlist continues
+                // the numbering too. So the newest being at or below it means
+                // the numbers went backwards: tune-on-demand clears the old
+                // segments and the playlist before it starts a channel that
+                // had died, which leaves append_list nothing to continue from,
+                // and the new ffmpeg writes seg_00000 again. The same happens
+                // when a channel is stopped from the dashboard and tuned again,
+                // or removed and added back.
+                //
+                // This used to go unnoticed. Everything the new run wrote was
+                // numbered at or below the last index recorded and was skipped
+                // as already had, so nothing was appended ever again: a set at
+                // the live edge was answered 416 on every retry, and because
+                // those retries kept the buffer in use it was never swept and
+                // rebuilt either. The channel stayed dead to every television
+                // until nobody had asked for it for half a minute.
+                //
+                // What is on disk now belongs to the new run, so it is recorded
+                // from its first segment, on the end of the same file. Offsets
+                // stay where they were - a set part way through keeps its place
+                // and simply reaches the new picture next, across a seam like
+                // the one an ordinary crash-and-restart already leaves.
+                else if (maxIdx <= _lastSrc)
+                {
+                    Log.Info("dlnalive", $"{Stream}: the channel started again from seg_{onDisk[0].idx:D5} "
+                                         + $"(the recording had reached seg_{_lastSrc:D5}) - recording on from there");
+                    _lastSrc = onDisk[0].idx - 1;
+                }
             }
 
-            _writer ??= new FileStream(_filePath, FileMode.Append, FileAccess.Write, FileShare.Read, 1 << 16);
+            // Delete shared for the same reason as the readers': a recorder that
+            // outlives Dispose's two-second wait must not be what keeps the file.
+            _writer ??= new FileStream(_filePath, FileMode.Append, FileAccess.Write,
+                                       FileShare.Read | FileShare.Delete, 1 << 16);
 
             foreach (var (idx, path) in onDisk)
             {
@@ -317,7 +401,16 @@ public sealed class DlnaLive : IDisposable
                 Log.Info("dlnalive", $"{ctx.Request.HttpMethod} {Stream} range='{range ?? "-"}' from={from} to={to} size={size} -> {res.StatusCode}");
                 if (ctx.Request.HttpMethod == "HEAD") { res.Close(); return; }
 
-                using var fs = new FileStream(_filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16);
+                // Delete is shared so that taking the buffer down - the last
+                // viewer gone, or the server stopping - removes the recording
+                // even while a set is part way through a response. Without it
+                // the delete was refused for as long as this handle was open,
+                // which on a server stopped mid-programme is exactly when it is
+                // open, and a recording of several gigabytes stayed in the
+                // media root. The name goes at once; this read carries on from
+                // the handle until the response ends.
+                using var fs = new FileStream(_filePath, FileMode.Open, FileAccess.Read,
+                                              FileShare.ReadWrite | FileShare.Delete, 1 << 16);
                 fs.Seek(from, SeekOrigin.Begin);
                 var buffer = new byte[64 * 1024];
                 long remaining = count, pending = 0;

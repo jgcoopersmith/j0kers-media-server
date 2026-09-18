@@ -202,7 +202,7 @@ public sealed class ServerConfig
     /// </summary>
     public void UpdateSettings(SettingsOverrides s)
     {
-        ApplySettings(s);
+        ApplySettings(s, live: true);
         if (s.ServerName is not null) _persistedSettings.ServerName = s.ServerName;
         if (s.BindAddress is not null) _persistedSettings.BindAddress = s.BindAddress;
         if (s.RtspPort is not null) _persistedSettings.RtspPort = s.RtspPort;
@@ -233,7 +233,23 @@ public sealed class ServerConfig
     }
 
     /// <summary>Applies dashboard settings on top of the loaded config.</summary>
-    public void ApplySettings(SettingsOverrides s)
+    public void ApplySettings(SettingsOverrides s) => ApplySettings(s, live: false);
+
+    /// <summary>
+    /// The transcodes directory as saved - what the next start will use, and
+    /// what the Config dialog shows. It can differ from Hls.MediaRoot, which is
+    /// the one this run is using, between a save and the restart that applies
+    /// it. See ApplySettings.
+    /// </summary>
+    public string SavedMediaRoot =>
+        string.IsNullOrWhiteSpace(_persistedSettings.MediaRoot) ? Hls.MediaRoot : _persistedSettings.MediaRoot;
+
+    /// <param name="live">
+    /// A save from the running dashboard rather than settings being read at
+    /// startup. Everything here applies either way except the transcodes
+    /// directory, which a running server cannot move.
+    /// </param>
+    private void ApplySettings(SettingsOverrides s, bool live)
     {
         if (!string.IsNullOrWhiteSpace(s.ServerName)) ServerName = s.ServerName;
         if (!string.IsNullOrWhiteSpace(s.BindAddress))
@@ -286,9 +302,23 @@ public sealed class ServerConfig
         if (s.LogRotateSizeMb is int mb) Logging.RotateSizeMb = mb;
         if (!string.IsNullOrWhiteSpace(s.LogRotatePeriod)) Logging.RotatePeriod = s.LogRotatePeriod;
         if (s.LogMaxFiles is int keep) Logging.MaxFiles = keep;
-        // takes effect at the next start: the media root is read once, when the
-        // transcoder and HLS server are constructed
-        if (!string.IsNullOrWhiteSpace(s.MediaRoot)) Hls.MediaRoot = s.MediaRoot;
+        // Takes effect at the next start: applied here when settings are read
+        // at startup (LoadSettingsOverrides), and only written down when they
+        // are saved from the running dashboard (UpdateSettings keeps it in
+        // settings.json for that next start).
+        //
+        // It used to be assigned live as well, on the belief that the media
+        // root is read once, when the transcoder and HLS server are built. The
+        // transcoder does read it once - so it went on writing to the old
+        // folder - but the control API read this value on every request, and
+        // the HLS server reads it whenever the services are rebuilt (a port or
+        // bind change, the power button). From the save until the restart the
+        // server pointed at two folders: deleting, rebuilding or adding
+        // subtitles to any existing stream said "unknown stream", history lost
+        // its files, and after a rebuild every stream, old and new, was a 404
+        // on the HLS port. So the running value stays the running value;
+        // SavedMediaRoot is what the dialog shows.
+        if (!live && !string.IsNullOrWhiteSpace(s.MediaRoot)) Hls.MediaRoot = s.MediaRoot;
         if (!string.IsNullOrWhiteSpace(s.StreamRemoveAction)) StreamRemoveAction = s.StreamRemoveAction;
     }
 
@@ -581,8 +611,9 @@ public sealed class ControlConfig
     /// deliberate choice.
     ///
     /// Set by deserialising the config, and by the runtime assignments in
-    /// ApplyTrayMode — which is harmless, because the one place that reads it
-    /// runs on the branch where ApplyTrayMode has not been called.
+    /// ApplyTrayMode — which is harmless, because both places that read it do
+    /// so before ApplyTrayMode has first been called: the startup default, and
+    /// Program's note of the configured value that leaving tray mode restores.
     /// </summary>
     [JsonIgnore] public bool ShutdownOnCloseWasSet { get; private set; }
 }

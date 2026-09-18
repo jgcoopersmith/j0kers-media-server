@@ -45,6 +45,18 @@ public sealed class UserAccount
     [JsonPropertyName("createdUtc")] public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
     [JsonPropertyName("lastLoginUtc")] public DateTime? LastLoginUtc { get; set; }
 
+    /// <summary>
+    /// Bumped whenever this account's credentials change in a way that must
+    /// invalidate the sessions signed in with the old one — a password change,
+    /// or passwordless being turned on or off. In memory only: sessions do not
+    /// survive a restart, so nothing has to persist. See AuthService.OpenSession
+    /// and LiveUser, which stamp a session with the generation current when it
+    /// opened and refuse it once that generation has moved on. This is what
+    /// stops a sign-in that read the old hash a moment before the change from
+    /// opening a brand-new session a moment after the revocation.
+    /// </summary>
+    [JsonIgnore] internal int CredentialGeneration { get; set; }
+
     /// <summary>Administrator or above — a server admin is one too.</summary>
     [JsonIgnore] public bool IsAdmin => UserStore.LevelOf(Role) >= AccessLevel.Admin;
     [JsonIgnore] public bool IsServerAdmin => UserStore.LevelOf(Role) >= AccessLevel.ServerAdmin;
@@ -148,24 +160,6 @@ public sealed class UserStore
             }
             _loadedFromDisk = true;
             Log.Info("auth", $"loaded {_users.Count} user account(s) from {Path.GetFileName(_file)}");
-
-            // A server with no Server Admin has features nobody can reach: the
-            // transcode panel and the log window are that tier's, and only that
-            // tier can grant it. Installs made before first-run setup created
-            // the owner as Server Admin are in exactly that state, so promote
-            // the sole enabled administrator — the person who claimed the
-            // server — rather than leaving them locked out of their own box.
-            if (_users.Count > 0 && !_users.Any(u => u.Enabled && u.IsServerAdmin))
-            {
-                var owners = _users.Where(u => u.Enabled && u.IsAdmin).ToList();
-                if (owners.Count == 1)
-                {
-                    owners[0].Role = RoleServerAdmin;
-                    Save();
-                    Log.Info("auth", $"'{owners[0].Username}' promoted to Server Admin — " +
-                                     "this server had no account of that tier");
-                }
-            }
         }
         catch (Exception ex)
         {
@@ -184,7 +178,37 @@ public sealed class UserStore
             // Not starting is loud, is recoverable by fixing the file, and
             // leaves the accounts exactly where they are — Save also refuses
             // to write over a file this process never read.
+            //
+            // Only the PARSE is inside this try. The Server Admin promotion
+            // below used to be as well, and its Save() with it — so a valid
+            // accounts file that merely could not be WRITTEN (read-only, or
+            // held by a backup) was reported as "users.json is invalid" and
+            // the server refused to start, sending the operator to edit or
+            // delete a file that was perfectly good. Deleting it would have
+            // turned the server into an open, unclaimed one. The promotion is
+            // now outside, and its save is quiet: a write failure there costs
+            // only the persisting of a promotion that still applies in memory.
             throw new InvalidOperationException($"users.json is invalid: {ex.Message}");
+        }
+
+        // A server with no Server Admin has features nobody can reach: the
+        // transcode panel and the log window are that tier's, and only that
+        // tier can grant it. Installs made before first-run setup created the
+        // owner as Server Admin are in exactly that state, so promote the sole
+        // enabled administrator — the person who claimed the server — rather
+        // than leaving them locked out of their own box. Deliberately outside
+        // the parse try/catch above (see there) and saved quietly: the
+        // promotion holds in memory whether or not the file can be written.
+        if (_loadedFromDisk && _users.Count > 0 && !_users.Any(u => u.Enabled && u.IsServerAdmin))
+        {
+            var owners = _users.Where(u => u.Enabled && u.IsAdmin).ToList();
+            if (owners.Count == 1)
+            {
+                owners[0].Role = RoleServerAdmin;
+                TrySaveQuietly("the Server Admin promotion");
+                Log.Info("auth", $"'{owners[0].Username}' promoted to Server Admin — " +
+                                 "this server had no account of that tier");
+            }
         }
     }
 
@@ -220,7 +244,20 @@ public sealed class UserStore
             }
             catch (Exception ex)
             {
-                Log.Error("auth", $"could not preserve the accounts file already at {_file}: {ex.Message}");
+                // Refuse the write, do not carry on regardless.
+                //
+                // The whole point of this branch is to keep an accounts file
+                // this process never loaded — someone else's, or one an
+                // operator restored while the server ran. If the copy aside
+                // fails (the volume is nearly full, the .found- name is taken,
+                // a permission), continuing to write ANYWAY replaces that
+                // unread file with the in-memory list and leaves no copy at
+                // all: the exact loss this guard exists to prevent, now with
+                // the safety net removed. So the save fails instead, loudly,
+                // and the unread file is left untouched.
+                Log.Error("auth", $"could not preserve the accounts file already at {_file}: {ex.Message} — " +
+                                  "refusing to overwrite an accounts file this server never loaded");
+                throw;
             }
         }
 
@@ -352,21 +389,69 @@ public sealed class UserStore
         // nicety, and Save rethrows — so a full disk, a file held open by a
         // backup, or a permission change turned every correct password into a
         // 500 and locked everyone out of a server whose accounts were fine.
+        //
+        // Only once a minute or so, the same limit VerifyKey already puts on
+        // the identical stamp. RtspServer checks the password on EVERY request
+        // of a Basic session — DESCRIBE, SETUP, PLAY, and then GET_PARAMETER
+        // keep-alives for the life of the stream — so without this each one
+        // was a full serialize-and-rewrite of users.json under the store lock
+        // that every HTTP and HLS request also authenticates through, plus a
+        // warning per write whenever a scanner held the file.
         lock (_lock)
         {
-            user.LastLoginUtc = DateTime.UtcNow;
-            TrySaveQuietly("last sign-in time");
+            if (user.LastLoginUtc is null || DateTime.UtcNow - user.LastLoginUtc.Value > TimeSpan.FromMinutes(1))
+            {
+                user.LastLoginUtc = DateTime.UtcNow;
+                TrySaveQuietly("last sign-in time");
+            }
         }
         return user;
+    }
+
+    /// <summary>
+    /// The account's current credential generation — captured by a sign-in
+    /// before it starts the ~100 ms password hash, so the session it opens can
+    /// be stamped with the generation the credentials had when it began rather
+    /// than whatever they are by the time it finishes. See UserAccount.
+    /// </summary>
+    public int CredentialGenerationOf(UserAccount user)
+    {
+        lock (_lock) return user.CredentialGeneration;
     }
 
     public void SetPassword(UserAccount user, string password)
     {
         lock (_lock)
         {
+            var oldHash = user.PasswordHash;
+            var oldGen = user.CredentialGeneration;
             user.PasswordHash = HashPassword(password);
-            Save();
+            user.CredentialGeneration++;
+            SaveOrRollback(() => { user.PasswordHash = oldHash; user.CredentialGeneration = oldGen; });
         }
+    }
+
+    /// <summary>
+    /// Persists a change, and puts it back in memory if the write fails.
+    ///
+    /// Every mutating method here changed the live objects first and then
+    /// called Save, which rethrows on an I/O or permission failure — and
+    /// nothing undid the in-memory change. So a revoke, a delete, a password
+    /// reset that could not be written answered 500 while already in force:
+    /// the request looked like it had failed, but the key really was refused,
+    /// the account really was gone — until a restart brought the file's
+    /// version back, or some later unrelated save (a key's last-used stamp)
+    /// happened to write the un-asked-for state to disk and make it permanent.
+    /// Whether a "failed" change stuck was pure timing.
+    ///
+    /// Now a failed write is a failed change: the caller's <paramref name="undo"/>
+    /// restores exactly what was there, and the exception still propagates so
+    /// the 500 is honest. Called under <see cref="_lock"/>, like every mutation.
+    /// </summary>
+    private void SaveOrRollback(Action undo)
+    {
+        try { Save(); }
+        catch { undo(); throw; }
     }
 
     // ---- accounts ----
@@ -391,7 +476,7 @@ public sealed class UserStore
                 PasswordHash = passwordless || string.IsNullOrEmpty(password) ? "" : HashPassword(password),
             };
             _users.Add(user);
-            Save();
+            SaveOrRollback(() => _users.Remove(user));
             Log.Info("auth", $"user created: {user.Username} ({user.Role}"
                              + (passwordless ? ", passwordless" : "") + ")");
             return user;
@@ -416,7 +501,14 @@ public sealed class UserStore
     {
         lock (_lock)
         {
+            var oldPasswordless = user.Passwordless;
+            var oldHash = user.PasswordHash;
+            var oldRole = user.Role;
+            var oldKeys = user.Keys;
+            var oldGen = user.CredentialGeneration;
+
             user.Passwordless = value;
+            user.CredentialGeneration++;
             var revoked = 0;
             if (value)
             {
@@ -425,12 +517,21 @@ public sealed class UserStore
             }
             else
             {
-                // Anything the account handed itself while it was open.
+                // Anything the account handed itself while it was open. A new
+                // list, so a rollback restores the old one intact rather than
+                // an emptied copy of it.
                 revoked = user.Keys.Count;
-                user.Keys.Clear();
+                user.Keys = new List<ApiKeyRecord>();
                 user.PasswordHash = "";
             }
-            Save();
+            SaveOrRollback(() =>
+            {
+                user.Passwordless = oldPasswordless;
+                user.PasswordHash = oldHash;
+                user.Role = oldRole;
+                user.Keys = oldKeys;
+                user.CredentialGeneration = oldGen;
+            });
             Log.Info("auth", value
                 ? $"passwordless enabled for {user.Username}"
                 : $"passwordless disabled for {user.Username} — cleared its password and revoked "
@@ -439,19 +540,43 @@ public sealed class UserStore
     }
 
     /// <summary>The enabled, passwordless account by that name, or null.</summary>
-    public UserAccount? FindPasswordless(string? username)
+    public UserAccount? FindPasswordless(string? username) => FindPasswordless(username, out _);
+
+    /// <param name="generation">
+    /// The account's credential generation, read under the same lock as its
+    /// passwordless flag - what a passwordless sign-in stamps on its session.
+    /// Read any later and a sign-in that found the account open could open its
+    /// session after the account was closed, stamped with the new generation,
+    /// and outlive the closing (see AuthService.LiveUser).
+    /// </param>
+    public UserAccount? FindPasswordless(string? username, out int generation)
     {
-        var user = FindByName(username);
-        return user is { Enabled: true, Passwordless: true } ? user : null;
+        lock (_lock)
+        {
+            var user = FindByName(username);
+            generation = user?.CredentialGeneration ?? 0;
+            return user is { Enabled: true, Passwordless: true } ? user : null;
+        }
     }
 
-    /// <summary>Records a successful sign-in time (used by the passwordless path).</summary>
+    /// <summary>
+    /// Records a successful sign-in time (used by the passwordless path).
+    ///
+    /// Once a minute at most, as VerifyPassword and VerifyKey both do. A
+    /// passwordless account signs in on its name alone, so an unauthenticated
+    /// loop of sign-ins to a 'guest' account was a loop of full users.json
+    /// rewrites under the store lock — every one of them stamping a time
+    /// nobody reads more than once a minute anyway.
+    /// </summary>
     public void TouchLogin(UserAccount user)
     {
         lock (_lock)
         {
-            user.LastLoginUtc = DateTime.UtcNow;
-            TrySaveQuietly("last sign-in time");
+            if (user.LastLoginUtc is null || DateTime.UtcNow - user.LastLoginUtc.Value > TimeSpan.FromMinutes(1))
+            {
+                user.LastLoginUtc = DateTime.UtcNow;
+                TrySaveQuietly("last sign-in time");
+            }
         }
     }
 
@@ -512,12 +637,27 @@ public sealed class UserStore
     /// server with no enabled administrator — that is an unrecoverable
     /// lockout, only fixable by hand-editing users.json.
     /// </summary>
-    public void Update(UserAccount user, string? username, string? displayName, string? role, bool? enabled)
+    /// <param name="finalPasswordless">
+    /// What the account's passwordless flag will be once this whole edit is
+    /// applied, when the caller is turning it off (or on) in the same request.
+    /// Null means "unchanged". A passwordless account is pinned to Read, and it
+    /// used to be pinned by reading <c>user.Passwordless</c> here — which is
+    /// still true at this point, because the caller applies the flag change
+    /// AFTER Update. So unticking passwordless and choosing 'edit' in one save
+    /// set the role while the account still read as passwordless, the role was
+    /// forced back to Read, and the account ended up Read with a password: a
+    /// second save was needed to get the role that had just been chosen. Taking
+    /// the FINAL state pins the role only when the account will actually stay
+    /// open.
+    /// </param>
+    public void Update(UserAccount user, string? username, string? displayName, string? role, bool? enabled,
+                       bool? finalPasswordless = null)
     {
         lock (_lock)
         {
             // a passwordless account is read-only, whatever role was asked for
-            var newRole = user.Passwordless ? RoleRead
+            var willBePasswordless = finalPasswordless ?? user.Passwordless;
+            var newRole = willBePasswordless ? RoleRead
                         : role is null ? user.Role : NormalizeRole(role);
             var newEnabled = enabled ?? user.Enabled;
             var stillAdmin = newEnabled && LevelOf(newRole) >= AccessLevel.Admin;
@@ -533,6 +673,11 @@ public sealed class UserStore
                     u.Id != user.Id && u.Enabled && u.IsServerAdmin))
                 throw new InvalidOperationException("this is the last enabled Server Admin — make someone else one first");
 
+            var oldUsername = user.Username;
+            var oldDisplay = user.DisplayName;
+            var oldRole = user.Role;
+            var oldEnabled = user.Enabled;
+
             if (username is not null)
             {
                 var name = username.Trim();
@@ -543,7 +688,13 @@ public sealed class UserStore
             if (displayName is not null) user.DisplayName = displayName.Trim();
             user.Role = newRole;
             user.Enabled = newEnabled;
-            Save();
+            SaveOrRollback(() =>
+            {
+                user.Username = oldUsername;
+                user.DisplayName = oldDisplay;
+                user.Role = oldRole;
+                user.Enabled = oldEnabled;
+            });
         }
     }
 
@@ -555,8 +706,14 @@ public sealed class UserStore
                 throw new InvalidOperationException("this is the last enabled administrator");
             if (user.Enabled && user.IsServerAdmin && !_users.Any(u => u.Id != user.Id && u.Enabled && u.IsServerAdmin))
                 throw new InvalidOperationException("this is the last enabled Server Admin — make someone else one first");
-            _users.RemoveAll(u => u.Id == user.Id);
-            Save();
+            var index = _users.FindIndex(u => u.Id == user.Id);
+            if (index < 0) return;
+            var removed = _users[index];
+            _users.RemoveAt(index);
+            // Back into its own place if the write fails, not appended: order is
+            // what the Users list shows, and a delete that could not be written
+            // must leave nothing changed at all.
+            SaveOrRollback(() => _users.Insert(Math.Min(index, _users.Count), removed));
             Log.Info("auth", $"user removed: {user.Username}");
         }
     }
@@ -585,7 +742,7 @@ public sealed class UserStore
         lock (_lock)
         {
             user.Keys.Add(record);
-            Save();
+            SaveOrRollback(() => user.Keys.Remove(record));
         }
         Log.Info("auth", $"key issued for {user.Username}: {record.Label} ({id})");
         return (full, record);
@@ -610,9 +767,16 @@ public sealed class UserStore
     {
         lock (_lock)
         {
-            var removed = user.Keys.RemoveAll(k => k.Id == keyId) > 0;
-            if (removed) { Save(); Log.Info("auth", $"key revoked for {user.Username}: {keyId}"); }
-            return removed;
+            var gone = user.Keys.Where(k => k.Id == keyId).ToList();
+            if (gone.Count == 0) return false;
+            user.Keys.RemoveAll(k => k.Id == keyId);
+            // The dashboard's Keys list promises a revoke takes effect at once,
+            // and a 500 that silently left the key working — to reappear at the
+            // next restart — is exactly the trust that breaks. So the key goes
+            // back if the write fails, and the caller sees the failure.
+            SaveOrRollback(() => user.Keys.AddRange(gone));
+            Log.Info("auth", $"key revoked for {user.Username}: {keyId}");
+            return true;
         }
     }
 

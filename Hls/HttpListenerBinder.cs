@@ -97,6 +97,14 @@ public static class HttpListenerBinder
     public static bool IsLoopbackBind(string bindAddress) =>
         bindAddress is "127.0.0.1" or "localhost" or "::1";
 
+    /// <summary>
+    /// Whether a listener asked to serve the network ended up serving this
+    /// machine only: Windows refused the wide bind (no URL ACL for the port)
+    /// and <see cref="Start"/> fell back to localhost, which it only logs.
+    /// </summary>
+    public static bool FellBackToLoopback(string bindAddress, string boundHost) =>
+        !IsLoopbackBind(bindAddress) && boundHost == "localhost";
+
     /// <summary>Per-request loopback guard for listeners that may be bound wider than configured.</summary>
     public static bool IsLoopbackRequest(HttpListenerContext ctx) =>
         IPAddress.IsLoopback(ctx.Request.RemoteEndPoint.Address);

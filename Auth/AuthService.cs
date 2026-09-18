@@ -74,6 +74,26 @@ public sealed class AuthService
     /// <summary>For everyone behind one reverse proxy together. See Login.</summary>
     private const int MaxFailuresThroughProxy = 50;
 
+    /// <summary>
+    /// Passwordless sign-ins one address may make in a row before it is asked
+    /// to wait. A loop is what this stops; a household opening the guest
+    /// account is nowhere near it. See Login.
+    /// </summary>
+    private const int MaxGuestSignInsInARow = 20;
+
+    /// <summary>
+    /// How long an address must go without a passwordless sign-in for its
+    /// count to start again. Settable so a test need not wait ten minutes.
+    /// </summary>
+    internal TimeSpan GuestSignInQuiet { get; set; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// For the tests: runs in a passwordless sign-in after the account was
+    /// found open and before its session is opened - the window an
+    /// administrator closing the account can land in. Null in the server.
+    /// </summary>
+    internal Action<UserAccount>? BeforeGuestSession { get; set; }
+
     private sealed class Session
     {
         [System.Text.Json.Serialization.JsonPropertyName("userId")]
@@ -92,11 +112,31 @@ public sealed class AuthService
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("keyId")]
         public string? KeyId { get; set; }
+
+        /// <summary>
+        /// The account's credential generation the moment this session was
+        /// opened. If the account's credentials change afterwards — a password
+        /// change, passwordless toggled — the generation moves on and this
+        /// session no longer matches, so it is refused. This is what stops a
+        /// sign-in already in flight with the OLD password, whose hash read
+        /// landed just before the change, from opening a session that outlives
+        /// the "other sessions were signed out" the change promised. See
+        /// LiveUser and OpenSession.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("credGen")]
+        public int CredentialGeneration { get; set; }
     }
 
     private sealed class Throttle
     {
         public int Failures;
+        /// <summary>
+        /// Attempts that have been reserved but not yet settled — counted
+        /// alongside Failures so that a burst which all passed the lockout
+        /// check in the old check-then-hash gap cannot each still get a full
+        /// password check. See Reserve.
+        /// </summary>
+        public int InFlight;
         public DateTime LockedUntilUtc;
         public DateTime LastFailureUtc = DateTime.UtcNow;
     }
@@ -232,10 +272,21 @@ public sealed class AuthService
     {
         var presented = BearerValue(ctx);
 
-        // legacy control.authToken — still honoured, still full rights
+        // legacy control.authToken — still honoured.
+        //
+        // On a server nobody has claimed yet it is the whole key, so it is the
+        // top tier there, the one the open server hands out. The audit found it
+        // ranked BELOW having no credential at all in that state: the token got
+        // Admin and was refused the log and the transcoder, while a caller with
+        // nothing fell through to the "open" Server Admin below.
+        //
+        // Once there are accounts it stays what it always was, an
+        // administrator. Server Admin there would let whoever holds a token -
+        // which travels in ?token= links and sits in a browser's storage -
+        // demote or delete the owner and make Server Admins of its own.
         var legacy = _legacyToken() ?? "";
         if (legacy.Length > 0 && presented is not null && FixedTimeEquals(presented, legacy))
-            return new AuthResult(AccessLevel.Admin, null, "token");
+            return new AuthResult(Enforcing ? AccessLevel.Admin : AccessLevel.ServerAdmin, null, "token");
 
         if (presented is not null && _users.VerifyKey(presented) is UserAccount keyUser)
             return new AuthResult(LevelOf(keyUser), keyUser, "key", UserStore.KeyIdOf(presented));
@@ -256,13 +307,34 @@ public sealed class AuthService
         if (ReadSessionCookie(ctx) is string token && ResolveSession(token, ctx, out var sessionKey) is UserAccount sessionUser)
             return new AuthResult(LevelOf(sessionUser), sessionUser, "session", sessionKey);
 
-        // No accounts yet: whoever reaches an unclaimed server is its owner,
-        // top tier included — otherwise a fresh install would hide the log
-        // from the only person there.
-        if (!Enforcing) return new AuthResult(AccessLevel.ServerAdmin, null, "open");
+        // No accounts yet.
+        if (!Enforcing)
+        {
+            // A configured control.authToken is meant to protect a server that
+            // has no admin account yet, and until now it protected nothing: the
+            // "open" ServerAdmin below was handed to ANY request, token or none,
+            // so a token set with the server bound to the network left it wide
+            // open to the whole LAN — settings, the log, first-run setup. When a
+            // token is configured, only the caller who presents it (handled
+            // above) gets into the control API; everyone else is Anonymous
+            // here. (The media ports go by accounts alone, as they always have:
+            // HLS and RTSP are open until the server is claimed, token or not.)
+            // With no token configured, a fresh install is
+            // still open to whoever reaches it, top tier included, so the owner
+            // can create the first account and see the log while doing it.
+            if (legacy.Length > 0) return AuthResult.Anonymous;
+            return new AuthResult(AccessLevel.ServerAdmin, null, "open");
+        }
 
         return AuthResult.Anonymous;
     }
+
+    /// <summary>
+    /// Whether a legacy control.authToken is set. When it is, an unclaimed
+    /// server is protected by it rather than open — including first-run setup,
+    /// which Setup gates on this. Read live, like the token itself.
+    /// </summary>
+    public bool LegacyTokenConfigured => (_legacyToken() ?? "").Length > 0;
 
     private static AccessLevel LevelOf(UserAccount user) => UserStore.LevelOf(user.Role);
 
@@ -441,6 +513,12 @@ public sealed class AuthService
         var user = _users.FindById(session.UserId);
         if (user is null || !user.Enabled) return null;
         if (session.KeyId is string key && !_users.KeyAlive(user, key)) return null;
+        // The account's credentials have moved on since this session opened — a
+        // password change, passwordless toggled. A session stamped with the
+        // generation before that change no longer speaks for the account, even
+        // if RevokeSessionsFor has not swept it yet, and even if it was opened
+        // by a sign-in whose old-password hash read finished after the change.
+        if (session.CredentialGeneration != _users.CredentialGenerationOf(user)) return null;
         return user;
     }
 
@@ -510,8 +588,28 @@ public sealed class AuthService
         // No password to verify, so nothing to throttle or brute-force; the
         // account is Read-only and was marked open on purpose in the Users
         // dialog. A password sent along with it is simply ignored.
-        if (_users.FindPasswordless(username) is UserAccount open)
+        if (_users.FindPasswordless(username, out var guestGeneration) is UserAccount open)
         {
+            // Successful passwordless sign-ins ARE rate-limited, per address.
+            //
+            // There is no password to fail, so the failure lockout never fired
+            // here — and each sign-in is a session row, a users.json stamp and
+            // a log line. An unauthenticated client could loop
+            // POST /api/auth/login {"username":"guest"} and grow the session
+            // table by millions of rows in a day, every one of them rewriting
+            // users.json under the store lock that every request queues on. So
+            // the successes themselves are counted, on a key of their own, and
+            // an address doing this in a tight loop is told to wait — a
+            // household opening the guest account a handful of times is not.
+            var guestKey = "guest:" + client;
+            ForgetQuietGuest(guestKey);
+            if (LockedFor(guestKey) is int g && g > 0)
+            {
+                Log.Warn("auth", $"passwordless login for '{open.Username}' from {client} refused — "
+                                 + $"too many in a row from this address ({g}s left)");
+                return new LoginOutcome(false, null, null, "too many sign-ins from here — try again shortly", g);
+            }
+
             // The name, but deliberately NOT the address.
             //
             // A passwordless sign-in proves nothing about who is at that
@@ -526,16 +624,48 @@ public sealed class AuthService
             // no password to have failed against in the first place.
             _throttles.TryRemove(nameKey, out _);
             if (ReadSessionCookie(ctx) is string prior0) _sessions.TryRemove(Digest(prior0), out _);
+            // count this success toward the per-address ceiling
+            RegisterFailure(guestKey, MaxGuestSignInsInARow);
             _users.TouchLogin(open);
             Log.Info("auth", $"passwordless login: {open.Username} ({open.Role}) from {client}");
-            return new LoginOutcome(true, open, OpenSession(open, ctx), null);
+            BeforeGuestSession?.Invoke(open);
+            // Stamped with the generation read when the account was found open,
+            // not the one current now: if it was closed in between, this
+            // session is dead on arrival, like a password sign-in in flight
+            // across a password change.
+            return new LoginOutcome(true, open, OpenSession(open, ctx, credentialGeneration: guestGeneration), null);
         }
+
+        // Reserve the attempt against name and address BEFORE the hash, so a
+        // burst cannot each get a full password check in the old check-then-act
+        // gap. Name first; if the address is (now) locked, give the name
+        // reservation back rather than leak it.
+        var nameReserve = Reserve(nameKey, MaxFailuresBeforeLockout);
+        if (nameReserve > 0)
+        {
+            Log.Warn("auth", $"login attempt for '{username}' from {client} refused — account locked ({nameReserve}s left)");
+            return new LoginOutcome(false, null, null, "too many failed attempts — try again shortly", nameReserve);
+        }
+        var addrReserve = Reserve(addrKey, MaxFailuresBeforeLockout);
+        if (addrReserve > 0)
+        {
+            ReleaseReservation(nameKey);
+            Log.Warn("auth", $"login attempt for '{username}' from {client} refused — address locked ({addrReserve}s left)");
+            return new LoginOutcome(false, null, null, "too many failed attempts — try again shortly", addrReserve);
+        }
+
+        // Captured before the hash, so a password change that lands during it
+        // stamps this login's session with the OLD generation — see [41] in
+        // OpenSession / LiveUser. A name that does not exist has no generation
+        // to protect; VerifyPassword refuses it anyway.
+        var probe = _users.FindByName(username);
+        var credGen = probe is null ? 0 : _users.CredentialGenerationOf(probe);
 
         var user = _users.VerifyPassword(username, password);
         if (user is null)
         {
-            RegisterFailure(nameKey);
-            RegisterFailure(addrKey);
+            SettleFailure(nameKey);
+            SettleFailure(addrKey);
             // Not cleared by a success, unlike the two above: a sign-in that
             // works says nothing about the other people behind the proxy. It
             // lapses the way every counter does, an hour after it goes quiet.
@@ -565,7 +695,7 @@ public sealed class AuthService
         if (ReadSessionCookie(ctx) is string previous) _sessions.TryRemove(Digest(previous), out _);
 
         Log.Info("auth", $"login: {user.Username} ({user.Role}) from {client}");
-        return new LoginOutcome(true, user, OpenSession(user, ctx), null);
+        return new LoginOutcome(true, user, OpenSession(user, ctx, credentialGeneration: credGen), null);
     }
 
     /// <summary>
@@ -589,18 +719,21 @@ public sealed class AuthService
     {
         var client = ClientKey(ctx);
         var key = "pwchange:" + user.Id;
-        if (LockedFor(key) is int locked && locked > 0)
+        // Reserved before the hash, so a borrowed session firing its guesses at
+        // once cannot have them all checked in the old check-then-act gap.
+        var reserved = Reserve(key, MaxFailuresBeforeLockout);
+        if (reserved > 0)
         {
             Log.Warn("auth", $"password change for '{user.Username}' from {client} refused — too many wrong "
-                             + $"current passwords ({locked}s left)");
-            return locked;
+                             + $"current passwords ({reserved}s left)");
+            return reserved;
         }
         if (_users.VerifyPassword(user.Username, password) is not null)
         {
             _throttles.TryRemove(key, out _);
             return 0;
         }
-        RegisterFailure(key);
+        SettleFailure(key);
         Log.Warn("auth", $"wrong current password for '{user.Username}' from {client} on a password change");
         return -1;
     }
@@ -610,8 +743,20 @@ public sealed class AuthService
     /// token to put in the cookie. Callers must have proved identity first —
     /// by password, or by presenting a valid key.
     /// </summary>
+    /// <summary>The most sessions one account may hold at once. See OpenSession.</summary>
+    private const int MaxSessionsPerUser = 64;
+
     /// <param name="keyId">The key this session is traded for, whose revocation should end it too.</param>
-    public string OpenSession(UserAccount user, HttpListenerContext ctx, string? keyId = null)
+    /// <param name="credentialGeneration">
+    /// The account's credential generation captured before the sign-in started
+    /// hashing, or null to read it now. A password sign-in passes the captured
+    /// value so that a change which landed during the hash leaves this session
+    /// stamped with the old generation — dead on arrival (see LiveUser). Every
+    /// other caller (a key trade, an own-password change that has already set
+    /// the new password) wants the current generation.
+    /// </param>
+    public string OpenSession(UserAccount user, HttpListenerContext ctx, string? keyId = null,
+                              int? credentialGeneration = null)
     {
         var token = UserStore.Base64Url(RandomNumberGenerator.GetBytes(32));
         _sessions[Digest(token)] = new Session
@@ -621,10 +766,34 @@ public sealed class AuthService
             LastSeenUtc = DateTime.UtcNow,
             ClientHint = ClientKey(ctx),
             KeyId = keyId,
+            CredentialGeneration = credentialGeneration ?? _users.CredentialGenerationOf(user),
         };
         PruneSessions();
+        CapSessionsFor(user.Id);
         SaveSessions();
         return token;
+    }
+
+    /// <summary>
+    /// Keeps one account to a bounded number of sessions, evicting the ones
+    /// that have gone quiet longest.
+    ///
+    /// Nothing bounded this before: a session was removed only after twelve
+    /// hours idle, so anything that opens sessions in a loop grew the table
+    /// without limit. An unauthenticated loop of passwordless sign-ins, or a
+    /// remembered device trading its key for a session over and over, could add
+    /// rows by the million — the memory is the table, and /api/status shipped
+    /// the whole signed-in list to every admin dashboard every two seconds. A
+    /// ceiling, and what goes is the least-recently-seen, so a page actually in
+    /// use is the last to be dropped rather than the first.
+    /// </summary>
+    private void CapSessionsFor(string userId)
+    {
+        var mine = _sessions.Where(kv => kv.Value.UserId == userId)
+                            .OrderByDescending(kv => kv.Value.LastSeenUtc)
+                            .ToList();
+        for (var i = MaxSessionsPerUser; i < mine.Count; i++)
+            _sessions.TryRemove(mine[i].Key, out _);
     }
 
     /// <summary>
@@ -675,6 +844,13 @@ public sealed class AuthService
         var nameKey = "user:" + username.Trim().ToLowerInvariant();
         if (LockedFor(nameKey) > 0) return false;
 
+        // Reserve before the hash, the same as the web login: RTSP dispatches a
+        // request per thread too, and DESCRIBE/SETUP/PLAY plus keep-alives make
+        // it a comfortable place to fire a burst of guesses. Without this every
+        // guess that started inside the unlocked window got a full PBKDF2.
+        if (Reserve(nameKey, MaxFailuresBeforeLockout) > 0) return false;
+        if (Reserve(addrKey, MaxFailuresBeforeLockout) > 0) { ReleaseReservation(nameKey); return false; }
+
         if (_users.VerifyPassword(username, password) is not null)
         {
             _throttles.TryRemove(nameKey, out _);
@@ -682,10 +858,20 @@ public sealed class AuthService
             return true;
         }
 
-        RegisterFailure(nameKey);
-        RegisterFailure(addrKey);
+        SettleFailure(nameKey);
+        SettleFailure(addrKey);
         Log.Warn("auth", $"failed RTSP login for '{username}' from {clientAddress}");
         return false;
+    }
+
+    /// <summary>
+    /// Drops the session named by the request's cookie, if it has one, without
+    /// the sign-out log line — for a key trade that is about to open a fresh
+    /// session in its place. Bounded: it can only remove a session that exists.
+    /// </summary>
+    public void RetireCookieSession(HttpListenerContext ctx)
+    {
+        if (ReadSessionCookie(ctx) is string token) _sessions.TryRemove(Digest(token), out _);
     }
 
     public void Logout(HttpListenerContext ctx)
@@ -810,6 +996,24 @@ public sealed class AuthService
         return remaining > 0 ? remaining : 0;
     }
 
+    /// <summary>
+    /// Starts an address's passwordless count again once it has gone quiet.
+    ///
+    /// That count is of successes, so the way out every failure count has - a
+    /// sign-in that works - is the very thing it adds to, and throttles are
+    /// only swept once there are 64 of them. Without this it counted for the
+    /// life of the server: the sixth guest sign-in from one address since the
+    /// server started was refused, and every one after it for longer, up to a
+    /// quarter of an hour. A lock still running is left to run out.
+    /// </summary>
+    private void ForgetQuietGuest(string key)
+    {
+        if (!_throttles.TryGetValue(key, out var t)) return;
+        bool quiet;
+        lock (t) quiet = DateTime.UtcNow - t.LastFailureUtc > GuestSignInQuiet && t.LockedUntilUtc <= DateTime.UtcNow;
+        if (quiet) _throttles.TryRemove(new KeyValuePair<string, Throttle>(key, t));
+    }
+
     private void RegisterFailure(string key, int threshold = MaxFailuresBeforeLockout)
     {
         var t = _throttles.GetOrAdd(key, _ => new Throttle());
@@ -817,13 +1021,77 @@ public sealed class AuthService
         {
             t.Failures++;
             t.LastFailureUtc = DateTime.UtcNow;
-            if (t.Failures >= threshold)
-            {
-                // 5th failure → 15 s, doubling to a 15 minute ceiling
-                var steps = Math.Min(t.Failures - threshold, 8);
-                var seconds = Math.Min(15 * Math.Pow(2, steps), 900);
-                t.LockedUntilUtc = DateTime.UtcNow.AddSeconds(seconds);
-            }
+            if (t.Failures >= threshold) SetLock(t, threshold);
+        }
+        PruneThrottles();
+    }
+
+    /// <summary>The escalating lock: 5th failure → 15 s, doubling to a 15-minute ceiling. Under the Throttle's lock.</summary>
+    private static void SetLock(Throttle t, int threshold)
+    {
+        var steps = Math.Min(t.Failures - threshold, 8);
+        var seconds = Math.Min(15 * Math.Pow(2, steps), 900);
+        t.LockedUntilUtc = DateTime.UtcNow.AddSeconds(seconds);
+    }
+
+    /// <summary>
+    /// Reserves one attempt against a key BEFORE the ~100 ms password hash, or
+    /// returns the seconds left if the key is (now) locked.
+    ///
+    /// The lockout was check-then-act: LockedFor was read, then PBKDF2 ran, and
+    /// only afterwards was the failure recorded. Every guess dispatched inside
+    /// that window passed the check and got a full hash, so a burst of 64
+    /// concurrent guesses was 64 guesses per lockout window rather than five,
+    /// and each window reopened the same way. Reserving counts the in-flight
+    /// attempt up front, under the throttle lock, so no more are checked at once
+    /// than there are guesses left (one, once a lock has run out); the rest are
+    /// told to wait a second. Settle a reservation with <see cref="SettleFailure"/>
+    /// (the guess was wrong) or <see cref="ReleaseReservation"/> (it succeeded,
+    /// or is being abandoned before the hash).
+    /// </summary>
+    private int Reserve(string key, int threshold)
+    {
+        var t = _throttles.GetOrAdd(key, _ => new Throttle());
+        lock (t)
+        {
+            var remaining = (int)Math.Ceiling((t.LockedUntilUtc - DateTime.UtcNow).TotalSeconds);
+            if (remaining > 0) return remaining;
+            // As many checked at once as there are guesses left before the
+            // lock, and never fewer than one. Once a lock has run out the count
+            // is still at the limit, and one attempt is checked, as it always
+            // was - a wrong one locks again for longer, a right one clears it.
+            // This first counted "failures + in flight" against the limit,
+            // which after a lock is always reached: every attempt, the right
+            // password included, was refused and relocked for longer, so five
+            // wrong guesses by anyone locked the account (or the address) until
+            // the server restarted.
+            //
+            // An attempt refused here was never checked, so it is not counted
+            // as a failure either: several players signing in to one account at
+            // the same moment are not guesses.
+            if (t.InFlight >= Math.Max(1, threshold - t.Failures)) return 1;
+            t.InFlight++;
+            return 0;
+        }
+    }
+
+    /// <summary>Gives back a reservation that will not become a failure — a success, or an attempt abandoned before hashing.</summary>
+    private void ReleaseReservation(string key)
+    {
+        if (_throttles.TryGetValue(key, out var t))
+            lock (t) { if (t.InFlight > 0) t.InFlight--; }
+    }
+
+    /// <summary>Turns a reservation into a recorded failure: the guess was checked and was wrong.</summary>
+    private void SettleFailure(string key, int threshold = MaxFailuresBeforeLockout)
+    {
+        var t = _throttles.GetOrAdd(key, _ => new Throttle());
+        lock (t)
+        {
+            if (t.InFlight > 0) t.InFlight--;
+            t.Failures++;
+            t.LastFailureUtc = DateTime.UtcNow;
+            if (t.Failures >= threshold) SetLock(t, threshold);
         }
         PruneThrottles();
     }

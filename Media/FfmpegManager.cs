@@ -870,6 +870,12 @@ public sealed class FfmpegManager : IDisposable
     }
 
     /// <summary>
+    /// The half of the decision the file's name answers: a container a browser
+    /// can open at all. No probe; checked before anything that might start one.
+    /// </summary>
+    public static bool IsDirectPlayContainer(string file) => DirectPlayExt.Contains(Path.GetExtension(file));
+
+    /// <summary>
     /// The same decision, from codecs somebody else already knows, so a
     /// listing can answer it without launching anything.
     ///
@@ -1187,6 +1193,13 @@ public sealed class FfmpegManager : IDisposable
             // Checked again under the lock Dispose takes to stop everything: a
             // start that was waiting on it must not launch a job after that.
             if (_disposed) throw new ObjectDisposedException(nameof(FfmpegManager));
+            // Its folder is being deleted (see _removing). Starting over in it
+            // would put a new encoder's open files in the way of the delete,
+            // which then fails half done - so this start is refused, and the
+            // same request made a moment later, once the folder has gone,
+            // starts it cleanly.
+            if (_removing.ContainsKey(stream))
+                throw new BeingRemovedException($"{stream} is being deleted - try again in a moment");
             // Listed at all, exited or not: a job leaves the table once its
             // exit has been judged, and until then its end marker may yet be
             // found not to mean the end. See IsFinished.
@@ -1442,6 +1455,14 @@ public sealed class FfmpegManager : IDisposable
                     // one outcome that looks like success everywhere else.
                     if (!superseded && endedEarly is { } short_)
                         ReportEndedEarly(info.FullName, short_.Covered, short_.Expected, keep, height);
+                    // Killed by the watchdog for writing nothing: owed still,
+                    // not given up on. Taken off the mark whatever else is
+                    // true, so the table cannot keep processes for ever. A
+                    // cancel or discard that got in first has already taken
+                    // the job, and superseded says so.
+                    var stuck = _killedAsStuck.TryRemove(p, out _);
+                    if (!superseded && stuck) RequeueStuck(info.FullName, keep, height);
+                    else if (!superseded) _stuckRequeues.TryRemove(info.FullName, out _);
 
                     // Refused a GPU session is not the same as failed, and
                     // must not cost the conversion. Asking for more encoder
@@ -1741,6 +1762,12 @@ public sealed class FfmpegManager : IDisposable
 
         lock (_lock)
         {
+            // Being deleted, or deleted since the checks above: nothing is to
+            // be started into it (see _removing). Asked here, under the lock
+            // the delete takes to hold the folder, so a request cannot pass the
+            // check and then spawn after the hold went up.
+            if (_removing.ContainsKey(stream) || !Directory.Exists(dir)) return false;
+
             if (File.Exists(SegmentPath(dir, index)) || ExistingSeekSegment(dir, index, extCheck) is not null)
                 return true;
 
@@ -1902,6 +1929,56 @@ public sealed class FfmpegManager : IDisposable
     }
 
     /// <summary>
+    /// Conversions being read right now through a response that stays open -
+    /// a television playing one over DLNA - with how many readers each has.
+    ///
+    /// The sweep picks what to delete by when a directory was last touched,
+    /// and a DLNA transfer touches it once, when the request arrives: a set
+    /// reads a whole film through one GET, or a handful, so forty minutes in it
+    /// looked forty minutes idle, and the next conversion to start deleted it.
+    /// Every segment but the one being read went, the rest of the film failed
+    /// to open, and the set's stream stopped mid-film. The HLS path does not
+    /// need this - every segment is its own request, and each one touches the
+    /// directory - so this is for the one reader that holds a response open.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _vodInUse =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Keeps a conversion out of the cache sweep until the returned handle is
+    /// disposed. For a reader that holds one response open across the film.
+    /// </summary>
+    public IDisposable HoldVod(string stream)
+    {
+        _vodInUse.AddOrUpdate(stream, 1, (_, n) => n + 1);
+        return new VodHold(this, stream);
+    }
+
+    private sealed class VodHold : IDisposable
+    {
+        private readonly FfmpegManager _owner;
+        private readonly string _stream;
+        private int _released;
+
+        public VodHold(FfmpegManager owner, string stream)
+        {
+            _owner = owner;
+            _stream = stream;
+        }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 1) return;
+            // Removed only while still at zero, so a hold taken between the
+            // decrement and the removal is not thrown away with it.
+            if (_owner._vodInUse.AddOrUpdate(_stream, 0, (_, n) => n - 1) <= 0)
+                ((ICollection<KeyValuePair<string, int>>)_owner._vodInUse).Remove(new(_stream, 0));
+        }
+    }
+
+    private bool IsVodInUse(string stream) => _vodInUse.TryGetValue(stream, out var n) && n > 0;
+
+    /// <summary>
     /// Trims the conversion cache in the background, one at a time. Serialized
     /// because two sweeps would size the same directories against each other
     /// and could both decide to delete the same one.
@@ -1991,6 +2068,10 @@ public sealed class FfmpegManager : IDisposable
             if (total <= budget) break;
             if (dir.Name.Equals(keep, StringComparison.OrdinalIgnoreCase)) continue;
             if (running.Contains(dir.Name)) continue;
+            // Being played through a response still open (see _vodInUse).
+            // Asked here, at the last moment before the delete, not with the
+            // set above: a television can start one while the cache is sized.
+            if (IsVodInUse(dir.Name)) continue;
             // Asked for on purpose: not this sweep's to delete, at any size.
             if (IsKept(dir.FullName)) { keptBytes += size; continue; }
             try
@@ -2598,7 +2679,12 @@ public sealed class FfmpegManager : IDisposable
     /// allows, the rest following as slots free up. Files already converted
     /// or already converting are skipped. Returns how many were newly queued.
     /// </summary>
-    public int QueueVod(IEnumerable<string> files)
+    /// <param name="accepted">
+    /// Given, it is told which files those were. The count alone let the
+    /// Transcodes window treat everything it had asked about as queued, and
+    /// hide all of it from the HLS list - finished conversions included.
+    /// </param>
+    public int QueueVod(IEnumerable<string> files, ICollection<string>? accepted = null)
     {
         var n = 0;
         foreach (var f in files)
@@ -2626,6 +2712,7 @@ public sealed class FfmpegManager : IDisposable
                 _vodQueue.Enqueue(f);
             }
             n++;
+            accepted?.Add(f);
         }
         // Persisted before anything starts: a batch is at its most valuable
         // the moment it is queued and has not been converted yet.
@@ -2900,6 +2987,17 @@ public sealed class FfmpegManager : IDisposable
                         Log.Info("ffmpeg", $"skipped: {Path.GetFileName(file)} — the file is no longer there");
                     }
                 }
+                catch (BeingRemovedException)
+                {
+                    // Its conversion is being deleted - a stream purge, a
+                    // retranscode - for a few seconds. Not the file failing to
+                    // start, so not one of its three strikes: counted as one,
+                    // a queued file could be dropped for good by three passes
+                    // inside a single delete. It waits at the back, looked at
+                    // once per pass like a file whose drive is out of reach,
+                    // and the next pass (a job ending, the watchdog) takes it.
+                    _vodQueue.Enqueue(file);
+                }
                 catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException
                                            || !CanLaunch || !MediaRootWritable())
                 {
@@ -3019,10 +3117,13 @@ public sealed class FfmpegManager : IDisposable
     }
 
     /// <summary>
-    /// Removes a conversion's output directory when it did not finish — no
+    /// Says so when a conversion's job ended without finishing — no
     /// EXT-X-ENDLIST in the playlist means ffmpeg was stopped, killed or
-    /// crashed partway, leaving segments that will never play. A finished
-    /// conversion (ENDLIST present) is left untouched.
+    /// crashed partway. Deletes nothing: the startup sweep clears a partial
+    /// once nothing has touched it for the grace period (see
+    /// CleanUpIncompleteVodDirs), and CancelVod removes the one somebody has
+    /// cancelled. This summary used to say it removed the directory, and the
+    /// cancel path trusted it to.
     /// </summary>
     private void ReportIfIncomplete(string stream, string dir)
     {
@@ -3075,6 +3176,49 @@ public sealed class FfmpegManager : IDisposable
                          + (requeued ? " It is back in the queue." : "")
                          + " It is not counted as converted; queueing or playing it converts it again.");
         OnProblem?.Invoke("conversion", $"vod {name}", detail);
+    }
+
+    /// <summary>
+    /// Puts a batch conversion the watchdog killed back in the queue (see
+    /// CheckVodJobs), at the height it was being made at.
+    ///
+    /// Behind whatever is already waiting, so one wedged file cannot hold the
+    /// rest up; whether its drive can be reached right now does not matter,
+    /// because the queue already waits for a drive that has gone. Twice at
+    /// most: a file that wedges ffmpeg every time is let go on the third, and
+    /// listed as a problem, rather than taking a slot for ten minutes at a
+    /// time for ever. A play is not put back - the batch queue is the
+    /// administrator's, and pressing play again starts it over.
+    /// </summary>
+    private void RequeueStuck(string source, bool batch, int height)
+    {
+        var name = Path.GetFileName(source);
+        if (!batch)
+        {
+            Log.Info("ffmpeg", $"{name} was being converted to play, not from the queue - it has not been put back; "
+                             + "playing it again starts it over");
+            return;
+        }
+        var tries = _stuckRequeues.AddOrUpdate(source, 1, (_, n) => n + 1);
+        if (tries > MaxStuckRequeues)
+        {
+            _stuckRequeues.TryRemove(source, out _);
+            Log.Warn("ffmpeg", $"gave up on {name}: its conversion stopped writing and was killed "
+                             + $"{MaxStuckRequeues + 1} times running");
+            OnProblem?.Invoke("conversion", $"vod {name}", "stopped writing every time it was converted - given up");
+            return;
+        }
+        var requeued = false;
+        lock (_pumpLock)
+            if (!_vodQueue.Contains(source, StringComparer.OrdinalIgnoreCase))
+            {
+                if (height > 0) _vodQueueHeights[source] = height;
+                _vodQueue.Enqueue(source);
+                requeued = true;
+            }
+        if (requeued)
+            Log.Warn("ffmpeg", $"{name} is back in the queue after its conversion stopped writing "
+                             + $"(put back {tries} of at most {MaxStuckRequeues} times)");
     }
 
     /// <summary>How many times each source has been put back for ending early. See ReportEndedEarly.</summary>
@@ -3389,16 +3533,34 @@ public sealed class FfmpegManager : IDisposable
                 RefreshVodJobView();
             }
             StopSeekJobs(stream);
+            // In the same hold of the lock as the kills above, so there is no
+            // moment between them and the folder going in which a skip could
+            // start another encoder into it. See HoldForRemoval.
+            HoldLocked(stream);
         }
-        var dir = Path.Combine(_mediaRoot, stream);
-        if (!Directory.Exists(dir)) return false;
-        // All or nothing. A recursive delete removes every file it can before
-        // it meets one that is open, so when a player was still reading a
-        // segment this left half a conversion: no source.txt to rebuild from,
-        // and a playlist with its end marker over missing segments that the
-        // Transcodes window then called done. Moved aside first - Windows
-        // refuses to rename a folder while anything inside it is open, in
-        // any sharing mode (measured) - so either it all goes, or none of it.
+        try
+        {
+            var dir = Path.Combine(_mediaRoot, stream);
+            if (!Directory.Exists(dir)) return false;
+            return TakeAwayWhole(stream, dir);
+        }
+        finally { ReleaseHold(stream); }
+    }
+
+    /// <summary>
+    /// Removes a conversion's folder all or nothing, and says whether it went.
+    ///
+    /// A recursive delete removes every file it can before it meets one that is
+    /// open, so when a player was still reading a segment this left half a
+    /// conversion: no source.txt to rebuild from, and a playlist with its end
+    /// marker over missing segments that the Transcodes window then called
+    /// done. Moved aside first - Windows refuses to rename a folder while
+    /// anything inside it is open, in any sharing mode (measured) - so either
+    /// it all goes, or none of it. Call with the folder held (HoldForRemoval),
+    /// so nothing can open a file in it again while the move is retried.
+    /// </summary>
+    private bool TakeAwayWhole(string stream, string dir)
+    {
         var aside = Path.Combine(_mediaRoot, DiscardedPrefix + stream + "-" + Guid.NewGuid().ToString("N")[..8]);
         for (var attempt = 0; ; attempt++)
         {
@@ -3410,13 +3572,74 @@ public sealed class FfmpegManager : IDisposable
         catch (Exception ex)
         {
             // Out of use already; only the disk space is late. Swept at the next start.
-            Log.Warn("ffmpeg", $"{stream} was discarded, but {Path.GetFileName(aside)} could not be deleted yet: {ex.Message}");
+            Log.Warn("ffmpeg", $"{stream} was removed, but {Path.GetFileName(aside)} could not be deleted yet: {ex.Message}");
         }
         return true;
     }
 
     /// <summary>Where a discarded conversion waits to be deleted. Not "vod-", so nothing lists it as a conversion.</summary>
     private const string DiscardedPrefix = ".discarded-";
+
+    /// <summary>
+    /// Conversions whose folder is being deleted right now, and how many
+    /// deletes are holding each. Guarded by _lock.
+    ///
+    /// Deleting a conversion used to stop its encoders once and then take its
+    /// time over the folder - a pause for the killed process to let go, then
+    /// up to five tries at the delete - with nothing stopping new work on that
+    /// stream in between. A player still on the film asks for the segment that
+    /// has just been deleted, EnsureVodSegment finds the folder and source.txt
+    /// still there (NTFS lists source.txt after the segments, so it outlives
+    /// most of the first pass), and starts a seek-ahead encoder writing into
+    /// the folder being deleted. That encoder holds its files open, so every
+    /// retry failed: "could not delete - files still in use", a folder left
+    /// with no playlist and no source.txt, and the orphan encoding on to the
+    /// end of the film. Nothing starts into a held folder - EnsureVodSegment
+    /// declines, StartVod refuses - until the delete has finished either way.
+    /// </summary>
+    private readonly Dictionary<string, int> _removing = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// StartVod refused because the conversion's folder is being deleted this
+    /// moment. An IOException, as a caller that only reports it expects; its
+    /// own type so the queue can tell "wait a few seconds" from a file that
+    /// fails to start - see PumpVodQueue.
+    /// </summary>
+    public sealed class BeingRemovedException(string message) : IOException(message);
+
+    /// <summary>
+    /// Holds a conversion's folder against anything that would start writing
+    /// into it, until the returned hold is disposed. For whoever deletes it:
+    /// see _removing. Holds nest, so two deletes of the same stream at once
+    /// cannot release each other's.
+    /// </summary>
+    public IDisposable HoldForRemoval(string stream)
+    {
+        lock (_lock) HoldLocked(stream);
+        return new RemovalHold(this, stream);
+    }
+
+    private void HoldLocked(string stream) => _removing[stream] = _removing.GetValueOrDefault(stream) + 1;
+
+    private void ReleaseHold(string stream)
+    {
+        lock (_lock)
+        {
+            if (!_removing.TryGetValue(stream, out var holds)) return;
+            if (holds <= 1) _removing.Remove(stream);
+            else _removing[stream] = holds - 1;
+        }
+    }
+
+    private sealed class RemovalHold(FfmpegManager owner, string stream) : IDisposable
+    {
+        private int _released;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0) owner.ReleaseHold(stream);
+        }
+    }
 
     /// <summary>
     /// Stops any encoders started by skipping ahead in this stream. Call with
@@ -3432,7 +3655,11 @@ public sealed class FfmpegManager : IDisposable
         }
     }
 
-    /// <summary>Kills a running conversion (e.g. before deleting its stream). True if one was running.</summary>
+    /// <summary>
+    /// Kills a running conversion and removes what it had written - the
+    /// Transcodes window's cancel, and the first step of deleting a stream.
+    /// True if one was running.
+    /// </summary>
     public bool CancelVod(string stream)
     {
         // A retry waiting after a GPU refusal is this conversion too: it has
@@ -3444,17 +3671,63 @@ public sealed class FfmpegManager : IDisposable
             StopSeekJobs(stream);
             if (!_vodJobs.Remove(stream, out p)) return retry;
             RefreshVodJobView();
+            // Held from the moment the job leaves the table, in the same hold
+            // of the lock: until the partial is gone, a skip must not start an
+            // encoder into it and a play must not start the conversion over in
+            // the folder being removed. See HoldForRemoval.
+            HoldLocked(stream);
         }
-        // Outside the lock: KillAndRelease waits up to 2s, and PumpVodQueue takes
-        // a different lock — holding _lock across either risks a stall/inversion.
-        KillAndRelease(p);
-        lock (_progressLock) _vodProgress.Remove(stream);
-        // A cancelled conversion never reached EXT-X-ENDLIST, so its directory is
-        // a partial — remove it, the same as a queued one leaves nothing behind.
-        ReportIfIncomplete(stream, Path.Combine(_mediaRoot, stream));
+        try
+        {
+            // Outside the lock: KillAndRelease waits up to 2s, and PumpVodQueue takes
+            // a different lock — holding _lock across either risks a stall/inversion.
+            KillAndRelease(p);
+            lock (_progressLock) _vodProgress.Remove(stream);
+            RemoveCancelledPartial(stream);
+        }
+        finally { ReleaseHold(stream); }
         Log.Info("ffmpeg", $"vod job cancelled: {stream}");
         PumpVodQueue();   // a slot just freed — start the next waiting one
         return true;
+    }
+
+    /// <summary>
+    /// Deletes what a cancelled conversion had written.
+    ///
+    /// This said "remove it" and only ever logged. A cancelled conversion
+    /// cannot be resumed - converting the file again clears the folder and
+    /// starts from the top - so all that was left was disk: gigabytes of a
+    /// half-done 4K encode that nothing would ever take back. Queue jobs carry
+    /// the keep marker, so the cache sweep read it as "asked for from the
+    /// Transcodes window" and passed over it at any size, and the startup
+    /// sweep only clears a partial a day after it was last written. Cancelling
+    /// is the one moment somebody has said, in so many words, that they do not
+    /// want it.
+    ///
+    /// A conversion that reached its end in the moment before the kill is not
+    /// a partial, and stays. One that cannot be moved aside - a player still
+    /// reading a segment - loses its keep marker instead, so that the cache
+    /// sweep may take it later rather than never.
+    /// </summary>
+    private void RemoveCancelledPartial(string stream)
+    {
+        var dir = Path.Combine(_mediaRoot, stream);
+        try
+        {
+            if (!Directory.Exists(dir) || IsComplete(dir)) return;
+            if (TakeAwayWhole(stream, dir))
+            {
+                Log.Info("ffmpeg", $"removed what the cancelled {stream} had written");
+                return;
+            }
+            try { File.Delete(Path.Combine(dir, KeepMarker)); } catch { /* the startup sweep still clears it */ }
+            Log.Warn("ffmpeg", $"the cancelled {stream} could not be removed - something still has a file in it "
+                             + "open; it is left for the cache to clear, and converting the file again replaces it");
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("ffmpeg", $"could not clear the cancelled {stream}: {ex.Message}");
+        }
     }
 
     /// <summary>Filename → URL-safe lowercase slug (letters/digits/dashes, ≤48 chars).</summary>
@@ -3883,8 +4156,23 @@ public sealed class FfmpegManager : IDisposable
     ///
     /// Only loopback URLs into our own API are touched. Anything else — a
     /// tuner, a camera, someone's IPTV feed — is left exactly as given.
+    ///
+    /// The port is corrected the same way, for the one URL this server writes
+    /// for itself: a pinned channel's /api/tv/watch. It carried the control
+    /// port of the moment it was pinned, and nothing ever rewrote it, so
+    /// moving the control port in the Config dialog and restarting left every
+    /// pinned channel pointing at a port nothing listened on - refused, with
+    /// nothing to say why, until each was removed and pinned again. (A pin
+    /// made between saving a new port and restarting was worse: it named the
+    /// new port before anything listened there.) Other loopback /api/ URLs
+    /// keep their port, because those could be somebody else's service on this
+    /// machine; this path, with its signature, is only ever ours.
+    ///
+    /// <paramref name="controlPort"/> is the port this process's control API
+    /// actually bound (<see cref="OwnControlPort"/>), not the configured one,
+    /// which a saved-but-not-yet-applied change can already have moved.
     /// </summary>
-    private static string OwnSchemeFor(string url)
+    internal static string OwnUrlFor(string url, string scheme, int? controlPort)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var u)) return url;
         if (u.Scheme is not ("http" or "https")) return url;
@@ -3894,12 +4182,28 @@ public sealed class FfmpegManager : IDisposable
         if (!loopback) return url;
         if (!u.AbsolutePath.StartsWith("/api/", StringComparison.OrdinalIgnoreCase)) return url;
 
-        var want = Services.UrlScheme.Name;
-        if (u.Scheme.Equals(want, StringComparison.OrdinalIgnoreCase)) return url;
-        var fixedUp = new UriBuilder(u) { Scheme = want }.Uri.ToString();
-        Log.Debug("ffmpeg", $"channel points at this server — using {want} for it");
+        var fixScheme = !u.Scheme.Equals(scheme, StringComparison.OrdinalIgnoreCase);
+        var fixPort = controlPort is int live && u.Port != live
+                      && u.AbsolutePath.Equals("/api/tv/watch", StringComparison.OrdinalIgnoreCase);
+        if (!fixScheme && !fixPort) return url;
+
+        var b = new UriBuilder(u);
+        if (fixScheme) b.Scheme = scheme;
+        if (fixPort) b.Port = controlPort!.Value;
+        // AbsoluteUri, not ToString(): ToString un-escapes. Measured, a
+        // channel id carrying %20 came back as a bare space in the query -
+        // not the URL that was saved, and not one a request line can carry.
+        var fixedUp = b.Uri.AbsoluteUri;
+        Log.Debug("ffmpeg", $"channel points at this server — using {scheme} on port {b.Port} for it");
         return fixedUp;
     }
+
+    /// <summary>
+    /// The port this process's own control API is listening on, set by
+    /// ControlApi once it has bound. Null until then, and in a process with no
+    /// control API, where nothing is rewritten. See <see cref="OwnUrlFor"/>.
+    /// </summary>
+    public int? OwnControlPort { get; set; }
 
     private void StartLiveJob(string name, string url)
     {
@@ -4026,7 +4330,7 @@ public sealed class FfmpegManager : IDisposable
                 // guard with no remaining purpose is worse than no change.
             });
         }
-        args.AddRange(new[] { "-i", OwnSchemeFor(url) });
+        args.AddRange(new[] { "-i", OwnUrlFor(url, Services.UrlScheme.Name, OwnControlPort) });
 
         var remuxAll = _config.LiveVideoMode.Equals("copy", StringComparison.OrdinalIgnoreCase);
         if (remuxAll)
@@ -4398,18 +4702,34 @@ public sealed class FfmpegManager : IDisposable
     /// first byte, and on a big remuxed file over a slow drive that is a long
     /// silence with nothing on disk to show for it. Two minutes is longer than
     /// that ever takes, so the watchdog never judges a job by a window it
-    /// spent starting up.
+    /// spent starting up. Settable so a test can stand in for a wedged job
+    /// without waiting twelve minutes for one.
     /// </summary>
-    private static readonly TimeSpan VodStartGrace = TimeSpan.FromMinutes(2);
+    internal TimeSpan VodStartGrace { get; set; } = TimeSpan.FromMinutes(2);
 
     /// <summary>
     /// How long a conversion's directory may go without growing before the job
     /// is called stuck rather than slow. Ten minutes is far longer than any gap
     /// a working encode leaves, even a slow one, so nothing that is genuinely
     /// making progress is ever killed by it; the whole point is that the slot
-    /// it holds is worth more than the small chance of being wrong.
+    /// it holds is worth more than the small chance of being wrong. Settable
+    /// for tests, like VodStartGrace.
     /// </summary>
-    private static readonly TimeSpan VodStuckAfter = TimeSpan.FromMinutes(10);
+    internal TimeSpan VodStuckAfter { get; set; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// The processes this watchdog killed, so their exit handler can tell a
+    /// stuck conversion from one that was cancelled, discarded or crashed.
+    /// Keyed by the process itself: a rerun of the same stream is a different
+    /// one.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Process, byte> _killedAsStuck = new();
+
+    /// <summary>How many times each source has been put back after being killed as stuck. See RequeueStuck.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _stuckRequeues =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private const int MaxStuckRequeues = 2;
 
     /// <summary>
     /// The same watch the live channels get, for batch conversions - and the
@@ -4426,11 +4746,18 @@ public sealed class FfmpegManager : IDisposable
     ///
     /// So judge them by output, not by existence. A conversion whose
     /// directory has not grown in ten minutes is not slow, it is stuck: kill
-    /// it, and the exit handler cleans up the half-finished directory and
-    /// starts the next file. Ten minutes is far longer than any gap a working
-    /// encode leaves - even a slow one writes a segment every few seconds -
-    /// and the file it gives up on is left in the queue's own record, so
-    /// nothing is silently skipped.
+    /// it, and the exit handler starts the next file. Ten minutes is far
+    /// longer than any gap a working encode leaves - even a slow one writes a
+    /// segment every few seconds.
+    ///
+    /// This used to add that the file it gives up on "is left in the queue's
+    /// own record, so nothing is silently skipped". It was not: the exit
+    /// handler took the job off the table, nothing put the file back, and the
+    /// queue was saved without it - so a share that dropped out and came back
+    /// under a wedged read lost that file from the batch for good, with a
+    /// "did not finish" line as the only trace. The exit handler now puts a
+    /// killed batch conversion back in the queue, a bounded number of times
+    /// (see RequeueStuck).
     /// </summary>
     public void CheckVodJobs()
     {
@@ -4469,13 +4796,21 @@ public sealed class FfmpegManager : IDisposable
 
         foreach (var stream in stuck)
         {
-            Log.Warn("ffmpeg", $"conversion {stream}: running but wrote nothing for 10 minutes - " +
-                               "killing it so the queue can carry on");
+            Log.Warn("ffmpeg", $"conversion {stream}: running but wrote nothing for {VodStuckAfter.TotalMinutes:0.#} "
+                               + "minutes - killing it so the queue can carry on");
             Process? p;
             lock (_lock) _vodJobs.TryGetValue(stream, out p);
-            // Kill only: the Exited handler clears the slot, tidies the
-            // half-written directory and starts the next file.
-            try { if (p is not null && !p.HasExited) p.Kill(entireProcessTree: true); } catch { }
+            if (p is null) continue;
+            // Kill only: the Exited handler clears the slot, puts a batch
+            // conversion back in the queue (it knows to, from this mark) and
+            // starts the next file.
+            try
+            {
+                if (p.HasExited) continue;
+                _killedAsStuck[p] = 0;
+                p.Kill(entireProcessTree: true);
+            }
+            catch { }
         }
     }
     /// <summary>

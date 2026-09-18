@@ -356,6 +356,39 @@ public sealed class TvCodecs
     /// <summary>Reads a file again whatever the cache says - the sweep's answer to IsSettled.</summary>
     public (string? video, string? audio, string? pixFmt) Refresh(string file) => Details(file, refresh: true);
 
+    /// <summary>
+    /// Whether a browser plays this file as it stands - for /api/file, which a
+    /// browser asks again on every seek, and for Play. From this cache, so the
+    /// answer is read once per version of the file.
+    ///
+    /// The container first, as FfmpegManager.CanPlayDirectly always did: an
+    /// MKV is "no" by its name. Asking the cache first cost an ffprobe on every
+    /// play of one - IsSettled calls such a container settled without reading
+    /// it, so nothing ever cached it - to reach the same "no".
+    ///
+    /// An answer from before the pixel format was recorded is read again once
+    /// per run, as the library sweep does. Once: when that read fails - a
+    /// timeout while encoders have the disk - the answer the file had stands,
+    /// and asking again on every Range request would put a probe of up to
+    /// twenty seconds in front of each seek, which is what this is for
+    /// removing. The sweep reads it again later.
+    /// </summary>
+    public bool PlaysInBrowserAsItStands(string file)
+    {
+        if (!FfmpegManager.IsDirectPlayContainer(file)) return false;
+        var readAgain = !IsSettled(file) && _readAgainForPlay.TryAdd(file, 0);
+        var (video, audio, pixFmt) = readAgain ? Refresh(file) : Details(file);
+        return FfmpegManager.PlayableAsIs(file, video, audio, pixFmt);
+    }
+
+    /// <summary>Files PlaysInBrowserAsItStands has already read again this run.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _readAgainForPlay =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>How many times ffprobe has been started. For the tests.</summary>
+    internal int ProbesRun => Volatile.Read(ref _probesRun);
+    private int _probesRun;
+
     /// <summary>Codecs of a file, from the cache when its size and date are unchanged.</summary>
     public (string? video, string? audio) Codecs(string file)
     {
@@ -547,6 +580,7 @@ public sealed class TvCodecs
 
     private (string? video, string? audio, string? pixFmt) Probe(string file)
     {
+        Interlocked.Increment(ref _probesRun);
         try
         {
             var psi = new ProcessStartInfo(_ffprobe)

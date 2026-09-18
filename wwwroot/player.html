@@ -98,10 +98,16 @@
   }
 
   /* The stream id out of the playlist URL - the same key the history is
-     stored under. "/vod-film-1a2b/index.m3u8" -> "vod-film-1a2b". */
+     stored under. "/vod-film-1a2b/index.m3u8" -> "vod-film-1a2b".
+     A file handed over as it stands has no playlist and no stream: its
+     history entry is filed under the file's own path, which is the path=
+     of "/api/file?path=...". Without this the key was "" and the position
+     was never recorded, so a film played that way could not be resumed. */
   function streamKeyFromSrc(u) {
     const m = /\/([^/?#]+)\/[^/?#]*\.m3u8/.exec(u || "");
-    return m ? decodeURIComponent(m[1]) : "";
+    if (m) return decodeURIComponent(m[1]);
+    const f = /^\/api\/file\?(?:[^#]*&)?path=([^&#]*)/.exec(u || "");
+    return f ? decodeURIComponent(f[1].replace(/\+/g, " ")) : "";
   }
 
   setInterval(reportPosition, 10000);

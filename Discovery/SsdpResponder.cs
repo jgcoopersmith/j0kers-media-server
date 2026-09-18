@@ -41,6 +41,13 @@ public sealed class SsdpResponder : IDisposable
     private bool _disposed;
 
     /// <summary>
+    /// Whether <see cref="Start"/> got as far as listening. Every way it can
+    /// fail logs, drops the socket and returns, so this is the one place a
+    /// caller can learn that it did - see DiscoveryService.Restart.
+    /// </summary>
+    public bool Running => _socket is not null;
+
+    /// <summary>
     /// What this device claims to be. A generic Basic device unless DLNA is
     /// switched on: claiming MediaServer:1 has clients ask for a
     /// ContentDirectory service, and a device that answers a browse request

@@ -47,7 +47,7 @@ async function pinMedia(path, name) {
   });
   if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || "pin failed"); return; }
   await refreshFavorites(true); // update favoritePaths BEFORE re-rendering the grid
-  if (currentLibPath) loadLibrary(currentLibPath); // refresh star states
+  refreshLibraryPanel();        // refresh star states - in the results, if those are showing
 }
 
 async function pinMediaViaPicker() {
@@ -59,7 +59,7 @@ async function pinMediaViaPicker() {
 async function unpinMedia(path) {
   await fetch("/api/favorites?path=" + encodeURIComponent(path), { method: "DELETE", headers: headers() });
   await refreshFavorites(true);
-  if (currentLibPath) loadLibrary(currentLibPath);
+  refreshLibraryPanel();
 }
 
 /* Shared ☆/⭐ pin toggle used on folder rows, music rows, and tiles. */
@@ -167,7 +167,7 @@ async function rescanLibrary() {
     await refreshLibraryRoots(true);
     refreshFavorites(true);
     refreshPlaylists(true);
-    if (currentLibPath) await loadLibrary(currentLibPath);
+    await refreshLibraryPanel();
   } catch (e) {
     $("lib-path").textContent = "rescan failed: " + e.message;
   } finally {
@@ -181,7 +181,31 @@ async function rescanLibrary() {
    which is the question you have once a library is more than one folder
    deep. Results replace the listing until the box is cleared, and the
    folder you were in is remembered so clearing puts you back. */
-let libSearchTimer = null, libSearchGen = 0, libBrowsePath = null;
+let libSearchTimer = null, libBrowsePath = null;
+
+/* Which request owns the panel. A search and a folder listing both repaint
+   #library, and each used to guard only against a newer one of its own kind:
+   type a query (the walk can take seconds), click a library chip, and the
+   folder painted - then the search landed, passed its own check, and replaced
+   the listing with results and blanked the path, while currentLibPath said
+   the folder. A slow folder overtaking a search did the same the other way.
+   One counter for both: whichever was asked for last is what shows. */
+let libPanelGen = 0;
+
+/* What the panel shows: "search" or "folder" - set by whichever request last
+   claimed it (see libPanelGen). libBrowsePath cannot answer this: it stays set
+   when a folder is opened from a result with the query still in the box, so
+   that clearing the box goes back - and a pin there reran the search over the
+   folder being browsed. */
+let libShowing = "folder";
+
+/* Repaint what is on screen now - the search, if results are what is showing,
+   otherwise the folder. Pinning a search result used to reload the folder
+   underneath, replacing the results while the query stayed in the box. */
+function refreshLibraryPanel() {
+  if (libShowing === "search" && $("lib-search").value.trim().length >= 2) return runLibrarySearch();
+  if (currentLibPath) return loadLibrary(currentLibPath);
+}
 
 function librarySearchTyped() {
   clearTimeout(libSearchTimer);
@@ -261,7 +285,8 @@ async function runLibrarySearch() {
   const q = $("lib-search").value.trim();
   if (q.length < 2) return;
   const box = $("library");
-  const gen = ++libSearchGen;
+  const gen = ++libPanelGen;
+  libShowing = "search";
   if (libBrowsePath === null) libBrowsePath = currentLibPath;
   box.innerHTML = '<div class="empty">searching…</div>';
 
@@ -271,11 +296,11 @@ async function runLibrarySearch() {
     data = await api("/api/library/search?q=" + encodeURIComponent(q)
                      + (scope ? "&folder=" + encodeURIComponent(scope) : ""));
   } catch (e) {
-    if (gen !== libSearchGen) return;
+    if (gen !== libPanelGen) return;
     box.innerHTML = '<div class="empty">search failed: ' + esc(e.message) + "</div>";
     return;
   }
-  if (gen !== libSearchGen) return; // a later search overtook this one
+  if (gen !== libPanelGen) return; // a later search, or a folder opened since, owns the panel
 
   $("lib-path").textContent = "";
   $("lib-playall").style.display = "none";
@@ -332,7 +357,7 @@ function shortFolder(folder) {
 
 function clearLibrarySearch() {
   clearTimeout(libSearchTimer);
-  libSearchGen++;
+  libPanelGen++;   // a search still out no longer owns the panel
   $("lib-search").value = "";
   $("lib-search-clear").style.display = "none";
   const back = libBrowsePath;
@@ -345,11 +370,11 @@ function clearLibrarySearch() {
 /* Which library listing is the current one. Two quick folder clicks used to
    leave the path label, the listing and currentLibPath disagreeing: the slower
    request repainted after the faster, so the page showed one folder's contents
-   under another folder's name, and the next Up went somewhere unrelated. */
-let libLoadGen = 0;
-
+   under another folder's name, and the next Up went somewhere unrelated. The
+   counter is libPanelGen, shared with the search - see there. */
 async function loadLibrary(path) {
-  const gen = ++libLoadGen;
+  const gen = ++libPanelGen;
+  libShowing = "folder";
   // opening a folder from a result is the end of that search
   if (libBrowsePath !== null && $("lib-search").value.trim() === "") libBrowsePath = null;
   const box = $("library");
@@ -366,13 +391,13 @@ async function loadLibrary(path) {
     data = await r.json();
     if (!r.ok) throw new Error(data.error || r.status);
   } catch (e) {
-    if (gen !== libLoadGen) return;      // a newer folder is already being opened
+    if (gen !== libPanelGen) return;     // a newer folder, or a search, owns the panel
     box.innerHTML = '<div class="empty">cannot open: ' + esc(e.message) + '</div>';
     return;
   }
   // Everything below repaints the panel and moves currentLibPath, so a slower
   // request must stop here rather than overwrite a newer one.
-  if (gen !== libLoadGen) return;
+  if (gen !== libPanelGen) return;
 
   currentLibPath = data.path;
   scopeChoice = null;      // opening a folder is a fresh answer to "where?"

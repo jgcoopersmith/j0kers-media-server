@@ -98,12 +98,37 @@ public sealed class DiscoveryService : IDisposable
     /// Turning it off sends the goodbyes, so listeners drop us immediately
     /// rather than keeping a dead entry until the cache expires.
     /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// Announcement is on and not one of the mechanisms it asks for could
+    /// start. The Config dialog applies its switch through here before saving
+    /// it, so that a switch nothing can honour is reported rather than saved
+    /// as on - and it could never be, because each responder catches its own
+    /// failure, logs it and returns. This is where that failure is finally
+    /// told to the caller. One mechanism working is announcing, and is not an
+    /// error; at startup, where nobody is waiting on an answer, the warnings
+    /// in the log are the whole story, so <see cref="Start"/> does not throw.
+    /// </exception>
     public void Restart()
     {
         lock (_lock)
         {
             StopResponders();
             Start();
+            var asked = (_config.Mdns ? 1 : 0) + (_config.Ssdp ? 1 : 0) + (_config.UdpProbe ? 1 : 0);
+            var running = (_mdns?.Running == true ? 1 : 0) + (_ssdp?.Running == true ? 1 : 0)
+                          + (_probe?.Running == true ? 1 : 0);
+            if (_config.Enabled && asked > 0 && running == 0)
+            {
+                StopResponders();
+                throw new InvalidOperationException(
+                    "none of " + string.Join(", ", new[]
+                    {
+                        _config.Mdns ? "mDNS (udp/5353)" : null,
+                        _config.Ssdp ? "SSDP (udp/1900)" : null,
+                        _config.UdpProbe ? $"the discovery probe (udp/{_config.UdpProbePort})" : null,
+                    }.Where(s => s is not null))
+                    + " could start - the log says why; usually another program holds the port");
+            }
         }
     }
 

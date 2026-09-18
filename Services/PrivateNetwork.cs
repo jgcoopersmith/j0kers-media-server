@@ -78,8 +78,26 @@ public static class PrivateNetwork
             try { addresses = Dns.GetHostAddresses(host); } catch { return false; }
         }
 
-        return addresses.Length > 0
-               && addresses.All(a => IsPrivate(a) && !IPAddress.IsLoopback(a) && !IsCloudMetadata(a));
+        return addresses.Length > 0 && addresses.All(IsLanAddress);
+    }
+
+    /// <summary>
+    /// One address, by the rule <see cref="IsLanDevice"/> applies to every
+    /// address a host has.
+    ///
+    /// Read as IPv4 when it is IPv4 written as IPv6, because the metadata test
+    /// compares text: "::ffff:169.254.169.254" is the metadata service to a
+    /// socket and was a LAN device to this rule. And not 0.0.0.0/8, which
+    /// <see cref="IsPrivate"/> counts as "this network" and a connect on Linux
+    /// treats as this machine - which is what this rule exists to exclude.
+    /// Both came to matter when the tuner's client started dialling whatever
+    /// this rule allows (see <see cref="GuardLanDevices"/>).
+    /// </summary>
+    public static bool IsLanAddress(IPAddress a)
+    {
+        if (a.IsIPv4MappedToIPv6) a = a.MapToIPv4();
+        if (a.AddressFamily == AddressFamily.InterNetwork && a.GetAddressBytes()[0] == 0) return false;
+        return IsPrivate(a) && !IPAddress.IsLoopback(a) && !IsCloudMetadata(a);
     }
 
     /// <summary>
@@ -175,6 +193,60 @@ public static class PrivateNetwork
             if (allowed.Length == 0)
                 throw new HttpRequestException(
                     $"refused to connect to {host}: it resolves inside this network");
+
+            if (inner is not null)
+                return await inner(context, token).ConfigureAwait(false);
+
+            var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+            try
+            {
+                await socket.ConnectAsync(allowed, port, token).ConfigureAwait(false);
+                return new NetworkStream(socket, ownsSocket: true);
+            }
+            catch
+            {
+                socket.Dispose();
+                throw;
+            }
+        };
+        return handler;
+    }
+
+    /// <summary>
+    /// The same check the other way round, for the one fetch whose whole
+    /// point is a device on this network: an HDHomeRun tuner. Only addresses
+    /// <see cref="IsLanAddress"/> accepts may be dialled - not loopback, not
+    /// the metadata service, and not the internet. This machine's own LAN
+    /// address is allowed: a tuner emulator can run here, and a request that
+    /// arrives from that address is not a loopback one, so nothing that trusts
+    /// loopback trusts it.
+    ///
+    /// It exists because the tuner used to be read with the providers' client,
+    /// which carries <see cref="GuardPrivateAddresses"/>. The endpoint first
+    /// insists the tuner is a LAN device, and that client then refuses every
+    /// LAN device at the socket - so importing a lineup failed for every tuner
+    /// there is, with "it resolves inside this network". Loosening that guard
+    /// would reopen what it closes for every playlist URL, so the tuner gets a
+    /// client of its own instead, checked at the socket in the same way and
+    /// for the same reason: a name judged once and dialled again can rebind in
+    /// between, and here that would make a "tuner" of this server's own ports.
+    /// </summary>
+    public static SocketsHttpHandler GuardLanDevices(SocketsHttpHandler handler)
+    {
+        var inner = handler.ConnectCallback;
+        handler.ConnectCallback = async (context, token) =>
+        {
+            var host = context.DnsEndPoint.Host;
+            var port = context.DnsEndPoint.Port;
+
+            IPAddress[] addresses = IPAddress.TryParse(host.Trim('[', ']'), out var literal)
+                ? new[] { literal }
+                : await Dns.GetHostAddressesAsync(host, token).ConfigureAwait(false);
+
+            var allowed = addresses.Where(IsLanAddress).ToArray();
+            if (allowed.Length == 0)
+                throw new HttpRequestException(
+                    $"refused to connect to {host}: it is not a device on this network");
 
             if (inner is not null)
                 return await inner(context, token).ConfigureAwait(false);

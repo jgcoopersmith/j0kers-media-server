@@ -725,9 +725,15 @@ public class ShutdownOnCloseTests
         /// only like everything else here. Discovery itself stays off: nothing
         /// is announced on the network.
         /// </param>
+        /// <param name="beforeLaunch">
+        /// Called with the server's directory once server.json is written and
+        /// before the process starts - for a test that needs a setting this
+        /// helper does not take (it may rewrite server.json) or a file in place
+        /// before the server first looks for it.
+        /// </param>
         public static async Task<TestServer> Start(bool openDashboardOnStart, bool backgroundMode,
                                                   string? selfToken = null, string? ffmpegPath = null,
-                                                  bool dlna = false)
+                                                  bool dlna = false, Action<string>? beforeLaunch = null)
         {
             var exe = Path.Combine(AppContext.BaseDirectory,
                                    OperatingSystem.IsWindows() ? "j0kers-media-server.exe"
@@ -772,6 +778,8 @@ public class ShutdownOnCloseTests
             }
             var configPath = Path.Combine(dir, "server.json");
             File.WriteAllText(configPath, config);
+            try { beforeLaunch?.Invoke(dir); }
+            catch { try { Directory.Delete(dir, recursive: true); } catch { } throw; }
 
             var startInfo = new ProcessStartInfo(exe)
             {

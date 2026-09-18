@@ -252,7 +252,17 @@ async function revokeKey(keyId, userId) {
   const path = userId
     ? "/api/users/keys?id=" + encodeURIComponent(userId) + "&keyId=" + encodeURIComponent(keyId)
     : "/api/auth/keys?id=" + encodeURIComponent(keyId);
-  await send("DELETE", path);
+  /* Check the result. This ignored it and always redrew the list from memory
+     — so when the server could not write users.json and answered 500, the key
+     vanished from the page while it went on working, to reappear at the next
+     restart. The server now keeps the key in memory on a failed write (see
+     UserStore.RevokeKey); the page has to say so rather than show it gone. */
+  const [ok, data] = await send("DELETE", path);
+  if (!ok) {
+    const msg = userId ? $("users-msg") : $("acct-msg");
+    if (msg) { msg.className = "msg"; msg.textContent = data.error || "could not revoke the key — it is still active"; }
+    return;
+  }
   if (userId) {
     await loadUsers();          // re-renders the row (and closes its panel)
     toggleUserKeys(userId);     // …so reopen the key list the user was in

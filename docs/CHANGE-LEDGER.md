@@ -3431,3 +3431,359 @@ requires the job's exit to clear it and keep every finished segment. Red twice
 with the clean-up removed, green five times of five with it.
 
 369 tests pass (367 before this work).
+
+---
+
+## v2.0.313 — the rest of the 2026-09-17 audit
+
+The 51 confirmed findings v2.0.309–v2.0.312 had not reached. 49 are fixed; [50]
+is fixed in part and [76] could not be fixed the way the audit asks (both below).
+Every fix has a test that was run with the fix reverted in place and seen to fail
+for the reason the audit gives, then passed with it restored from a hashed backup
+— except where a section says the proof was by hand or by reading.
+
+**How the work was split.** Four agents, each in its own git worktree, took the
+accounts, DLNA/live-TV, conversions and control-API groups; the two dashboard
+races ([81], [82]) were done here. Nothing an agent wrote went in unread: each
+diff was reviewed here before it was merged, and its group's tests were run again
+in the merged tree. That review found one defect in the accounts group's fix for
+[4] (below, *Found in review*). Two independent reviews of the combined change
+followed (see *Review*).
+
+### Accounts and sign-in
+
+- **[4] Open sign-ins without limit.** A passwordless account signs in on its
+  name alone, so nothing throttled it; every sign-in added a session (removed only
+  after 12 h idle) and rewrote users.json under the store lock. Now: per-address
+  limit on open sign-ins, the last-sign-in stamp written at most once a minute,
+  64 sessions per account at most (the longest-quiet go first, so a page in use
+  stays), and trading a key for a session retires the session it arrived with.
+  Red: 85 sign-ins left 85 sessions; users.json rewritten by repeat sign-ins; the
+  traded-in session still worked.
+- **[6] A change that could not be written stayed in force.** Every account
+  change altered memory and then saved; a failed write answered 500 with the
+  change already live — undone at the next restart, or made permanent by a later
+  unrelated save. Each change now puts back exactly what was there when the write
+  fails, and the dashboard's key revoke reports the failure instead of redrawing
+  the key as gone. Red for all seven kinds of change.
+- **[28] An edit refused for its password had already been saved.** The rename,
+  role and passwordless change were written before the password was checked; with
+  passwordless being turned off in the same save, the account was left with no
+  password and no keys. The password is checked first now.
+- **[38] `control.authToken` protected nothing on an unclaimed server.** With no
+  administrator yet, every request was the "open" top tier, token or not, and the
+  token itself ranked lower (Admin). While the server is unclaimed the token is
+  now the top tier, and when one is set the control API — first-run setup
+  included, with a token field on the setup form — answers only to it. Once
+  claimed, the token is an administrator, as before. This install has no token
+  set, so nothing changes here.
+- **[39]/[40] The lockout could be outrun.** It was checked, the ~100 ms password
+  hash ran, and only then was a failure counted — so 64 guesses fired at once were
+  64 checked guesses. The attempt is now reserved before the hash, on the web
+  sign-in, RTSP and the current-password check. Red: 64 of 64 checked.
+- **[41] A sign-in in flight with the old password outlived the change.** Each
+  account has a credential generation, read before the hash and stamped on the
+  session; a password change moves it on, and an older session is refused. The
+  race won 2 times in 7 through the real server, so the test drives it
+  deterministically: the owner's stored hash is written at 3,000,000 PBKDF2
+  iterations (the format allows up to ten million) so the change always lands
+  during the check. Red 10 of 10.
+- **[43] A moment's lock on signing.key replaced the key.** Any read error was
+  taken as "no key" and a new one written over it — ending every pinned channel,
+  share link and M3U link. Now only a missing or garbled file is replaced; a lock
+  is waited out (5 × 200 ms), and after that the server runs on a temporary key
+  without touching the file.
+- **[44] An expiry off the calendar answered 500.** Compared as a number now: 401.
+- **[45]/[46] A read-only users.json stopped the server.** The one-time Server
+  Admin promotion saved inside the parse's error handling, so "could not write"
+  read as "users.json is invalid". The promotion now runs after it and saves
+  quietly.
+- **[47] An unread accounts file could be written over.** When the file on disk
+  was not the one loaded and could not be copied aside, the save went ahead
+  anyway. It now refuses.
+- **[48] Every RTSP request rewrote users.json.** The sign-in stamp is written at
+  most once a minute.
+- **[56] Read accounts saw who was watching from where.** `/api/sessions` now
+  blanks address, player and account name for anyone below Admin.
+- **[74] An open server could be locked with a passwordless admin.** Creating an
+  enabled administrator with no password on an unclaimed server is refused.
+- **[75] Unticking passwordless and picking a role kept it Read.** The role now
+  follows the account's final state.
+
+**Found in review, fixed here.** The first version of [4] counted open sign-ins
+with the failure counter, limit 5, and nothing ever started that count again (a
+success is what it counts, and throttles are only swept once there are 64). The
+sixth guest sign-in from one address since the server started would have been
+refused, and each after it for longer, up to 15 minutes. The count now starts
+again after 10 quiet minutes, and the limit is 20 in a row. Red with only the
+restart of the count removed: 30 sign-ins in spells of five, spells apart, and
+the 21st refused. A loop is still stopped (30 in a row → refused).
+
+### Conversions and files
+
+- **[07] Saving a transcodes folder split the server in two.** The control API
+  moved to the new folder at once while ffmpeg went on writing to the old one:
+  deleting or rebuilding a stream said "unknown stream", and after a services
+  rebuild every stream was 404. The new folder is now only saved until the
+  restart; the Config dialog shows the saved one.
+- **[17] A skip could start an encoder into a conversion being deleted.** A
+  delete now holds the stream: no seek-ahead and no fresh start into it until the
+  delete is over, taken under the same lock as the job's removal.
+- **[22] `/api/file` probed on every request.** A probe that timed out behind a
+  batch of encodes answered a mid-film seek with 415. The decision now comes from
+  the codec cache, once per version of the file; a failed probe is never cached.
+- **[23] A film played as it stands was never counted as watched.** `/api/file`
+  now records the viewing and its bytes (history, Sessions, the silence watch);
+  the player files its position under the file's path, and the dashboard resumes
+  from it. The page half was checked by hand in the built-in browser against a
+  loopback scratch server with no accounts.
+- **[65] The Transcodes window walked all of Windows.** The folder summary's cap
+  counted videos only; opened at C:\ it walked 176,611 files (23 s cold) per row,
+  every heartbeat. Every file now counts toward a 20,000-file cap; the page keeps
+  one background refresh out at a time and still makes the last one. A folder
+  capped before any video shows "not counted", not "no media".
+- **[66] A folder opened after a drive root waited for the whole drive.** Probe
+  requests are served newest first, and a long walk gives way every 64 files.
+- **[67] The Transcodes delete could recycle a folder containing the server's.**
+  Ticking the parent of the server's folder, or its drive, sent the accounts and
+  keys to the Recycle Bin. Refused now. Tested on the check itself, deliberately:
+  a wrong check tested through the endpoint would recycle a real folder.
+- **[78] Cancelling a conversion left it on disk.** It only logged; the keep
+  marker then kept the cache off it. The partial is now removed; if a player still
+  holds a file in it, it loses the keep marker instead.
+- **[79] A conversion killed as stuck was dropped from the batch.** It now goes
+  back to the end of the queue at its height, and after three kills in a row is
+  given up and listed as a problem.
+
+### Control API
+
+- **[20] Restart with spaces in the config path.** Windows PowerShell 5.1's
+  Start-Process passes a list of arguments unquoted (measured), so a server
+  started at logon from "j0kers Media Server\server.json" came back as three
+  arguments and exited. The arguments now go as one string, quoted for the Windows
+  command line; the quoting is pinned against Windows' own parser. Red end to end
+  with the real server.
+- **[21] HDHomeRun import never worked.** The tuner was read with the providers'
+  client, whose guard refuses every private address. It has its own client now,
+  allowing LAN devices only, checked on the address actually dialled, no
+  redirects. The LAN rule also now reads IPv4-in-IPv6 correctly
+  (`::ffff:169.254.169.254` was a "LAN device") and excludes 0.0.0.0/8.
+- **[52] Anyone on the network could raise the background-mode notice.** Dropping
+  an anonymous live link, or an anonymous close beacon, armed it. Both now need a
+  signed-in page or the server's own window.
+- **[53] "Still running in the background" appeared while exiting.** Shutdown now
+  switches the notice off first.
+- **[57] The log window read the whole file.** 561 MB of peak memory to show 50
+  lines of a 128 MB log. It reads from the end now, the same answer as before
+  (pinned against the old method), at most 16 MB.
+- **[58] Announcement that could not start was saved as on.** When every
+  responder asked for fails, the Config dialog is now told and the switch reverts.
+  Startup is unchanged. One responder failing while another works is still only
+  logged.
+- **[59]/[60] Library search overshot its cap and deadline inside one folder.**
+  Both are checked on every match and file now.
+- **[61] Editors could add channels through the import.** Tuner, import and
+  channel start/stop/restart are Admin, like the channels card they belong to.
+  Pinning a free-TV channel stays Edit.
+- **[62] Pinned channels kept the old control port.** A pin's link is corrected to
+  the port the server is listening on when the channel starts, and new pins store
+  that port. The rewrite keeps percent-escaping (`%20` had come back as a space).
+- **[63] An SVG could run script from `/api/image`.** Images are served with a
+  sandboxing Content-Security-Policy and nosniff. Checked in the built-in browser
+  against a loopback scratch server: opened alone, script blocked; as an `<img>`,
+  unaffected.
+- **[64]** A null mount source is a 400, not a 500.
+- **[68]** `/player` judges `src` as a browser reads it: `/\host` and
+  `/<tab>/host` are another site.
+- **[80]** Turning tray mode off restores the configured
+  `control.shutdownOnClose` instead of forcing it on.
+
+### DLNA and live TV
+
+- **[18] A restarted channel stayed dead to televisions.** A channel started
+  afresh numbers from seg_00000 again; the set's buffer skipped everything at or
+  below what it had recorded and answered 416 on every retry. It now notices the
+  numbering going back and records the new run on the end of the same file.
+- **[19] A conversion a television was playing was evicted under it.** A set
+  reads a film through one long request, and the cache judged its age from when
+  that request began. The conversion is now held while the response is open and
+  touched when it ends. Red: stopped at 9.5 MB of 42 MB.
+- **[24] With DLNA off, finished conversions never counted.** The conversion
+  index was built only with DLNA, so films stayed "Convert DLNA" for good and
+  Convert kept choosing them — then hid them all from the HLS list, published ones
+  included. The index is built whenever ffmpeg exists, and Convert hides only what
+  it actually queued.
+- **[51] A live channel watched on a TV was remembered as a "file"** named after
+  the channel, which could not be replayed. It is recorded as the channel.
+- **[54] The DLNA port followed an unapplied control-port change.** The DLNA port
+  is fixed when the server starts, like its listener.
+- **[69] IPv6 clients got broken links.** The M3U and the plain-port DLNA
+  description cut the Host header at its first colon (`http://[2001:9091/…`).
+  Both take the host from the request URL now.
+- **[70]/[71] Live-TV recordings survived shutdown**, and with DLNA off at the
+  next start, for good. They are removed on a clean stop — even while a set is
+  part way through reading one — and at start when DLNA is off.
+- **[50] Fixed in part.** Switching DLNA on under HTTPS with a network bind opens
+  its plain port to this computer only: Windows allows that port on the network
+  only when the server *starts* with DLNA on (the startup elevation prompt). The
+  save used to say nothing, and televisions were refused. It now tells the Config
+  dialog, which offers the restart that fixes it. Not done: asking Windows for the
+  port at save time — that would put an elevation prompt on the server's desktop
+  from a request that may come from another machine, and cannot be tested here.
+  Refusing the save instead would make DLNA impossible to switch on from the
+  dashboard in this setup. The decision is tested (red with it reverted); the
+  wiring is checked by reading, because reaching the fallback needs a network
+  bind, which tests do not make. This install has HTTPS off, so it never meets
+  this.
+- **[76] Cannot be fixed as the audit suggests; comment corrected.** The live
+  recording is one file served from byte 0, and a second set tuning in asks for
+  byte 0 — trimming the front would answer it 416, a size cap would end a long
+  evening part way. The unused constant and its false comment ("played segments
+  are deleted") are gone; the comment now says what happens: the file grows at
+  the channel's bitrate (roughly 1–3 GB an hour) until the last viewer has gone,
+  the server stops, or the next start clears it. Bounding it needs each set to
+  have its own starting offset — a different design.
+
+### Dashboard: two panels painted whichever answer arrived last ([81], [82])
+
+- **[82] Log-file picker.** Choosing a file asks the server for it; nothing
+  checked, when the answer came, that the file was still the one selected. Arrow
+  through the picker from a large file to a small one and the large file's slower
+  answer landed last: shown under the small file's name, and Copy handed over the
+  large file's text. Going back to Live while a file loaded let that file overwrite
+  the live view. Now the answer is dropped unless its file is still the one
+  selected — for the text, the box and the error message alike.
+- **[81] Library panel.** A search and a folder listing both paint the same
+  panel, and each checked only its own counter, so neither cancelled the other.
+  Clicking a library folder during a slow search: the listing showed, then the
+  search answer replaced it and blanked the path. Pinning or unpinning a search
+  result reloaded the folder listing with the query still in the box. Now one
+  counter covers both, so only the latest request paints; pin, unpin and rescan
+  refresh whichever the panel is showing (the search while one is typed, else the
+  folder).
+
+**Proved** in the real dashboard scripts, served from the repository by a
+loopback-only static server (127.0.0.1) into the built-in browser, with the
+network replaced by a stub that answers each request after a delay the test sets
+(no server, no account, no real data). Old code first — [82]: small file
+selected, large file shown and copied; [81]: folder clicked during a search, search
+results shown with the path blank; unpin during a search, folder listing shown
+under the query. Same steps on the fixed code: the selected file shown and copied,
+Live left alone, the folder listing with its path, a later search winning over an
+earlier folder, and search results kept after unpin. The browser tab, the static
+server (checked: port closed, process gone) and the harness folder were removed
+afterwards. There are no automated tests for the dashboard scripts; this proof is
+by hand, and repeatable only with that harness.
+
+### Review
+
+Two independent reviews read the combined change — accounts and control API,
+and media and DLNA — given the code, not these notes. What the first found, all
+confirmed in the code and fixed:
+
+- **The lockout never ended (serious).** The fix for [39]/[40] counted failures
+  plus attempts in flight against the limit, and after a lock the failures alone
+  are at the limit: once the lock ran out, every attempt — the right password
+  included — was refused and locked again for longer. Five wrong guesses by anyone
+  would have locked an account, or an address, until the server restarted. Now as
+  many attempts are checked at once as there are guesses left, never fewer than
+  one; once a lock runs out, one attempt is checked, as it always was. An attempt
+  turned away for being one too many at once is not counted as a failure. Red:
+  the right password refused 16 s after five wrong guesses.
+- **[41] missed passwordless accounts.** A passwordless sign-in read the
+  credential generation when it opened its session, so an administrator closing
+  the account in between left a live session in an account with no password. The
+  generation is now read with the passwordless flag, under the same lock. Red,
+  with the window held open by a test hook.
+- **[38] made the token the owner of a claimed server too.** Anyone holding the
+  token — it travels in `?token=` links — could have demoted or deleted the owner.
+  It is the top tier only while the server is unclaimed; once claimed it is an
+  administrator, as before. Red: the Server Admin log answered the token 200.
+- **[38] made a token-protected server impossible to claim from a browser.** The
+  setup form could not send the token. `/api/auth/state` now says when setup
+  needs it, and the form shows a Control token field and sends it. The server
+  half is tested (red with it removed); the form was checked in the built-in
+  browser with the state stubbed — the field shows and is required, the script
+  runs clean — without typing anything into it.
+- **The fix for [81] could replace a folder with search results.** Pin, unpin
+  and rescan asked "is a search showing?" by a variable that stays set when a
+  folder is opened from a result with the query still typed. The panel now
+  records which it shows. Red and green in the browser harness: pinning in a
+  folder opened from a result kept the folder (red: results, path blank); the
+  [81] cases still hold.
+- Comment corrected: the tuner client allows this machine's LAN address (a tuner
+  emulator can run here); only loopback is excluded, as the code did.
+- Reported, not changed: a burst of guest sign-ins can pass the per-address count
+  of 20 (the count is checked, then added to); the 64-sessions-per-account cap
+  bounds it. The media ports (HLS, RTSP) on an unclaimed server stay open whether
+  or not a token is set, as they always have — the token protects the control
+  API.
+
+The second review (media and DLNA; its first run stopped on a rate limit and
+was run again) found three, all confirmed in the code and fixed:
+
+- **[22]'s check ran ffprobe on every MKV play.** It asked the codec cache
+  before looking at the container, and the cache calls an MKV "settled" without
+  ever reading it, so nothing cached one: every play of an MKV waited for a probe
+  to reach the "no" its name gave. The container is checked first again. And an
+  answer cached before the pixel format was recorded was read again on *every*
+  request while that read kept failing — the per-seek probe [22] was removing; it
+  is read again once per run now, and the file keeps its answer. Red: two probes
+  for two decisions about an MKV; five probes for five requests.
+- **[71]'s delete sharing let a late clean-up take a new recording.** A swept
+  live-TV buffer deletes its folder after waiting up to two seconds for its
+  recorder; a set tuning the same channel in that time started the next buffer in
+  the same folder, and the late delete — now allowed — removed its recording,
+  leaving the channel dead to televisions. Each buffer has a folder of its own.
+  Red, with the late delete done by hand exactly as the buffer does it.
+- **[17]'s refusal counted against a queued file.** "Being deleted" reached the
+  batch queue as a failed start, and three of those drop a file for good. It now
+  waits at the back of the queue, uncounted. Red: dropped after five passes
+  during one delete.
+
+It checked and found sound: the lock order across the three ffmpeg locks, every
+removal hold released on every path, the stuck-conversion requeue and its
+counter, the in-use hold against eviction, the cancelled-partial delete, the
+bounded recursion of the probe queue, the history keys, the Transcodes refresh
+queue, and the DLNA port and media root staying put until a restart.
+
+### Known and left
+
+- [17]: the hold during a stream delete is not tested against the race itself
+  (the test server has no HLS port); the hold is planted directly instead.
+- [19]: a set can still start reading in the instant between the sweep's check
+  and its delete; narrowed, not closed. Noticed while fixing it:
+  `_startingVod` is not cleared when a conversion starts (only its one-minute
+  expiry removes it), so conversions started in the last minute are spared by the
+  sweep — harmless, left.
+- [21]: the endpoint's own pre-check (`host.Split(':')[0]`) mangles an IPv6 tuner
+  address.
+- [22], [78], [79]: `PlayFile`'s direct-play decision, the keep-marker fallback
+  and the give-up after three kills have no tests of their own.
+- [23]: on a server without accounts a direct-file viewing is filed as
+  "anonymous"; the Sessions tooltip still uses the HLS wording for it.
+- [53]: a gap of microseconds remains between the notice's shutdown check and its
+  display.
+- [70]/[71]: removing a recording a set is reading relies on NTFS POSIX delete
+  (Windows 10 1809 or later); measured on this Windows 11.
+- [18]: a segment of the old run that could not be deleted when the channel was
+  cleared could still confuse the "numbering went back" rule.
+
+### How it was done, and what it touched
+
+- Test servers bound 127.0.0.1 only, with discovery off; nothing was announced on
+  the network and no firewall rule, URL ACL or registry value was changed. The
+  live server and its files were not touched; the installed ffmpeg/ffprobe were
+  used read-only. The [20] test finds the server it restarted by its command
+  line (which names the test's own folder) and stops it.
+- Browser checks ([23], [63], and [81]/[82] here) used the app's built-in
+  browser against loopback servers holding no accounts and no real data — never
+  the owner's Chrome, and no password was typed anywhere.
+- The agents shared one scratchpad and removed some of each other's backups and
+  logs there. Every restore had been hash-checked against a copy taken before its
+  revert, so no source file was affected; one agent's red-run logs are gone (the
+  failure messages are quoted above). Worktrees are removed after merging.
+- Observed, not caused by this work: Windows restarted at 14:24 while it was
+  under way, and the logon entry started the installed server again (v2.0.312).
+
+474 tests pass (369 before this work).

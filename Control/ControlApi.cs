@@ -190,14 +190,15 @@ public sealed partial class ControlApi : IDisposable
         var dlna = new Dlna.DlnaService(
             _library, _dlnaShare, () => _serverConfig.ServerName,
             Discovery?.Uuid ?? _serverConfig.Discovery.HostName);
-        _vodIndex ??= new Media.VodIndex(MediaRootPath());
-        _vodIndex.StartBuild();          // off the startup path; nothing waits
-        // Rebuild when the conversions change in a way the index's own
-        // directory-count check cannot see — the height backfill writes a file
-        // into every existing folder without adding or removing one, and the
-        // index would otherwise keep the answers it read moments earlier.
-        if (_ffmpeg is not null)
-            _ffmpeg.ConversionsChanged = () => _vodIndex?.StartBuild();
+        // Built in the constructor whenever there is an ffmpeg (see there).
+        // Without one no conversion can be made, but those an earlier run
+        // left can still be handed to a set under dlnaUseTranscode - so
+        // DLNA builds it itself in that case.
+        if (_vodIndex is null)
+        {
+            _vodIndex = new Media.VodIndex(MediaRootPath());
+            _vodIndex.StartBuild();      // off the startup path; nothing waits
+        }
         dlna.FindTranscode = FullResTranscodeFor;
         dlna.ShouldList = DlnaShouldList;
         dlna.NoteBrowsed = RequestCodecProbe;
@@ -221,6 +222,8 @@ public sealed partial class ControlApi : IDisposable
     /// The timeshift buffers behind DLNA "Live TV". Created with the DLNA
     /// service and kept for the process lifetime — it sweeps its own idle
     /// buffers, so there is nothing to tear down when DLNA toggles off.
+    /// It is disposed on the way down, though (see Dispose): the process
+    /// ending is not a buffer going idle, and nothing else removes a recording.
     /// </summary>
     private Dlna.DlnaLive? _dlnaLive;
 
@@ -382,6 +385,12 @@ public sealed partial class ControlApi : IDisposable
     /// </summary>
     private readonly HttpClient _providerHttp;
     private readonly HttpClient _proxyHttp;
+
+    /// <summary>
+    /// The HDHomeRun reader's own client: LAN devices only, which is the
+    /// opposite of what the two above allow. See <see cref="TunerClient"/>.
+    /// </summary>
+    private readonly HttpClient _tunerHttp = TunerClient();
     private readonly Media.Providers.ProviderRegistry _providers;
     private readonly Media.Providers.HlsProxy _tvProxy;
     private readonly HashSet<string> _relayProviders;
@@ -402,10 +411,16 @@ public sealed partial class ControlApi : IDisposable
     /// </summary>
     public void FlushState() => _tvCodecs?.Save();
 
-    /// <summary>The HLS media cache, absolute. Conversions live here.</summary>
-    private string MediaRootPath() => Path.GetFullPath(Path.IsPathRooted(_serverConfig.Hls.MediaRoot)
-        ? _serverConfig.Hls.MediaRoot
-        : Path.Combine(_baseDirectory, _serverConfig.Hls.MediaRoot));
+    /// <summary>
+    /// The HLS media cache this run is using, absolute. Conversions live here.
+    /// Hls.MediaRoot does not move while the server runs - a new one is saved
+    /// for the next start (see ServerConfig.ApplySettings) - so this agrees
+    /// with the transcoder and the HLS server from start to exit.
+    /// </summary>
+    private string MediaRootPath() => ResolveMediaRoot(_serverConfig.Hls.MediaRoot);
+
+    private string ResolveMediaRoot(string root) =>
+        Path.GetFullPath(Path.IsPathRooted(root) ? root : Path.Combine(_baseDirectory, root));
 
     public ControlApi(ServerConfig serverConfig, Services.ServiceController services, string baseDirectory,
         Auth.AuthService auth, Auth.MediaLink mediaLinks,
@@ -415,6 +430,9 @@ public sealed partial class ControlApi : IDisposable
         _auth = auth;
         _mediaLinks = mediaLinks;
         _serverConfig = serverConfig;
+        // Where DLNA is served, as of this start - see DlnaPort.
+        _dlnaPort = Services.DlnaEndpoint.PortFor(serverConfig);
+        _dlnaSeparate = Services.DlnaEndpoint.IsSeparate(serverConfig);
         _services = services;
         _baseDirectory = baseDirectory;
         _ffmpeg = ffmpeg;
@@ -469,10 +487,30 @@ public sealed partial class ControlApi : IDisposable
             // list itself; they just report.
             _tvCodecs.OnProblem = Problems.Record;
             ffmpeg.OnProblem = Problems.Record;
+
+            // Which conversion belongs to which file - built whether or not
+            // DLNA is on. It was built with the DLNA service only, but the
+            // Transcodes window asks it too: "is there a full-resolution
+            // conversion a television would be handed" is half of what makes a
+            // file Ready (see Readiness). With DLNA off the answer was always
+            // no, so a film whose conversion had finished stayed "Convert
+            // DLNA" for good, and Convert went on choosing it.
+            _vodIndex = new Media.VodIndex(MediaRootPath());
+            _vodIndex.StartBuild();      // off the startup path; nothing waits
+            // Rebuild when the conversions change in a way the index's own
+            // directory-count check cannot see — the height backfill writes a file
+            // into every existing folder without adding or removing one, and the
+            // index would otherwise keep the answers it read moments earlier.
+            ffmpeg.ConversionsChanged = () => _vodIndex?.StartBuild();
         }
         Step("television codec cache");
 
         if (serverConfig.Discovery.Dlna) _dlna = NewDlna();
+        // With DLNA off nothing below builds the live-TV buffers, and building
+        // them is what cleared a recording an earlier run left behind - so a
+        // server killed while a set was watching, then started with DLNA off,
+        // kept that recording in the media root for good.
+        else Dlna.DlnaLive.RemoveLeftovers(MediaRootPath());
         Step("dlna service");
 
         // Fill the codec cache in the background so the transcode panel stops
@@ -493,6 +531,24 @@ public sealed partial class ControlApi : IDisposable
         // that endpoint: an existing stream is simply requested.
         _services.Viewers.ViewingStarted += v =>
         {
+            // A television tuned to a live channel. Its viewing carries the
+            // channel's display name where a file would go - that is what the
+            // sessions table shows - and the rule below read that name as a
+            // path: the entry was filed as a *file* called "BBC One", with no
+            // stream, so picking it in Recently Watched asked to play a file
+            // that does not exist, and a name with a dot in it was cut short as
+            // if the rest were an extension. It is the channel's stream, the
+            // same entry watching that channel in a browser makes, and it
+            // replays the same way. DLNA has no account, so no user either.
+            // Told apart by its stream: only /dlna/live notes a "ch-" name,
+            // and a DLNA file viewing is keyed by the file's full path.
+            if (v.Protocol == "dlna" && v.Stream.StartsWith("ch-", StringComparison.Ordinal))
+            {
+                _history.Record(string.IsNullOrWhiteSpace(v.File) ? Media.StreamTitle.Prettify(v.Stream) : v.File,
+                                "", v.Stream, "stream", "");
+                return;
+            }
+
             // The file behind it, when there is one — that is what makes the
             // entry replayable after the transcode cache has been swept. DLNA
             // hands over the file directly, so there is nothing to look up;
@@ -502,8 +558,9 @@ public sealed partial class ControlApi : IDisposable
                 ? Media.StreamTitle.PrettifyFile(Path.GetFileName(file))
                 : Media.StreamTitle.Prettify(v.Stream);
             // a DLNA viewing has no stream directory, and recording the file
-            // path as one would make the entry unplayable from the dashboard
-            var stream = v.Protocol == "dlna" ? "" : v.Stream;
+            // path as one would make the entry unplayable from the dashboard -
+            // and nor does a file handed to a browser as it stands (/api/file)
+            var stream = v.Protocol is "dlna" or "file" ? "" : v.Stream;
             // and no account either — v.User carries a label for the sessions
             // table, not a name the history can file anything under
             var user = v.Protocol == "dlna" ? "" : v.User;
@@ -545,6 +602,9 @@ public sealed partial class ControlApi : IDisposable
 
     /// <summary>The host the listener actually bound (may differ from config after the Windows ACL fallback).</summary>
     public string BoundHost { get; private set; } = "localhost";
+
+    /// <summary>The port the listener actually bound, fixed at <see cref="Start"/>.</summary>
+    private int _boundPort;
 
     /// <summary>
     /// Turns background/tray mode on or off while running (set by Program).
@@ -714,7 +774,10 @@ public sealed partial class ControlApi : IDisposable
     /// not fine for the notice, which puts a window on somebody's screen.
     /// A genuine beacon always arrives while its own link is still open (that
     /// is the whole reason the notice cannot be gated on the count), so the
-    /// sender is in <see cref="_openPages"/>. A stranger is not.
+    /// sender is in <see cref="_openPages"/>. That alone does not keep a
+    /// stranger out - opening a link first puts their address there too - so
+    /// the notice also needs the beacon to be the owner's: see
+    /// <paramref name="auth"/> and <paramref name="fromSelfWindow"/>.
     /// </param>
     /// <param name="auth">Who sent it. Only a signed-in close can be the owner's decision.</param>
     /// <param name="linkId">
@@ -784,10 +847,18 @@ public sealed partial class ControlApi : IDisposable
             // Whether anything is still there is the callback's question. It
             // runs after the grace, by which time the link has gone.
             //
-            // Only for a beacon from a page this server actually has. The
-            // link-teardown path arms this too and cannot be forged from off
-            // the machine, so nothing is lost by ignoring a stranger here.
-            if (known) ArmClosedNotice();
+            // Only for a beacon from a page this server actually has, AND from
+            // the owner: signed in, or the server's own window. This used to
+            // say the link-teardown path "cannot be forged from off the
+            // machine", and it could - the live link is outside the auth gate,
+            // curl sends no Origin, and opening one and dropping it armed this
+            // notice exactly as a closing dashboard does. The address check
+            // here fell to the same trick: open a link first and the address
+            // is "known". So both paths now ask the same question - whose page
+            // was it - and a stranger's answer is nobody's. The notice is a
+            // window on the server's screen; nobody off the machine gets to
+            // put one there.
+            if (known && (auth.Level > AccessLevel.None || fromSelfWindow)) ArmClosedNotice();
         }
     }
 
@@ -815,7 +886,7 @@ public sealed partial class ControlApi : IDisposable
     /// </summary>
     private void ArmClosedNotice()
     {
-        if (_config.ShutdownOnClose || !_sawDashboard || _cts.IsCancellationRequested) return;
+        if (_config.ShutdownOnClose || !_sawDashboard || _shuttingDown || _cts.IsCancellationRequested) return;
 
         Timer? mine = null;
         mine = new Timer(_ =>
@@ -832,7 +903,7 @@ public sealed partial class ControlApi : IDisposable
                     _closedNoticeTimer = null;
                 }
                 mine!.Dispose();
-                if (PagesHolding() > 0 || _cts.IsCancellationRequested) return;
+                if (PagesHolding() > 0 || _shuttingDown || _cts.IsCancellationRequested) return;
                 Log.Info("control", "dashboard closed — still running in the background");
                 OnDashboardClosed?.Invoke();
             }
@@ -1324,7 +1395,17 @@ public sealed partial class ControlApi : IDisposable
                     // happen with the page still open too, which is why this
                     // only ARMS — the page comes back inside the grace and
                     // NoteActivity cancels it. See ArmClosedNotice.
-                    ArmClosedNotice();
+                    //
+                    // Only for a link somebody signed in held, or the server's
+                    // own window - the same line _sawDashboard and
+                    // _elsewhereSeen draw above. Anything on the network can
+                    // open this link and drop it; in background mode that
+                    // raised a topmost message box on the server's desktop,
+                    // and a loop of it raised another every time it was
+                    // dismissed. An anonymous link still holds the server open
+                    // while it lasts - the harmless direction - but its ending
+                    // tells nobody anything.
+                    if (signedIn) ArmClosedNotice();
                 }
             }
             if (holding > 0 && !_cts.IsCancellationRequested)
@@ -1433,6 +1514,33 @@ public sealed partial class ControlApi : IDisposable
 
     private Timer? _closedNoticeTimer;
 
+    /// <summary>Set by <see cref="BeginShutdown"/>; nothing arms or raises the notice after it.</summary>
+    private volatile bool _shuttingDown;
+
+    /// <summary>
+    /// The server is on its way down: no "still running in the background"
+    /// from here on. Program calls this first thing when shutdown begins,
+    /// before anything else is torn down.
+    ///
+    /// Waiting for <see cref="Dispose"/> to say so was too late. Program takes
+    /// the tray icon, discovery and the streaming services down before it
+    /// gets to this object, and the tray's own Exit runs that whole teardown
+    /// on the tray thread - which TrayIcon.Dispose then waits up to two
+    /// seconds to join. A notice armed by closing the dashboard just before
+    /// choosing Exit fired inside that window, found _cts not yet cancelled,
+    /// and put up a message box saying the server was still running while it
+    /// was exiting.
+    /// </summary>
+    public void BeginShutdown()
+    {
+        lock (_shutdownLock)
+        {
+            _shuttingDown = true;
+            try { _closedNoticeTimer?.Dispose(); } catch { }
+            _closedNoticeTimer = null;
+        }
+    }
+
     public void Start()
     {
         // This is the one step that can stop dead without saying anything.
@@ -1447,6 +1555,13 @@ public sealed partial class ControlApi : IDisposable
         bindClock.Stop();
         _listener = listener;
         BoundHost = bound;
+        // The port this process is listening on for as long as it runs. The
+        // configured one can move under it - the Config dialog saves a new
+        // control port straight into _config, to apply at the next start - so
+        // anything that points back at this server takes this one. See
+        // FfmpegManager.OwnUrlFor.
+        _boundPort = _config.Port;
+        if (_ffmpeg is not null) _ffmpeg.OwnControlPort = _boundPort;
         Log.Info("control", $"listening on {Services.UrlScheme.Prefix}{bound}:{_config.Port}/api/");
         if (bindClock.ElapsedMilliseconds >= 2000)
             Log.Warn("control", $"claiming port {_config.Port} took {bindClock.ElapsedMilliseconds / 1000.0:0.0}s — "
@@ -1458,10 +1573,34 @@ public sealed partial class ControlApi : IDisposable
     /// <summary>
     /// The port DLNA is actually served on: its own when the dashboard has
     /// moved to TLS, otherwise the control port like everything else.
+    ///
+    /// Settled when the server starts, as the listeners and the network
+    /// announcement are. It was worked out again on every use, from the
+    /// control port - and the Config dialog changes that at once, while the
+    /// listeners stay where they are until a restart. So once the control port
+    /// had been changed, the description served on the DLNA port pointed a
+    /// television at the new port + 1, where nothing listened, and switching
+    /// DLNA off and on opened that port while the announcement still named the
+    /// old one. Every set found the server and then could not use it.
     /// </summary>
-    public int DlnaPort => Services.DlnaEndpoint.PortFor(_serverConfig);
+    public int DlnaPort => _dlnaPort;
+
+    private readonly int _dlnaPort;
+
+    /// <summary>Whether DLNA has a listener of its own - settled with the port, for the same reason.</summary>
+    private readonly bool _dlnaSeparate;
 
     private HttpListener? _dlnaListener;
+
+    /// <summary>
+    /// The plain DLNA port is open, but to this machine only: the server is
+    /// bound to the network, and Windows refused that port on it. Its URL ACL
+    /// is requested at startup, and only when DLNA is already on then - so
+    /// switching DLNA on in the Config dialog, with HTTPS on and never DLNA
+    /// before, lands here. Televisions are told the port by the announcement
+    /// and refused on it until a restart; SaveSettings says so (audit [50]).
+    /// </summary>
+    private volatile bool _dlnaLocalOnly;
 
     /// <summary>
     /// A second listener, in the clear, carrying nothing but DLNA.
@@ -1474,11 +1613,12 @@ public sealed partial class ControlApi : IDisposable
     /// </summary>
     private void StartDlnaListener()
     {
-        if (_dlna is null || DlnaPort == _config.Port || _dlnaListener is not null) return;
+        if (_dlna is null || !_dlnaSeparate || _dlnaListener is not null) return;
         try
         {
             var (listener, bound) = Hls.HttpListenerBinder.StartPlain(_config.BindAddress, DlnaPort, "dlna");
             _dlnaListener = listener;
+            _dlnaLocalOnly = Hls.HttpListenerBinder.FellBackToLoopback(_config.BindAddress, bound);
             Log.Info("dlna", $"serving DLNA in the clear on http://{bound}:{DlnaPort}/ — " +
                              "TVs cannot do TLS, and DLNA has no sign-in to protect");
             _ = DlnaAcceptLoopAsync(listener);
@@ -1493,6 +1633,7 @@ public sealed partial class ControlApi : IDisposable
     {
         var listener = Interlocked.Exchange(ref _dlnaListener, null);
         if (listener is null) return;
+        _dlnaLocalOnly = false;
         try { listener.Close(); } catch { }
         Log.Info("dlna", $"closed the plain-HTTP DLNA port {DlnaPort}");
     }
@@ -1539,8 +1680,8 @@ public sealed partial class ControlApi : IDisposable
 
             if (ctx.Request.HttpMethod == "GET" && path == "/description.xml" && Discovery is not null)
             {
-                var host = ctx.Request.Headers["Host"] ?? $"{BoundHost}:{DlnaPort}";
-                WriteXml(res, 200, Discovery.DescriptionXml(host.Split(':')[0], DlnaPort, "http"));
+                // bracket-safe for an IPv6 client; see LinkHost
+                WriteXml(res, 200, Discovery.DescriptionXml(LinkHost(ctx.Request, BoundHost), DlnaPort, "http"));
                 return;
             }
 
@@ -1776,13 +1917,6 @@ public sealed partial class ControlApi : IDisposable
             // "walk the shared library", so it was gated at the level the
             // first needs. It is Read now and confines itself - see Browse.
             case "/api/codecs":
-            // reading a tuner's lineup and saving channels from it is the
-            // same act as adding one by hand
-            case "/api/tuner":
-            case "/api/channels/import":
-            case "/api/channels/restart":
-            case "/api/channels/start":
-            case "/api/channels/stop":
             case "/api/subtitles":
             // pinning a provider channel adds a restreaming job, same as
             // adding one by hand; browsing and watching a lineup is Read
@@ -1805,6 +1939,23 @@ public sealed partial class ControlApi : IDisposable
             // return here before reaching it.
             case "/api/mounts":
             case "/api/channels":
+            // And everything else on the channels card, which only an
+            // administrator is shown. These sat at Edit under "reading a
+            // tuner's lineup and saving channels from it is the same act as
+            // adding one by hand" - which is exactly why they cannot be Edit
+            // once adding one by hand is Admin. The import takes any
+            // {name, url} at all, so an editor refused POST /api/channels
+            // could post the same channel here, then start it: this server's
+            // ffmpeg pulling rtsp://some-camera on the LAN and serving it on.
+            // The tuner read is a request to any address on the LAN, and the
+            // start/stop/restart buttons are on the same card. Pinning a free-TV
+            // channel (/api/tv/pin, above) stays Edit: that card is everyone's,
+            // and a pin can only name a provider's own channel.
+            case "/api/tuner":
+            case "/api/channels/import":
+            case "/api/channels/restart":
+            case "/api/channels/start":
+            case "/api/channels/stop":
                 return AccessLevel.Admin;
         }
 
@@ -2382,7 +2533,7 @@ public sealed partial class ControlApi : IDisposable
         [("POST", "/api/problems/clear")] = Sync((api, ctx, _) => api.ClearProblems(ctx)),
         [("GET", "/api/config")] = Sync((api, ctx, _) => api.WriteConfig(ctx)),
         [("GET", "/api/mounts")] = Sync((api, ctx, _) => api.WriteMounts(ctx)),
-        [("GET", "/api/sessions")] = Sync((api, ctx, _) => api.WriteSessions(ctx)),
+        [("GET", "/api/sessions")] = Sync((api, ctx, auth) => api.WriteSessions(ctx, auth)),
         [("GET", "/api/media/token")] = Sync((api, ctx, _) => api.MintMediaToken(ctx)),
         [("GET", "/api/preview")] = Sync((api, ctx, _) => api.StreamPreview(ctx)),
         [("GET", "/api/browse")] = Sync((api, ctx, auth) => api.Browse(ctx, auth)),
@@ -2672,12 +2823,20 @@ public sealed partial class ControlApi : IDisposable
     }
 
     /// <summary>GET /api/sessions - who is watching, over RTSP and over HTTP alike.</summary>
-    private void WriteSessions(HttpListenerContext ctx)
+    private void WriteSessions(HttpListenerContext ctx, AuthResult auth)
     {
         var res = ctx.Response;
-        // Both kinds of viewing in one list. RTSP has real
-        // sessions; HLS viewers are inferred from request
-        // traffic, which is the only thing plain HTTP gives us.
+        // Who is watching what, from which address, under which account, is an
+        // administrator's to see and nobody else's — the same policy WriteStatus
+        // states and applies to signedInUsers and pagesFrom. This endpoint did
+        // not follow it: it fell through to Read, so any signed-in account, a
+        // passwordless guest included, got every viewer's LAN address, player
+        // and username off a poll the dashboard makes every two seconds. For a
+        // non-admin the identifying fields are blanked here — not hidden in the
+        // page, which would leave them in the response — while the list itself
+        // (what is playing, how far, how much) stays visible so a read account
+        // can still see the server is busy.
+        var admin = auth.IsAdmin;
         WriteJson(res, 200, new
         {
             sessions = (RtspServer?.Sessions.All ?? Array.Empty<RtspSession>()).Select(s => new
@@ -2688,7 +2847,7 @@ public sealed partial class ControlApi : IDisposable
                 // an RTSP mount path is already the readable name
                 title = s.MountPath,
                 state = s.State.ToString().ToLowerInvariant(),
-                client = s.ClientAddress,
+                client = admin ? s.ClientAddress : "",
                 player = "",
                 user = "",
                 startedUtc = (DateTime?)null,
@@ -2714,9 +2873,10 @@ public sealed partial class ControlApi : IDisposable
                         ? _tvNames.TryGetValue(v.Stream, out var chName) ? chName : v.Stream
                         : Media.StreamTitle.Prettify(v.Stream),
                 state = v.State,
-                client = v.Client,
-                player = v.Player,
-                user = v.User,
+                // the three that name a person and where they are — admins only
+                client = admin ? v.Client : "",
+                player = admin ? v.Player : "",
+                user = admin ? v.User : "",
                 startedUtc = (DateTime?)v.StartedUtc,
                 lastActivityUtc = v.LastSeenUtc,
                 bytes = v.Bytes,
@@ -2836,9 +2996,12 @@ public sealed partial class ControlApi : IDisposable
             openDashboardOnStart = _serverConfig.Control.OpenDashboardOnStart,
             linkLifetimeHours = _serverConfig.Hls.LinkLifetimeHours,
             // where transcodes and live-channel streams are written; the
-            // resolved path is what Browse opens at and what the box shows
-            mediaRoot = _serverConfig.Hls.MediaRoot,
-            mediaRootResolved = MediaRootPath(),
+            // resolved path is what Browse opens at and what the box shows.
+            // As saved, which a save followed by no restart makes different
+            // from the folder this run is using (MediaRootPath): the dialog
+            // shows what was chosen, and the server keeps to one folder.
+            mediaRoot = _serverConfig.SavedMediaRoot,
+            mediaRootResolved = ResolveMediaRoot(_serverConfig.SavedMediaRoot),
             // what removing a stream link does with an existing conversion
             streamRemoveAction = _serverConfig.StreamRemoveAction,
             // the tray lives in the Windows notification area
@@ -2950,13 +3113,10 @@ public sealed partial class ControlApi : IDisposable
         }
 
         var full = Path.Combine(dir, known.Name);
-        string[] lines;
+        (string Text, int Shown, bool Truncated) tail;
         try
         {
-            // shared read: the active file is being written to right now
-            using var fs = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            using var sr = new StreamReader(fs);
-            lines = sr.ReadToEnd().Split('\n');
+            tail = ReadLogTail(full, take);
         }
         catch (Exception ex)
         {
@@ -2964,17 +3124,84 @@ public sealed partial class ControlApi : IDisposable
             return;
         }
 
-        var truncated = lines.Length > take;
-        var tail = truncated ? lines[^take..] : lines;
         WriteJson(res, 200, new
         {
             name = known.Name,
             bytes = known.Bytes,
-            truncated,
-            shown = tail.Length,
-            text = string.Join("\n", tail),
+            truncated = tail.Truncated,
+            shown = tail.Shown,
+            text = tail.Text,
         });
     }
+
+    /// <summary>
+    /// The last <paramref name="take"/> pieces of a file split on '\n' - the
+    /// same answer <c>ReadToEnd().Split('\n')[^take..]</c> gives - read from
+    /// the end, so it costs what it returns rather than what the file holds.
+    ///
+    /// It was that ReadToEnd, and the file can be any size: the Config dialog
+    /// offers "no size limit" and "never" for rotation. A log left to grow
+    /// cost several times its size in this process on every open of the log
+    /// window - measured, 561 MB of peak working set to show fifty lines of a
+    /// 128 MB file - and above about a gigabyte the string could not be
+    /// allocated at all, while conversions were running in the same process.
+    ///
+    /// Blocks are read backwards counting '\n' bytes, which in UTF-8 can only
+    /// ever be a newline, so no character is cut in half. A file with no
+    /// newlines in it would still be read to its start; the tail is capped at
+    /// <see cref="LogTailMaxBytes"/> so that case cannot reach the size the
+    /// old code failed at either, and says truncated when it is cut.
+    /// </summary>
+    internal static (string Text, int Shown, bool Truncated) ReadLogTail(string path, int take)
+    {
+        // shared read: the active file is being written to right now
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        var end = fs.Length;
+        var start = 0L;            // where the answer begins
+        var truncated = false;
+        var newlines = 0;
+        var buffer = new byte[64 * 1024];
+        var pos = end;
+        while (pos > 0 && !truncated)
+        {
+            var size = (int)Math.Min(buffer.Length, pos);
+            pos -= size;
+            fs.Position = pos;
+            fs.ReadExactly(buffer, 0, size);
+            for (var i = size - 1; i >= 0; i--)
+            {
+                if (buffer[i] != (byte)'\n') continue;
+                // the take-th newline from the end: everything after it is
+                // exactly the last take pieces
+                if (++newlines == take)
+                {
+                    start = pos + i + 1;
+                    truncated = true;
+                    break;
+                }
+            }
+            if (!truncated && end - pos > LogTailMaxBytes)
+            {
+                start = end - LogTailMaxBytes;
+                truncated = true;
+            }
+        }
+
+        var length = (int)(end - start);
+        var bytes = new byte[length];
+        fs.Position = start;
+        fs.ReadExactly(bytes, 0, length);
+        var text = Encoding.UTF8.GetString(bytes);
+        // What StreamReader did for the whole file: a byte-order mark at the
+        // very start is not text.
+        if (start == 0 && text.Length > 0 && text[0] == (char)0xFEFF) text = text[1..];
+        var shown = 1;
+        foreach (var c in text) if (c == '\n') shown++;
+        return (text, shown, truncated);
+    }
+
+    /// <summary>The most of a log file the log window is ever sent, whatever <c>max</c> asks for.</summary>
+    private const int LogTailMaxBytes = 16 * 1024 * 1024;
 
     /// <summary>GET /api/history - what this account has watched lately, newest first.</summary>
     private void WriteHistory(HttpListenerContext ctx, AuthResult auth)
@@ -3087,7 +3314,7 @@ public sealed partial class ControlApi : IDisposable
             port = DlnaPort,
             // true when DLNA sits on a plain-HTTP port of its own
             // because the rest of the server moved to TLS
-            plainPort = Services.DlnaEndpoint.IsSeparate(_serverConfig),
+            plainPort = _dlnaSeparate,
             sharingAll = _dlnaShare.SharingAll(roots),
             folders = roots.Select(f => new
             {
@@ -3587,8 +3814,9 @@ public sealed partial class ControlApi : IDisposable
             return;
         }
 
-        // computed before UpdateSettings swaps the value in: a real change, so
-        // the dialog can say the new directory needs a restart to take effect
+        // Against the folder this run is using, which a save no longer moves:
+        // a restart is needed exactly when the two differ, so the dialog can
+        // say so - on a second save before restarting as much as on the first.
         var mediaRootChanged = s.MediaRoot is { Length: > 0 }
             && !string.Equals(
                 Path.GetFullPath(Path.IsPathRooted(s.MediaRoot) ? s.MediaRoot : Path.Combine(_baseDirectory, s.MediaRoot)),
@@ -3675,9 +3903,13 @@ public sealed partial class ControlApi : IDisposable
         }
 
         // Network announcement toggles live too. Applied before the config is
-        // saved so a responder that can't take its ports — another Bonjour
-        // stack already holding them — is reported rather than persisted as
-        // on while nothing is actually announcing.
+        // saved so that announcement nothing can carry out — every responder
+        // it asks for unable to take its port or join its group — is reported
+        // rather than persisted as on while nothing is actually announcing.
+        // (This catch was dead until Restart learned to throw for it: each
+        // responder swallows its own failure. See DiscoveryService.Restart.
+        // One responder failing while another announces is logged, not
+        // reported here.)
         if (s.DiscoveryEnabled is bool wantAnnounce && Discovery is not null
             && wantAnnounce != _serverConfig.Discovery.Enabled)
         {
@@ -3712,6 +3944,15 @@ public sealed partial class ControlApi : IDisposable
                     ? $"serving {_library.All.Count} library folder(s) to the local network — DLNA has no sign-in"
                     : "off");
         }
+        // Switched on, and only this machine can reach it: the save stands -
+        // saving it on is what makes the next start ask Windows for the port -
+        // but the dialog is told, rather than left to find out from a
+        // television that sees the server and is refused by it.
+        var dlnaNeedsRestart = dlnaChanged && _serverConfig.Discovery.Dlna && _dlnaLocalOnly;
+        if (dlnaNeedsRestart)
+            Log.Warn("dlna", $"DLNA is on, but port {DlnaPort} is open to this computer only until the server "
+                             + "restarts - Windows has not allowed it on the network yet, and the server asks for "
+                             + "that when it starts");
 
         _serverConfig.UpdateSettings(s);
 
@@ -3760,6 +4001,7 @@ public sealed partial class ControlApi : IDisposable
             mediaRootChanged,
             httpsChanged,
             httpsEnabled = _serverConfig.Https.Enabled,
+            dlnaNeedsRestart,
             minimizeToTray = trayNow,
             note = controlPortChanged ? "control port applies after the server process restarts" : null,
         });
@@ -3820,6 +4062,14 @@ public sealed partial class ControlApi : IDisposable
             return;
         }
 
+        // Held from before the cancel until the loop below is done, whichever
+        // way it ends. Stopping the encoders once was not enough: a player
+        // still on the film asked for a segment that had just been deleted,
+        // and the seek-ahead that answers it started a new encoder into this
+        // folder - whose open files then failed every retry below, leaving
+        // half a folder and an orphan encoding to the end of the film. See
+        // FfmpegManager.HoldForRemoval.
+        using var hold = _ffmpeg?.HoldForRemoval(name);
         if (_ffmpeg?.CancelVod(name) == true)
             Thread.Sleep(300); // give the killed process a moment to release handles
 
@@ -4015,9 +4265,46 @@ public sealed partial class ControlApi : IDisposable
         }
 
         var terms = query.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        const int cap = 300;
-        var deadline = DateTime.UtcNow.AddSeconds(5);
+        var (files, folders, scanned, truncated, timedOut) =
+            WalkLibrary(roots, terms, cap: 300, deadline: DateTime.UtcNow.AddSeconds(5));
 
+        WriteJson(res, 200, new
+        {
+            query,
+            // echoed back so a result arriving late can be matched to the
+            // scope it was asked for, not the one now on screen
+            folder = scope,
+            files,
+            folders,
+            scanned,
+            // "300 of them" and "as far as I got in 5 seconds" are different
+            // answers and the dashboard says which
+            truncated,
+            timedOut,
+        });
+    }
+
+    /// <summary>
+    /// The walk behind <see cref="SearchLibrary"/>: every folder under the
+    /// roots whose name matches, and every playable file whose name or title
+    /// does, until the cap or the deadline stops it.
+    ///
+    /// Both limits are checked for every match and every file, not only
+    /// between folders. They used to be checked only as each folder was
+    /// taken off the stack, so one folder was always walked to its end: a
+    /// camera folder of 20,000 photos came back whole, each file stat'ed on
+    /// the way (slow on a network drive, for a request holding a thread),
+    /// and - since nothing was left on the stack to trip the check - reported
+    /// as complete, truncated: false. Now the walk stops the moment the cap is
+    /// reached, or the clock runs out, wherever it is, and says which.
+    ///
+    /// <paramref name="now"/> is the clock, for the tests; the server passes
+    /// nothing and gets the real one.
+    /// </summary>
+    internal static (List<object> Files, List<object> Folders, int Scanned, bool Truncated, bool TimedOut)
+        WalkLibrary(IEnumerable<string> roots, string[] terms, int cap, DateTime deadline, Func<DateTime>? now = null)
+    {
+        now ??= () => DateTime.UtcNow;
         var files = new List<object>();
         var folders = new List<object>();
         var truncated = false;
@@ -4026,6 +4313,7 @@ public sealed partial class ControlApi : IDisposable
 
         bool Matches(string name) =>
             terms.All(t => name.Contains(t, StringComparison.OrdinalIgnoreCase));
+        bool Full() => files.Count + folders.Count >= cap;
 
         foreach (var root in roots)
         {
@@ -4033,10 +4321,10 @@ public sealed partial class ControlApi : IDisposable
             var stack = new Stack<string>();
             stack.Push(root);
 
-            while (stack.Count > 0)
+            while (stack.Count > 0 && !truncated && !timedOut)
             {
-                if (files.Count + folders.Count >= cap) { truncated = true; break; }
-                if (DateTime.UtcNow > deadline) { timedOut = true; break; }
+                if (Full()) { truncated = true; break; }
+                if (now() > deadline) { timedOut = true; break; }
 
                 var dir = stack.Pop();
                 string[] subdirs, entries;
@@ -4054,12 +4342,15 @@ public sealed partial class ControlApi : IDisposable
                 {
                     stack.Push(sub);
                     var name = Path.GetFileName(sub);
-                    if (Matches(name))
-                        folders.Add(new { path = sub, name, folder = dir });
+                    if (!Matches(name)) continue;
+                    folders.Add(new { path = sub, name, folder = dir });
+                    if (Full()) { truncated = true; break; }
                 }
+                if (truncated) break;
 
                 foreach (var file in entries)
                 {
+                    if (now() > deadline) { timedOut = true; break; }
                     scanned++;
                     var name = Path.GetFileName(file);
                     var title = Media.StreamTitle.PrettifyFile(name);
@@ -4069,24 +4360,11 @@ public sealed partial class ControlApi : IDisposable
                     long size;
                     try { size = new FileInfo(file).Length; } catch { size = 0; }
                     files.Add(new { path = file, name, title, kind, size, folder = dir });
+                    if (Full()) { truncated = true; break; }
                 }
             }
         }
-
-        WriteJson(res, 200, new
-        {
-            query,
-            // echoed back so a result arriving late can be matched to the
-            // scope it was asked for, not the one now on screen
-            folder = scope,
-            files,
-            folders,
-            scanned,
-            // "300 of them" and "as far as I got in 5 seconds" are different
-            // answers and the dashboard says which
-            truncated,
-            timedOut,
-        });
+        return (files, folders, scanned, truncated, timedOut);
     }
 
     private static string? KindOf(string name) => Path.GetExtension(name).ToLowerInvariant() switch
@@ -4285,7 +4563,12 @@ public sealed partial class ControlApi : IDisposable
             //
             // A requested height is a genuine reason to encode: scaling is the
             // one thing sending the original cannot do.
-            if (height == 0 && req.prepare != true && _ffmpeg.CanPlayDirectly(file))
+            //
+            // The same cached decision /api/file makes (PlaysDirectly), so the
+            // two cannot disagree, and the probe this may cost is the only one
+            // the file needs. The viewing is recorded by /api/file when the
+            // player fetches it, not here - handing over a link is not watching.
+            if (height == 0 && req.prepare != true && PlaysDirectly(file))
             {
                 WriteJson(res, 200, new
                 {
@@ -4847,7 +5130,18 @@ public sealed partial class ControlApi : IDisposable
                 {
                     Log.Debug("dlna", $"serving the conversion of {Path.GetFileName(file)} " +
                                       $"({transcode.TotalBytes / (1024 * 1024)} MB, full resolution)");
-                    dlna.ServeTranscode(ctx, transcode, Sent);
+                    // The touch above marks the moment the request arrived,
+                    // and a set reads a film through one long GET - so forty
+                    // minutes in, the sweep saw a conversion forty minutes
+                    // idle and deleted it under the set, which stopped
+                    // mid-film. Held for as long as this response is open, and
+                    // touched again when it ends, so the cache counts its age
+                    // from when the set stopped reading rather than started.
+                    var conversionDir = Path.GetDirectoryName(transcode.Parts[0].Path)!;
+                    using (_ffmpeg?.HoldVod(Path.GetFileName(conversionDir)))
+                        dlna.ServeTranscode(ctx, transcode, Sent);
+                    try { Directory.SetLastWriteTimeUtc(conversionDir, DateTime.UtcNow); }
+                    catch { }
                 }
                 else Dlna.DlnaService.ServeFile(ctx, file, Sent);
                 return;
@@ -4886,10 +5180,20 @@ public sealed partial class ControlApi : IDisposable
             // users.json is read from — so a Restart could come back as a
             // server with no accounts, offering to create an administrator.
             // The working directory alone is not the same instruction.
-            var args = Environment.GetCommandLineArgs().Skip(1)
-                .Select(a => "'" + a.Replace("'", "''") + "'")
-                .ToArray();
-            var argList = args.Length > 0 ? " -ArgumentList " + string.Join(",", args) : "";
+            //
+            // And as ONE string, already quoted for the Windows command line.
+            // They used to go over as a PowerShell list, one element per
+            // argument, and Windows PowerShell 5.1's Start-Process joins that
+            // list with spaces and quotes nothing - measured, a path element
+            // came out on the new process's command line bare. The logon entry
+            // names the config in the installer's own folder, "j0kers Media
+            // Server", so a server started by Windows came back from Restart
+            // as three arguments where there had been one: "Unknown option:
+            // Media", exit 1, and nothing running until somebody noticed. A
+            // single string is passed through untouched, so the quoting that
+            // reaches the new process is the quoting written here.
+            var commandLine = WindowsCommandLine(Environment.GetCommandLineArgs().Skip(1));
+            var argList = commandLine.Length > 0 ? " -ArgumentList '" + commandLine.Replace("'", "''") + "'" : "";
 
             var script =
                 $"Wait-Process -Id {pid} -Timeout 60 -ErrorAction SilentlyContinue; " +
@@ -4911,6 +5215,40 @@ public sealed partial class ControlApi : IDisposable
             Log.Warn("control", $"could not schedule a restart: {ex.Message}");
             return false;
         }
+    }
+
+    /// <summary>
+    /// Arguments written as one Windows command line, each in double quotes,
+    /// so that the program receiving it splits it back into exactly these
+    /// (the CommandLineToArgvW rules every .NET and C program parses by).
+    /// Inside the quotes a double quote is escaped with a backslash, and so is
+    /// any run of backslashes that ends up in front of one - the closing quote
+    /// included, or a folder path ending in "\" would swallow it.
+    /// </summary>
+    internal static string WindowsCommandLine(IEnumerable<string> args)
+    {
+        var sb = new StringBuilder();
+        foreach (var arg in args)
+        {
+            if (sb.Length > 0) sb.Append(' ');
+            sb.Append('"');
+            var backslashes = 0;
+            foreach (var c in arg)
+            {
+                if (c == '\\') { backslashes++; continue; }
+                if (c == '"')
+                {
+                    sb.Append('\\', backslashes * 2 + 1).Append('"');
+                }
+                else
+                {
+                    sb.Append('\\', backslashes).Append(c);
+                }
+                backslashes = 0;
+            }
+            sb.Append('\\', backslashes * 2).Append('"');
+        }
+        return sb.ToString();
     }
 
     private static void WriteXml(HttpListenerResponse res, int status, string xml)
@@ -4954,7 +5292,7 @@ public sealed partial class ControlApi : IDisposable
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
             cts.CancelAfter(TimeSpan.FromSeconds(10)); // a tuner on the LAN answers instantly or not at all
-            var lineup = await Media.Providers.HdhrTuner.ReadAsync(host, _providerHttp, cts.Token);
+            var lineup = await Media.Providers.HdhrTuner.ReadAsync(host, _tunerHttp, cts.Token);
 
             var existing = (_ffmpeg?.Channels ?? new List<(Media.FfmpegManager.ChannelDef, string, string)>())
                 .Select(c => c.Item1.Url).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -4993,6 +5331,31 @@ public sealed partial class ControlApi : IDisposable
             WriteJson(res, 502, new { error = ex.Message });
         }
     }
+
+    /// <summary>
+    /// The client a tuner is read with. It used to be the providers' client,
+    /// whose connect-time guard refuses every private address - and a tuner
+    /// is nothing but a private address, so every import failed with "it
+    /// resolves inside this network" after the endpoint had just checked that
+    /// it did. This one allows exactly what <see cref="Services.PrivateNetwork.IsLanDevice"/>
+    /// does and nothing else, checked again on the address actually dialled.
+    ///
+    /// No redirects: a tuner has no reason to send one, and following it is
+    /// how a LAN address would be turned into a fetch from somewhere else.
+    ///
+    /// <paramref name="dial"/> is for the tests, which have no tuner on a LAN
+    /// to point at: it makes the connection once the guard has approved the
+    /// address, so a fake on loopback can stand in for the device.
+    /// </summary>
+    internal static HttpClient TunerClient(
+        Func<SocketsHttpConnectionContext, CancellationToken, ValueTask<Stream>>? dial = null) =>
+        new(Services.PrivateNetwork.GuardLanDevices(new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+            ConnectCallback = dial,
+        }))
+        { Timeout = TimeSpan.FromSeconds(20) };
 
     /// <summary>
     /// POST /api/channels/import — saves a batch of channels idle, the way
@@ -5079,7 +5442,12 @@ public sealed partial class ControlApi : IDisposable
 
             var name = string.IsNullOrWhiteSpace(req?.name) ? channel.Name : req!.name!.Trim();
             var sig = _mediaLinks.SignUrl(TvScope(provider.Id, channel.Id));
-            var url = $"{Services.UrlScheme.Prefix}127.0.0.1:{_config.Port}/api/tv/watch" +
+            // The port being listened on, not the configured one: a new port
+            // saved in the Config dialog is already in _config and nothing is
+            // listening there until the restart. Either way the port is put
+            // right when the channel starts (FfmpegManager.OwnUrlFor), so a
+            // later port change does not strand this pin.
+            var url = $"{Services.UrlScheme.Prefix}127.0.0.1:{_boundPort}/api/tv/watch" +
                       $"?provider={Uri.EscapeDataString(provider.Id)}&id={Uri.EscapeDataString(channel.Id)}" +
                       $"&s={Uri.EscapeDataString(sig)}";
 
@@ -5163,15 +5531,59 @@ public sealed partial class ControlApi : IDisposable
             // Never hand over something a player cannot open: a black
             // rectangle reads as a broken server, where a wait only reads as a
             // slow one. Anything uncertain is left to the conversion path.
-            if (_ffmpeg?.CanPlayDirectly(full) != true)
+            if (!PlaysDirectly(full))
             {
                 WriteJson(res, 415, new { error = "this file needs converting before it can be played directly" });
                 return;
             }
-            Dlna.DlnaService.ServeFile(ctx, full, dlnaHeaders: false);
+
+            // Watching, and counted as watching: Recently Watched, a place to
+            // resume from, a row in Sessions, and a reason for the silence
+            // watch not to stop the server mid-film. This route recorded none
+            // of it. The TV proxy and DLNA both note their viewings; this is
+            // the path a browser takes for a file it plays as it stands, and
+            // PlayFile left the recording to "the viewing that follows", which
+            // on this path never did it. Every Range request is part of the
+            // same viewing (same client, file and player), so a seek adds to
+            // it rather than starting another, and the bytes are reported as
+            // they go, the way DLNA's are - one response can be a whole film.
+            var viewing = _services.Viewers.Note(ctx, full, auth.Name, bytes: 0, create: true,
+                                                 protocol: "file", file: full);
+            void Sent(long sent)
+            {
+                _services.Served.Add(sent);
+                // paused past the window and swept: the response is still
+                // open, so the rest of it is a viewing again
+                if (!_services.Viewers.Progress(viewing, sent))
+                    viewing = _services.Viewers.Note(ctx, full, auth.Name, bytes: sent, create: true,
+                                                     protocol: "file", file: full);
+            }
+            Dlna.DlnaService.ServeFile(ctx, full, Sent, dlnaHeaders: false);
         }
         catch (Exception ex) { BadRequest(res, ex.Message); }
     }
+
+    /// <summary>
+    /// Whether a browser plays this file as it stands - decided once per
+    /// version of the file, not once per request.
+    ///
+    /// /api/file asked ffmpeg directly, and that probe has no cache: every GET
+    /// started an ffprobe and waited for it before the first byte, and a
+    /// browser sends a new Range request for every seek (and usually one for
+    /// the index at the end of an MP4). While a batch of encodes has the disk,
+    /// a probe can run past its timeout - which came back as "no codecs", so a
+    /// seek part way through a film was answered 415, "needs converting", and
+    /// the player gave up on a file it had been playing a moment before.
+    ///
+    /// The codec cache keys by path, size and date, so the first answer stands
+    /// until the file changes, and a failed probe is never cached - it cannot
+    /// turn a file that was playing into one that is not. The container is
+    /// checked before the cache, and an answer from before the pixel format
+    /// was recorded is read again once per run, not per request: see
+    /// TvCodecs.PlaysInBrowserAsItStands.
+    /// </summary>
+    private bool PlaysDirectly(string file) =>
+        _tvCodecs is null ? _ffmpeg?.CanPlayDirectly(file) == true : _tvCodecs.PlaysInBrowserAsItStands(file);
 
     private void ServeImage(HttpListenerContext ctx, AuthResult auth)
     {
@@ -5192,6 +5604,18 @@ public sealed partial class ControlApi : IDisposable
             }
             res.StatusCode = 200;
             res.ContentType = mime;
+            // A picture, never a page. This is served from the dashboard's own
+            // origin, and an SVG is a document that can carry script: opened on
+            // its own - the lightbox's "open image in new tab" - it ran as the
+            // viewer, cookie and all, able to call this API. Anyone who can put
+            // a file in a shared folder could put one there. The sandbox gives
+            // such a document no origin and no script; default-src 'none'
+            // stops it loading anything; the inline-style allowance is what an
+            // SVG's own styling needs to draw. None of it touches an <img>,
+            // which is how the library shows these. nosniff stops a browser
+            // deciding a file is something other than the type sent.
+            res.Headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+            res.Headers["X-Content-Type-Options"] = "nosniff";
             using var fs = System.IO.File.OpenRead(full);
             res.ContentLength64 = fs.Length;
             fs.CopyTo(res.OutputStream);
@@ -5235,7 +5659,12 @@ public sealed partial class ControlApi : IDisposable
             return;
         }
 
-        switch (mount.Source.ToLowerInvariant())
+        // Null-guarded because the declaration's "= \"tone\"" does not survive
+        // a body that says "source": null - the deserialiser writes the null
+        // straight in, nullable annotations or not - and the switch then threw
+        // a 500 "internal error" where every other bad field here is a 400
+        // saying what is wrong. Null falls to the default case below.
+        switch ((mount.Source ?? "").ToLowerInvariant())
         {
             case "tone":
                 if (mount.ToneFrequencyHz is < 20 or > 4000)
@@ -5671,11 +6100,24 @@ public sealed partial class ControlApi : IDisposable
         int media = 0, needs = 0, done = 0, ready = 0, unknown = 0;
         int pcOnly = 0, dlnaOnly = 0;
         const int cap = 4000;
+        // Every file looked at counts toward a cap of its own, not only the
+        // videos. The cap above never limited a tree with no videos in it: a
+        // file that was not one went round the loop before the check, so the
+        // Transcodes window opened at C:\ walked all of Windows, Program Files
+        // and ProgramData for every row - measured here, 176,611 files under
+        // C:\Windows alone, 23 seconds cold and 9 warm - before it answered,
+        // and the heartbeat's refresh started the next walk six seconds later.
+        // 20,000 files is five for every video the count stops at, which a
+        // film library's posters, subtitles and .nfo files stay well inside;
+        // under C:\Windows it is about two seconds cold.
+        const int walkCap = 20_000;
+        var walked = 0;
         var capped = false;
         try
         {
             foreach (var f in Directory.EnumerateFiles(dir, "*", MediaWalk))
             {
+                if (++walked > walkCap) { capped = true; break; }
                 if (!TranscodableExt.Contains(Path.GetExtension(f))) continue;
                 if (media >= cap) { capped = true; break; }
                 media++;
@@ -5698,7 +6140,14 @@ public sealed partial class ControlApi : IDisposable
     /// probed. Bounded: a queue that grows without limit because somebody
     /// clicked through a hundred folders is a leak, and the sweep will reach
     /// the rest anyway.
-    private readonly System.Collections.Concurrent.ConcurrentQueue<string> _probeWanted = new();
+    ///
+    /// Newest first. It was first come, first served, and each one walked to
+    /// the end before the next was looked at - so going Up to a drive root and
+    /// then opening a folder on it put that folder behind a walk of the whole
+    /// drive, minutes of probing, while its pills said "checking…" and the
+    /// panel's allowance of re-polls ran out. The folder somebody opened last
+    /// is the one they are looking at. See DrainRequested.
+    private readonly System.Collections.Concurrent.ConcurrentStack<string> _probeWanted = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _probeQueued =
         new(StringComparer.OrdinalIgnoreCase);
 
@@ -5742,7 +6191,7 @@ public sealed partial class ControlApi : IDisposable
             foreach (var stale in _probeDone.Where(e => DateTime.UtcNow - e.Value > ProbeRecordExpiry).Select(e => e.Key).ToList())
                 _probeDone.TryRemove(stale, out _);
         if (!_probeQueued.TryAdd(dir, 0)) return;             // asked for already
-        _probeWanted.Enqueue(dir);
+        _probeWanted.Push(dir);
     }
     /// <summary>
     /// Walks the library in the background and probes what the codec cache
@@ -5865,9 +6314,18 @@ public sealed partial class ControlApi : IDisposable
             // else and *during* the sweep as well. Draining only between sweeps
             // would put a folder somebody just opened behind however many hours
             // the library takes - the same wait this is meant to remove.
+            // Newest first, and a walk gives way part way through. Taken one
+            // folder at a time, first come first served, a drive root asked for
+            // before a folder on it was walked to the end - every file on the
+            // drive - before the folder somebody had just opened was looked at.
+            // Now the newest request is taken first, and between chunks a walk
+            // in progress checks for anything asked for since and serves that
+            // before carrying on (the library sweep below already did the same
+            // for the requests themselves). What the later walk already probed
+            // is a dictionary hit when the earlier one comes back to it.
             async Task DrainRequested()
             {
-                while (_probeWanted.TryDequeue(out var wanted))
+                while (_probeWanted.TryPop(out var wanted))
                 {
                     // Deliberately still marked as queued while the walk runs.
                     // The panel asks again every few seconds while any pill is
@@ -5878,7 +6336,16 @@ public sealed partial class ControlApi : IDisposable
                     {
                         try
                         {
-                            await ProbeMany(Directory.EnumerateFiles(wanted, "*", opts)).ConfigureAwait(false);
+                            var chunk = new List<string>(64);
+                            foreach (var file in Directory.EnumerateFiles(wanted, "*", opts))
+                            {
+                                chunk.Add(file);
+                                if (chunk.Count < 64) continue;
+                                await ProbeMany(chunk).ConfigureAwait(false);
+                                chunk.Clear();
+                                if (!_probeWanted.IsEmpty) await DrainRequested().ConfigureAwait(false);
+                            }
+                            if (chunk.Count > 0) await ProbeMany(chunk).ConfigureAwait(false);
                         }
                         catch { /* a folder that vanished or refused: on to the next */ }
                         _tvCodecs.Save();
@@ -6001,8 +6468,16 @@ public sealed partial class ControlApi : IDisposable
         var tail = unique.Skip(firstBatch).ToList();
 
         var needsConv = head.Where(NotReadyForEither).ToList();
-        var queued = _ffmpeg.QueueVod(needsConv);
-        HideConversions(needsConv);
+        // Hide what was queued, not what was chosen. The two differ whenever
+        // a chosen file is already converted - QueueVod passes over it - and
+        // hiding the whole choice took conversions out of the HLS list that
+        // somebody had published by playing them, on every press. It chose
+        // them at all because the conversion index was not built with DLNA
+        // off, and it is still a few seconds behind a conversion that has
+        // just finished; neither is a reason to unlist anything.
+        var accepted = new List<string>();
+        var queued = _ffmpeg.QueueVod(needsConv, accepted);
+        HideConversions(accepted);
 
         // The rest, off the request thread. Queued in small groups so the
         // panel fills in steadily instead of in one lump at the end, and so a
@@ -6014,6 +6489,7 @@ public sealed partial class ControlApi : IDisposable
             {
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 var group = new List<string>();
+                var taken = new List<string>();       // what was queued - the only thing to hide; see above
                 var added = 0;
                 try
                 {
@@ -6021,14 +6497,15 @@ public sealed partial class ControlApi : IDisposable
                     {
                         if (NotReadyForEither(f)) group.Add(f);
                         if (group.Count < 10) continue;
-                        added += ffmpeg.QueueVod(group);
-                        HideConversions(group);
+                        added += ffmpeg.QueueVod(group, taken);
+                        HideConversions(taken);
                         group.Clear();
+                        taken.Clear();
                     }
                     if (group.Count > 0)
                     {
-                        added += ffmpeg.QueueVod(group);
-                        HideConversions(group);
+                        added += ffmpeg.QueueVod(group, taken);
+                        HideConversions(taken);
                     }
                 }
                 catch (Exception ex) { Log.Warn("control", $"transcode: queueing the rest failed: {ex.Message}"); }
@@ -6089,7 +6566,8 @@ public sealed partial class ControlApi : IDisposable
     /// <summary>
     /// POST /api/transcode/delete { paths:[...] } — moves the chosen files and
     /// folders to the Windows Recycle Bin (an undoable delete). The dashboard
-    /// confirms first. The server's own config/state directory is refused, so a
+    /// confirms first. The server's own config/state directory is refused - it,
+    /// anything in it, and any folder it is in (see TouchesServerFolder) - so a
     /// stray tick can't recycle the library index or the accounts.
     /// </summary>
     private void TranscodeDelete(HttpListenerContext ctx)
@@ -6106,14 +6584,37 @@ public sealed partial class ControlApi : IDisposable
             if (string.IsNullOrWhiteSpace(p) || !TryLocalPath(p, out var full)) { errors.Add($"{p}: not a local path"); continue; }
             var fp = Path.GetFullPath(full);
             // never let the app recycle its own config/state (users, library, keys)
-            if (fp.Equals(configDir, StringComparison.OrdinalIgnoreCase)
-                || fp.StartsWith(configDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-            { errors.Add($"{Path.GetFileName(fp)}: refused (inside the server's own folder)"); continue; }
+            if (TouchesServerFolder(fp, configDir))
+            {
+                errors.Add($"{(Path.GetFileName(Path.TrimEndingDirectorySeparator(fp)) is { Length: > 0 } n ? n : fp)}: "
+                           + "refused (it would take the server's own folder, or part of it, with it)");
+                continue;
+            }
             try { Services.RecycleBin.Send(fp); deleted++; }
             catch (Exception ex) { errors.Add($"{Path.GetFileName(fp)}: {ex.Message}"); }
         }
         Log.Info("control", $"delete to recycle bin: {deleted} item(s), {errors.Count} error(s)");
         WriteJson(res, 200, new { deleted, errors });
+    }
+
+    /// <summary>
+    /// Whether recycling <paramref name="path"/> would take the server's own
+    /// folder with it: the folder itself, anything inside it, or anything it is
+    /// inside.
+    ///
+    /// Only the first two were refused. A folder that CONTAINS the server's
+    /// passed - the server in D:\Media\j0kers and D:\Media ticked in the
+    /// Transcodes panel - and went to the Recycle Bin with users.json,
+    /// library.json and the media-link key inside it, so the next start had no
+    /// accounts and offered first-admin setup to whoever got there first. A
+    /// drive root is the extreme case of the same thing; IsUnder handles the
+    /// separator a root already ends in.
+    /// </summary>
+    internal static bool TouchesServerFolder(string path, string serverFolder)
+    {
+        var target = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        var server = Path.TrimEndingDirectorySeparator(Path.GetFullPath(serverFolder));
+        return IsUnder(server, target) || IsUnder(target, server);
     }
 
     private sealed class TranscodeRemoveRequest
@@ -6192,7 +6693,17 @@ public sealed partial class ControlApi : IDisposable
     private static bool IsOwnMediaUrl(string src, HttpListenerContext ctx)
     {
         if (src.Length == 0) return false;
-        if (src.StartsWith('/')) return !src.StartsWith("//", StringComparison.Ordinal);
+        // A path is judged as the browser will read it, not as it is spelled.
+        // The page hands src to the browser, and a browser's URL parser drops
+        // tabs and newlines wherever they are and reads '\' as '/' - so
+        // "/\evil.example/x" and "/<tab>/evil.example/x" are both "//evil.
+        // example/x" by the time anything loads, another site, and both passed
+        // a test that only looked for "//".
+        if (src.StartsWith('/'))
+        {
+            var asBrowserReadsIt = src.Replace("\t", "").Replace("\n", "").Replace("\r", "").Replace('\\', '/');
+            return !asBrowserReadsIt.StartsWith("//", StringComparison.Ordinal);
+        }
         if (!Uri.TryCreate(src, UriKind.Absolute, out var u)) return false;
         if (u.Scheme is not ("http" or "https")) return false;
         if (!string.IsNullOrEmpty(u.UserInfo)) return false;
@@ -6447,7 +6958,7 @@ public sealed partial class ControlApi : IDisposable
     private void WriteTvPlaylistM3u(HttpListenerContext ctx)
     {
         var token = $"exp={ctx.Request.QueryString["exp"]}&sig={ctx.Request.QueryString["sig"]}";
-        var host = (ctx.Request.Headers["Host"] ?? ctx.Request.Url?.Host ?? BoundHost).Split(':')[0];
+        var host = LinkHost(ctx.Request, BoundHost);
         var baseUrl = $"{Services.UrlScheme.Prefix}{host}:{_serverConfig.Hls.Port}";
 
         var sb = new System.Text.StringBuilder();
@@ -6462,6 +6973,23 @@ public sealed partial class ControlApi : IDisposable
             }
         WriteText(ctx.Response, 200, "application/x-mpegurl", sb.ToString());
     }
+
+    /// <summary>
+    /// The host a client reached this server by, ready to be put back into a
+    /// link for it: the playlist's channel URLs, the service URLs in a UPnP
+    /// description.
+    ///
+    /// From the request URL, which http.sys builds out of the Host header and
+    /// which keeps an IPv6 address in its brackets. Both callers used to cut
+    /// the Host header at its first colon to drop the port - and an IPv6
+    /// address is made of colons, so "[2001:db8::5]:9090" became "[2001" and
+    /// every link handed to that client was "http://[2001:9091/…", which
+    /// nothing can open. The listener binds all interfaces when asked to, so
+    /// an IPv6 client does get this far. The control port's own description
+    /// has always read it this way.
+    /// </summary>
+    internal static string LinkHost(HttpListenerRequest request, string fallback) =>
+        request.Url?.Host is { Length: > 0 } host ? host : fallback;
 
     public void Dispose()
     {
@@ -6478,9 +7006,16 @@ public sealed partial class ControlApi : IDisposable
         }
         try { _listener?.Stop(); } catch { }
         try { StopDlnaListener(); } catch { }
+        // The live-TV recordings, their recorder tasks and the folder they sit
+        // in. Never done before: a set watching a channel when the server
+        // stopped left its recording - gigabytes, for an evening's viewing -
+        // in the media root, and only a later start with DLNA on cleared it.
+        // After both listeners, so no request can start a new buffer behind it.
+        try { _dlnaLive?.Dispose(); } catch { }
         try { _providers.Dispose(); } catch { }
         try { _providerHttp.Dispose(); } catch { }
         try { _proxyHttp.Dispose(); } catch { }
+        try { _tunerHttp.Dispose(); } catch { }
     }
 }
 

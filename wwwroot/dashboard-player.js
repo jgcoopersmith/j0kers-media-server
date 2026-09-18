@@ -412,8 +412,12 @@ async function playHls(url, startAt, tab) {
   noteWatched();
 
   // The whole point: the media plays in its own tab, not in the card.
-  // pick up where this was left, unless the caller asked for a specific spot
-  const resumeAt = startAt > 0 ? startAt : resumePointFor(currentHlsStream);
+  // pick up where this was left, unless the caller asked for a specific spot.
+  // A file handed over as it stands (/api/file) has no stream: its history
+  // entry, and the position the watch tab reports, are under its path.
+  const direct = /^\/api\/file\?(?:[^#]*&)?path=([^&#]*)/.exec(url || "");
+  const resumeAt = startAt > 0 ? startAt
+    : resumePointFor(currentHlsStream || (direct ? decodeURIComponent(direct[1].replace(/\+/g, " ")) : null));
   if (pointPlayerTab(tab ?? openPlayerTab(), url, playerTitleFor(url), resumeAt)) return;
 
   // A blocked popup shouldn't mean nothing happens, so the card's player is
